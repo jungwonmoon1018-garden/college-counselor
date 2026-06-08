@@ -32,3 +32,5 @@ real student PII and per-student BYOK API keys. Never commit them.
 See [`docs/SESSION-SUMMARY.md`](./docs/SESSION-SUMMARY.md) for an architecture
 and API orientation aimed at building macOS, Windows, and Android clients
 against this backend.
+
+Also, add the encryption key and IEDPS API key in the .env.example file. Do not touch the ANTHROPIC_API_KEY.
