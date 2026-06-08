@@ -1,0 +1,57 @@
+name: CollegeCounselor
+options:
+  bundleIdPrefix: ai.collegecounselor
+  deploymentTarget:
+    iOS: "16.0"
+    macOS: "13.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+  knownRegions:
+    - en
+    - ko
+    - Base
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "" # ← set your Apple Developer Team ID, or sign manually in Xcode
+    CODE_SIGN_STYLE: Automatic
+    GENERATE_INFOPLIST_FILE: NO
+    SWIFT_STRICT_CONCURRENCY: minimal
+
+# ────────────────────────────────────────────────────────────────────────
+# Both apps compile the same Sources/Shared tree — one SwiftUI codebase,
+# two native targets. Platform-specific bits live behind #if os(...) guards.
+# ────────────────────────────────────────────────────────────────────────
+targets:
+  CollegeCounselor-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/Shared
+      - path: Resources/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.collegecounselor.app
+        PRODUCT_NAME: College Counselor
+        INFOPLIST_FILE: Platforms/iOS/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+
+  CollegeCounselor-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Shared
+      - path: Resources/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.collegecounselor.app
+        PRODUCT_NAME: College Counselor
+        INFOPLIST_FILE: Platforms/macOS/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Platforms/macOS/CollegeCounselor.entitlements
+        ENABLE_HARDENED_RUNTIME: YES

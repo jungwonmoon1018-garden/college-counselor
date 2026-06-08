@@ -1,0 +1,43 @@
+name: CollegeCounselorWeb
+options:
+  bundleIdPrefix: ai.collegecounselor.web
+  deploymentTarget:
+    iOS: "16.0"
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "" # ← set your Apple Developer Team ID, or sign manually
+    CODE_SIGN_STYLE: Automatic
+    GENERATE_INFOPLIST_FILE: NO
+
+# Quick webview shell: both apps wrap the existing React SPA (frontend/) in a
+# native WKWebView. Zero JS-build coupling — point CC_FRONTEND_URL at the
+# Vite dev server or a hosted deployment.
+targets:
+  CollegeCounselorWeb-iOS:
+    type: application
+    platform: iOS
+    sources: [Sources/Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.collegecounselor.web.app
+        PRODUCT_NAME: College Counselor
+        INFOPLIST_FILE: Platforms/iOS/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  CollegeCounselorWeb-macOS:
+    type: application
+    platform: macOS
+    sources: [Sources/Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.collegecounselor.web.app
+        PRODUCT_NAME: College Counselor
+        INFOPLIST_FILE: Platforms/macOS/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Platforms/macOS/App.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
