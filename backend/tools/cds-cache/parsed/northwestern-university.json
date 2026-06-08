@@ -1,0 +1,33 @@
+{
+  "school": "Northwestern University",
+  "slug": "northwestern-university",
+  "tier": "Sub-Ivy",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 49460,
+    "admitted": 3805,
+    "enrolled": 2104
+  },
+  "overallAdmitRate": 0.0769,
+  "yieldRate": 0.553,
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1570
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {},
+  "validation": {
+    "school": "Northwestern University",
+    "slug": "northwestern-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

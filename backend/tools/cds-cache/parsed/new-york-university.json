@@ -1,0 +1,53 @@
+{
+  "school": "New York University",
+  "slug": "new-york-university",
+  "tier": "T50",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_optional",
+  "b1": {
+    "applied": 110807,
+    "admitted": 10232,
+    "enrolled": 5666
+  },
+  "overallAdmitRate": 0.0923,
+  "yieldRate": 0.5538,
+  "enrolledSAT": {
+    "p25": 1480,
+    "p75": 1560
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 35
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "not_considered",
+    "gpa": "very_important",
+    "test_scores": "important",
+    "application_essay": "very_important",
+    "recommendations": "very_important",
+    "interview": "not_considered",
+    "ec": "considered",
+    "talent_ability": "considered",
+    "character": "very_important",
+    "first_generation": "considered",
+    "alumni_relation": "not_considered",
+    "geographical_residence": "considered",
+    "state_residency": "not_considered",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "considered"
+  },
+  "validation": {
+    "school": "New York University",
+    "slug": "new-york-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

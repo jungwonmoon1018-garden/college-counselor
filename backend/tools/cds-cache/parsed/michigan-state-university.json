@@ -1,0 +1,33 @@
+{
+  "school": "Michigan State University",
+  "slug": "michigan-state-university",
+  "tier": "T100",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 62116,
+    "admitted": 52672,
+    "enrolled": 9649
+  },
+  "overallAdmitRate": 0.848,
+  "yieldRate": 0.1832,
+  "enrolledSAT": {
+    "p25": 1100,
+    "p75": 1320
+  },
+  "enrolledACT": {
+    "p25": 24,
+    "p75": 32
+  },
+  "c7": {},
+  "validation": {
+    "school": "Michigan State University",
+    "slug": "michigan-state-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

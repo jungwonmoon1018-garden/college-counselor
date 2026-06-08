@@ -1,0 +1,63 @@
+# ═══════════════════════════════════════════════════════════
+# CADDY REVERSE PROXY — Automatic HTTPS for College Counselor
+# ═══════════════════════════════════════════════════════════
+#
+# Caddy auto-provisions TLS certificates via Let's Encrypt.
+# No certbot, no cron renewal — it just works.
+#
+# SETUP:
+#   1. Install Caddy: https://caddyserver.com/docs/install
+#   2. Replace "counselor.yourdomain.com" with your actual domain
+#   3. Ensure DNS A record points to this server's IP
+#   4. Run: caddy run --config Caddyfile
+#
+# Caddy will:
+#   - Obtain a Let's Encrypt TLS certificate automatically
+#   - Redirect HTTP → HTTPS
+#   - Proxy all requests to the Node.js backend on :3001
+#   - Add security headers (HSTS, etc.)
+#
+# For local development, use "localhost" instead of a domain.
+# ═══════════════════════════════════════════════════════════
+
+# ─── PRODUCTION ─────────────────────────────────────────────
+# Replace with your actual domain:
+counselor.yourdomain.com {
+	# Reverse proxy to the Node.js backend
+	reverse_proxy localhost:3001
+
+	# Security headers (complement Helmet.js)
+	header {
+		# HSTS — tell browsers to always use HTTPS (1 year)
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		# Prevent clickjacking
+		X-Frame-Options "DENY"
+		# Prevent MIME type sniffing
+		X-Content-Type-Options "nosniff"
+		# Referrer policy
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Remove Caddy server header
+		-Server
+	}
+
+	# Request size limit (match Express's 6MB limit)
+	request_body {
+		max_size 6MB
+	}
+
+	# Access logs
+	log {
+		output file /var/log/caddy/counselor-access.log {
+			roll_size 50MB
+			roll_keep 5
+		}
+	}
+}
+
+# ─── LOCAL DEVELOPMENT ──────────────────────────────────────
+# Uncomment below and comment out the production block above
+# to use Caddy locally with a self-signed cert:
+#
+# localhost {
+# 	reverse_proxy localhost:3001
+# }

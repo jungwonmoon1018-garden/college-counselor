@@ -1,0 +1,53 @@
+{
+  "school": "Rice University",
+  "slug": "rice-university",
+  "tier": "Sub-Ivy",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_optional",
+  "b1": {
+    "applied": 32473,
+    "admitted": 2597,
+    "enrolled": 1148
+  },
+  "overallAdmitRate": 0.08,
+  "yieldRate": 0.442,
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1600
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "very_important",
+    "gpa": "very_important",
+    "test_scores": "very_important",
+    "application_essay": "very_important",
+    "recommendations": "very_important",
+    "interview": "considered",
+    "ec": "very_important",
+    "talent_ability": "very_important",
+    "character": "very_important",
+    "first_generation": "considered",
+    "alumni_relation": "not_considered",
+    "geographical_residence": "considered",
+    "state_residency": "considered",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "considered"
+  },
+  "validation": {
+    "school": "Rice University",
+    "slug": "rice-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

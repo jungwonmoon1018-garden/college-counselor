@@ -1,0 +1,55 @@
+{
+  "school": "University of Wisconsin-Madison",
+  "slug": "university-of-wisconsin-madison",
+  "tier": "T100",
+  "year": 2023,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_optional",
+  "b1": {
+    "applied": 65933,
+    "admitted": 29784,
+    "enrolled": 8513
+  },
+  "overallAdmitRate": 0.4517,
+  "yieldRate": 0.2858,
+  "enrolledSAT": {
+    "p25": 1370,
+    "p75": 1490
+  },
+  "enrolledACT": {
+    "p25": 29,
+    "p75": 33
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "considered",
+    "gpa": "very_important",
+    "test_scores": "considered",
+    "application_essay": "important",
+    "recommendations": "important",
+    "interview": "not_considered",
+    "ec": "important",
+    "talent_ability": "considered",
+    "character": "important",
+    "first_generation": "considered",
+    "alumni_relation": "not_considered",
+    "geographical_residence": "considered",
+    "state_residency": "important",
+    "religious_affiliation": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "not_considered"
+  },
+  "parserNotes": [
+    "merged_form_fields"
+  ],
+  "validation": {
+    "school": "University of Wisconsin-Madison",
+    "slug": "university-of-wisconsin-madison",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

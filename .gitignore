@@ -1,0 +1,36 @@
+# ───────────────────────────────────────────────────────────────
+# Monorepo root ignore. Each package (backend/, frontend/) also keeps
+# its own .gitignore; these patterns are defense-in-depth so real
+# student PII and secrets can never reach a remote.
+# ───────────────────────────────────────────────────────────────
+
+# Dependencies
+**/node_modules/
+
+# Builds
+**/dist/
+
+# Environment / secrets
+**/.env
+**/.env.local
+*.enc.json
+**/.dev-encryption-key
+
+# Databases — contain real student PII + BYOK keys. NEVER commit.
+*.db
+*.db-wal
+*.db-shm
+**/data/
+**/.db-backups/
+
+# Generated / large artifacts
+**/generated/
+eng.traineddata
+
+# Logs
+*.log
+**/logs/
+
+# OS noise
+.DS_Store
+Thumbs.db

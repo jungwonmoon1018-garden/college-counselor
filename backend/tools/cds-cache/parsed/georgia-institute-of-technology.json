@@ -1,0 +1,81 @@
+{
+  "school": "Georgia Institute of Technology",
+  "slug": "georgia-institute-of-technology",
+  "tier": "T50",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 59789,
+    "admitted": 8413,
+    "enrolled": 3850
+  },
+  "overallAdmitRate": 0.16,
+  "yieldRate": 0.4576,
+  "enrolledACT": {
+    "p25": 30,
+    "p75": 35
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "not_considered",
+    "gpa": "very_important",
+    "test_scores": "considered",
+    "application_essay": "important",
+    "recommendations": "considered",
+    "interview": "not_considered",
+    "ec": "important",
+    "talent_ability": "considered",
+    "character": "very_important",
+    "first_generation": "considered",
+    "alumni_relation": "not_considered",
+    "geographical_residence": "considered",
+    "state_residency": "very_important",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "not_considered"
+  },
+  "validation": {
+    "school": "Georgia Institute of Technology",
+    "slug": "georgia-institute-of-technology",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": 0.1407,
+        "expected": 0.16,
+        "delta": -0.0193,
+        "note": "drift_exceeds_tolerance"
+      },
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": null,
+        "expected": {
+          "p25": 1390,
+          "p75": 1520
+        },
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.16,
+      "enrolledSAT": {
+        "p25": 1390,
+        "p75": 1520
+      }
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "overallAdmitRate": 0.1407
+  },
+  "enrolledSAT": {
+    "p25": 1390,
+    "p75": 1520
+  }
+}

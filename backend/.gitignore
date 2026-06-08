@@ -1,0 +1,25 @@
+node_modules/
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Dev-only persistent encryption key (auto-generated; never commit)
+.dev-encryption-key
+
+# Encrypted PII blobs / BYOK key material
+*.enc.json
+
+# DB backups (may contain PII)
+.db-backups/
+
+# Generated artifacts
+generated/
+
+# OCR model data (large binary)
+eng.traineddata
+
+# Logs
+*.log
+logs/

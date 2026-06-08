@@ -1,0 +1,43 @@
+{
+  "school": "University of Pennsylvania",
+  "slug": "university-of-pennsylvania",
+  "tier": "T20",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1600
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {},
+  "validation": {
+    "school": "University of Pennsylvania",
+    "slug": "university-of-pennsylvania",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.0587,
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.0587
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1600
+    }
+  },
+  "overallAdmitRate": 0.0587
+}

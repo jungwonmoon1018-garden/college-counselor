@@ -1,0 +1,259 @@
+{
+  "princeton-university": {
+    "expectedScope": "Princeton\\s+University",
+    "overallAdmitRate": 0.045,
+    "applied": 39644,
+    "admitted": 1782,
+    "enrolled": 1366,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1560
+    },
+    "sources": [
+      "https://ir.princeton.edu/document/491",
+      "https://nextgenadmit.com/princeton-admission-statistics/"
+    ]
+  },
+  "stanford-university": {
+    "expectedScope": "Stanford\\s+University",
+    "overallAdmitRate": 0.0361,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1580
+    },
+    "sources": [
+      "https://ucomm.stanford.edu/cds/"
+    ]
+  },
+  "harvard-university": {
+    "expectedScope": "Harvard\\s+University",
+    "overallAdmitRate": 0.0345,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1580
+    },
+    "sources": [
+      "https://oira.harvard.edu/common-data-set/"
+    ]
+  },
+  "yale-university": {
+    "expectedScope": "Yale\\s+University",
+    "overallAdmitRate": 0.045,
+    "applied": 51803,
+    "admitted": 2332,
+    "enrolled": 1641,
+    "enrolledSAT": {
+      "p25": 1490,
+      "p75": 1580
+    },
+    "sources": [
+      "https://oir.yale.edu/sites/default/files/cds_yale_2023-24_vf_20240320.pdf"
+    ]
+  },
+  "california-institute-of-technology": {
+    "expectedScope": "California\\s+Institute\\s+of\\s+Technology",
+    "overallAdmitRate": 0.029,
+    "enrolledSAT": {
+      "p25": 1530,
+      "p75": 1580
+    },
+    "sources": [
+      "https://iro.caltech.edu/documents/31490/Caltech_CDS_2023-2024_February_2025.pdf"
+    ]
+  },
+  "johns-hopkins-university": {
+    "expectedScope": "Johns\\s+Hopkins\\s+University",
+    "overallAdmitRate": 0.0644,
+    "enrolledSAT": {
+      "p25": 1520,
+      "p75": 1580
+    },
+    "sources": [
+      "https://oir.jhu.edu/common-data-set/"
+    ]
+  },
+  "duke-university": {
+    "expectedScope": "Duke\\s+University",
+    "overallAdmitRate": 0.0596,
+    "applied": 49469,
+    "admitted": 2948,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1570
+    },
+    "sources": [
+      "https://ira.duke.edu/sites/default/files/2024-04/CDS_2023-24.pdf"
+    ]
+  },
+  "university-of-pennsylvania": {
+    "expectedScope": "University\\s+of\\s+Pennsylvania",
+    "overallAdmitRate": 0.0587,
+    "applied": 59465,
+    "admitted": 3489,
+    "enrolled": 2416,
+    "enrolledSAT": {
+      "p25": 1500,
+      "p75": 1570
+    },
+    "sources": [
+      "https://ira.upenn.edu/penn-numbers/common-data-set"
+    ]
+  },
+  "columbia-university": {
+    "expectedScope": "Columbia\\s+(?:College|Engineering|University in the City)",
+    "actualScopeWarning": "Source PDF is Columbia General Studies; numbers do not represent Columbia College / SEAS",
+    "overallAdmitRate": 0.0389,
+    "applied": 60248,
+    "admitted": 2355,
+    "enrolledSAT": {
+      "p25": 1490,
+      "p75": 1560
+    },
+    "sources": [
+      "https://opir.columbia.edu/cds"
+    ]
+  },
+  "cornell-university": {
+    "expectedScope": "Cornell\\s+University",
+    "overallAdmitRate": 0.079,
+    "applied": 67846,
+    "admitted": 5358,
+    "enrolled": 3537,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1560
+    },
+    "sources": [
+      "https://irp.cornell.edu/common-data-set"
+    ]
+  },
+  "northwestern-university": {
+    "expectedScope": "Northwestern\\s+University",
+    "overallAdmitRate": 0.078,
+    "enrolledSAT": {
+      "p25": 1500,
+      "p75": 1570
+    },
+    "sources": [
+      "https://www.enrollment.northwestern.edu/data/2023-2024.pdf"
+    ]
+  },
+  "brown-university": {
+    "expectedScope": "Brown\\s+University",
+    "overallAdmitRate": 0.0523,
+    "applied": 51316,
+    "admitted": 2686,
+    "enrolled": 1695,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1560
+    },
+    "sources": [
+      "https://oir.brown.edu/sites/default/files/2020-04/CDS_2023_2024.pdf"
+    ]
+  },
+  "rice-university": {
+    "expectedScope": "Rice\\s+University",
+    "overallAdmitRate": 0.082,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1570
+    },
+    "sources": [
+      "https://oir.rice.edu/common-data-set"
+    ]
+  },
+  "carnegie-mellon-university": {
+    "expectedScope": "Carnegie\\s+Mellon\\s+University",
+    "overallAdmitRate": 0.1166,
+    "applied": 33941,
+    "admitted": 3959,
+    "enrolledSAT": {
+      "p25": 1510,
+      "p75": 1560
+    },
+    "sources": [
+      "https://www.cmu.edu/ira/CDS/cds_2324.html"
+    ]
+  },
+  "university-of-michigan": {
+    "expectedScope": "University\\s+of\\s+Michigan",
+    "overallAdmitRate": 0.2015,
+    "applied": 79743,
+    "admitted": 16071,
+    "enrolled": 7290,
+    "enrolledSAT": {
+      "p25": 1370,
+      "p75": 1530
+    },
+    "sources": [
+      "https://obp.umich.edu/wp-content/uploads/pubdata/cds/CDS_2023-24_UMAA_10-25-24.pdf"
+    ]
+  },
+  "georgia-institute-of-technology": {
+    "expectedScope": "Georgia\\s+Institute\\s+of\\s+Technology",
+    "overallAdmitRate": 0.16,
+    "enrolledSAT": {
+      "p25": 1390,
+      "p75": 1520
+    },
+    "sources": [
+      "https://factbook.gatech.edu/admissions-and-enrollment/common-data-set/"
+    ]
+  },
+  "university-of-virginia-main-campus": {
+    "expectedScope": "University\\s+of\\s+Virginia",
+    "overallAdmitRate": 0.1683,
+    "enrolledSAT": {
+      "p25": 1410,
+      "p75": 1530
+    },
+    "sources": [
+      "https://ias.virginia.edu/common-data-set"
+    ]
+  },
+  "new-york-university": {
+    "expectedScope": "New\\s+York\\s+University",
+    "overallAdmitRate": 0.0923,
+    "enrolledSAT": {
+      "p25": 1480,
+      "p75": 1560
+    },
+    "sources": [
+      "https://www.nyu.edu/about/leadership-university-administration/office-of-the-president/office-of-the-provost/university-data-analytics/data-analytics/common-data-set.html"
+    ]
+  },
+  "university-of-wisconsin-madison": {
+    "expectedScope": "University\\s+of\\s+Wisconsin",
+    "overallAdmitRate": 0.4517,
+    "enrolledSAT": {
+      "p25": 1370,
+      "p75": 1490
+    },
+    "sources": [
+      "https://apir.wisc.edu/cds/"
+    ]
+  },
+  "purdue-university": {
+    "expectedScope": "Purdue\\s+University",
+    "overallAdmitRate": 0.5,
+    "enrolledSAT": {
+      "p25": 1200,
+      "p75": 1490
+    },
+    "sources": [
+      "https://www.purdue.edu/datadigest/"
+    ]
+  },
+  "michigan-state-university": {
+    "expectedScope": "Michigan\\s+State\\s+University",
+    "overallAdmitRate": 0.85,
+    "enrolledSAT": {
+      "p25": 1100,
+      "p75": 1320
+    },
+    "sources": [
+      "https://opb.msu.edu/functions/institution/data/index.html"
+    ]
+  }
+}

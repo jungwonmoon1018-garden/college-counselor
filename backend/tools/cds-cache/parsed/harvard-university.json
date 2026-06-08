@@ -1,0 +1,59 @@
+{
+  "school": "Harvard University",
+  "slug": "harvard-university",
+  "tier": "T20",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 54008,
+    "admitted": 1970,
+    "enrolled": 1647
+  },
+  "overallAdmitRate": 0.0365,
+  "yieldRate": 0.836,
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1580
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {},
+  "validation": {
+    "school": "Harvard University",
+    "slug": "harvard-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 740,
+          "p75": 800
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1580
+        },
+        "note": "section_only (parsed values < 800 suggest single-section, not composite)"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1580
+      }
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "overallAdmitRate": 0.0365,
+    "enrolledSAT": {
+      "p25": 740,
+      "p75": 800
+    }
+  }
+}

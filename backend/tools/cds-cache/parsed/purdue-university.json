@@ -1,0 +1,53 @@
+{
+  "school": "Purdue University",
+  "slug": "purdue-university",
+  "tier": "T100",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 78745,
+    "admitted": 39272,
+    "enrolled": 11467
+  },
+  "overallAdmitRate": 0.4987,
+  "yieldRate": 0.292,
+  "enrolledSAT": {
+    "p25": 1200,
+    "p75": 1520
+  },
+  "enrolledACT": {
+    "p25": 27,
+    "p75": 35
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "considered",
+    "gpa": "very_important",
+    "test_scores": "important",
+    "application_essay": "very_important",
+    "recommendations": "important",
+    "interview": "not_considered",
+    "ec": "important",
+    "talent_ability": "considered",
+    "character": "important",
+    "first_generation": "important",
+    "alumni_relation": "not_considered",
+    "geographical_residence": "considered",
+    "state_residency": "considered",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "considered"
+  },
+  "validation": {
+    "school": "Purdue University",
+    "slug": "purdue-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

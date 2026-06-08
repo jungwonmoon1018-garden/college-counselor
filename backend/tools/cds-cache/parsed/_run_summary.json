@@ -1,0 +1,166 @@
+[
+  {
+    "name": "Princeton University",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.0462,
+    "slug": "princeton-university"
+  },
+  {
+    "name": "Stanford University",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.0361,
+    "slug": "stanford-university"
+  },
+  {
+    "name": "Harvard University",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.0365,
+    "slug": "harvard-university"
+  },
+  {
+    "name": "Yale University",
+    "tier": "T20",
+    "status": "ok",
+    "slug": "yale-university"
+  },
+  {
+    "name": "California Institute of Technology",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.0257,
+    "slug": "california-institute-of-technology"
+  },
+  {
+    "name": "Johns Hopkins University",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.0644,
+    "slug": "johns-hopkins-university"
+  },
+  {
+    "name": "Duke University",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.0571,
+    "slug": "duke-university"
+  },
+  {
+    "name": "University of Pennsylvania",
+    "tier": "T20",
+    "status": "ok",
+    "slug": "university-of-pennsylvania"
+  },
+  {
+    "name": "Columbia University in the City of New York",
+    "tier": "T20",
+    "status": "ok",
+    "admitRate": 0.2986,
+    "slug": "columbia-university"
+  },
+  {
+    "name": "Cornell University",
+    "tier": "Sub-Ivy",
+    "status": "ok",
+    "admitRate": 0.0841,
+    "slug": "cornell-university"
+  },
+  {
+    "name": "Northwestern University",
+    "tier": "Sub-Ivy",
+    "status": "ok",
+    "admitRate": 0.0769,
+    "slug": "northwestern-university"
+  },
+  {
+    "name": "Brown University",
+    "tier": "Sub-Ivy",
+    "status": "ok",
+    "admitRate": 0.0539,
+    "slug": "brown-university"
+  },
+  {
+    "name": "Rice University",
+    "tier": "Sub-Ivy",
+    "status": "ok",
+    "admitRate": 0.08,
+    "slug": "rice-university"
+  },
+  {
+    "name": "Vanderbilt University",
+    "tier": "Sub-Ivy",
+    "status": "non_pdf",
+    "kind": "xlsx"
+  },
+  {
+    "name": "Washington University in St Louis",
+    "tier": "Sub-Ivy",
+    "status": "not_in_index"
+  },
+  {
+    "name": "University of Michigan-Ann Arbor",
+    "tier": "T50",
+    "status": "ok",
+    "slug": "university-of-michigan"
+  },
+  {
+    "name": "Georgia Institute of Technology-Main Campus",
+    "tier": "T50",
+    "status": "ok",
+    "admitRate": 0.1407,
+    "slug": "georgia-institute-of-technology"
+  },
+  {
+    "name": "Carnegie Mellon University",
+    "tier": "T50",
+    "status": "ok",
+    "slug": "carnegie-mellon-university"
+  },
+  {
+    "name": "University of Virginia-Main Campus",
+    "tier": "T50",
+    "status": "ok",
+    "admitRate": 0.1681,
+    "slug": "university-of-virginia-main-campus"
+  },
+  {
+    "name": "New York University",
+    "tier": "T50",
+    "status": "ok",
+    "admitRate": 0.0923,
+    "slug": "new-york-university"
+  },
+  {
+    "name": "University of Wisconsin-Madison",
+    "tier": "T100",
+    "status": "ok",
+    "admitRate": 0.4517,
+    "slug": "university-of-wisconsin-madison"
+  },
+  {
+    "name": "Purdue University-Main Campus",
+    "tier": "T100",
+    "status": "ok",
+    "admitRate": 0.4987,
+    "slug": "purdue-university"
+  },
+  {
+    "name": "Indiana University-Bloomington",
+    "tier": "T100",
+    "status": "not_in_index"
+  },
+  {
+    "name": "Michigan State University",
+    "tier": "T100",
+    "status": "ok",
+    "admitRate": 0.848,
+    "slug": "michigan-state-university"
+  },
+  {
+    "name": "Pennsylvania State University-Main Campus",
+    "tier": "T100",
+    "status": "not_in_index"
+  }
+]

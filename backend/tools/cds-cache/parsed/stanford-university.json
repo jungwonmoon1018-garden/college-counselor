@@ -1,0 +1,53 @@
+{
+  "school": "Stanford University",
+  "slug": "stanford-university",
+  "tier": "T20",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 57326,
+    "admitted": 2067,
+    "enrolled": 1693
+  },
+  "overallAdmitRate": 0.0361,
+  "yieldRate": 0.8191,
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1580
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "very_important",
+    "gpa": "very_important",
+    "test_scores": "considered",
+    "application_essay": "very_important",
+    "recommendations": "very_important",
+    "interview": "considered",
+    "ec": "very_important",
+    "talent_ability": "very_important",
+    "character": "very_important",
+    "first_generation": "considered",
+    "alumni_relation": "considered",
+    "geographical_residence": "considered",
+    "state_residency": "not_considered",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "not_considered"
+  },
+  "validation": {
+    "school": "Stanford University",
+    "slug": "stanford-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

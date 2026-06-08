@@ -1,0 +1,64 @@
+{
+  "school": "Carnegie Mellon University",
+  "slug": "carnegie-mellon-university",
+  "tier": "T50",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1560
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {},
+  "validation": {
+    "school": "Carnegie Mellon University",
+    "slug": "carnegie-mellon-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.1166,
+        "note": "parser_missed"
+      },
+      {
+        "severity": "medium",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 1540,
+          "p75": 1600
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1560
+        },
+        "delta": {
+          "p25": 30,
+          "p75": 40
+        },
+        "note": "sat_drift_exceeds_tolerance"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.1166,
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1560
+      }
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "enrolledSAT": {
+      "p25": 1540,
+      "p75": 1600
+    }
+  },
+  "overallAdmitRate": 0.1166
+}

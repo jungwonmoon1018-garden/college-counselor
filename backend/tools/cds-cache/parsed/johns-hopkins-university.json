@@ -1,0 +1,53 @@
+{
+  "school": "Johns Hopkins University",
+  "slug": "johns-hopkins-university",
+  "tier": "T20",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 45895,
+    "admitted": 2954,
+    "enrolled": 1389
+  },
+  "overallAdmitRate": 0.0644,
+  "yieldRate": 0.4702,
+  "enrolledSAT": {
+    "p25": 1520,
+    "p75": 1600
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "very_important",
+    "gpa": "very_important",
+    "test_scores": "considered",
+    "application_essay": "very_important",
+    "recommendations": "very_important",
+    "interview": "not_considered",
+    "ec": "important",
+    "talent_ability": "important",
+    "character": "important",
+    "first_generation": "considered",
+    "alumni_relation": "not_considered",
+    "geographical_residence": "considered",
+    "state_residency": "not_considered",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "important",
+    "work_experience": "important",
+    "level_of_interest": "not_considered"
+  },
+  "validation": {
+    "school": "Johns Hopkins University",
+    "slug": "johns-hopkins-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

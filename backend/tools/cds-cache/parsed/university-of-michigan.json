@@ -1,0 +1,43 @@
+{
+  "school": "University of Michigan",
+  "slug": "university-of-michigan",
+  "tier": "T50",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "enrolledSAT": {
+    "p25": 1360,
+    "p75": 1560
+  },
+  "enrolledACT": {
+    "p25": 31,
+    "p75": 35
+  },
+  "c7": {},
+  "validation": {
+    "school": "University of Michigan",
+    "slug": "university-of-michigan",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.2015,
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.2015
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "enrolledSAT": {
+      "p25": 1360,
+      "p75": 1560
+    }
+  },
+  "overallAdmitRate": 0.2015
+}

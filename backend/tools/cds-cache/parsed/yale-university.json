@@ -1,0 +1,43 @@
+{
+  "school": "Yale University",
+  "slug": "yale-university",
+  "tier": "T20",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "enrolledSAT": {
+    "p25": 1470,
+    "p75": 1580
+  },
+  "enrolledACT": {
+    "p25": 33,
+    "p75": 36
+  },
+  "c7": {},
+  "validation": {
+    "school": "Yale University",
+    "slug": "yale-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.045,
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.045
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "enrolledSAT": {
+      "p25": 1470,
+      "p75": 1580
+    }
+  },
+  "overallAdmitRate": 0.045
+}

@@ -1,0 +1,355 @@
+[
+  {
+    "school": "Brown University",
+    "slug": "brown-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "California Institute of Technology",
+    "slug": "california-institute-of-technology",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": null,
+        "expected": {
+          "p25": 1530,
+          "p75": 1580
+        },
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1530,
+        "p75": 1580
+      }
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Carnegie Mellon University",
+    "slug": "carnegie-mellon-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.1166,
+        "note": "parser_missed"
+      },
+      {
+        "severity": "medium",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 1540,
+          "p75": 1600
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1560
+        },
+        "delta": {
+          "p25": 30,
+          "p75": 40
+        },
+        "note": "sat_drift_exceeds_tolerance"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.1166,
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1560
+      }
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Columbia University",
+    "slug": "columbia-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": 0.2986,
+        "expected": 0.0389,
+        "delta": 0.2597,
+        "note": "drift_exceeds_tolerance"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.0389
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Cornell University",
+    "slug": "cornell-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": 0.0841,
+        "expected": 0.079,
+        "delta": 0.0051,
+        "note": "drift_exceeds_tolerance"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.079
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Duke University",
+    "slug": "duke-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 740,
+          "p75": 800
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1570
+        },
+        "note": "section_only (parsed values < 800 suggest single-section, not composite)"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1570
+      }
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Georgia Institute of Technology",
+    "slug": "georgia-institute-of-technology",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": 0.1407,
+        "expected": 0.16,
+        "delta": -0.0193,
+        "note": "drift_exceeds_tolerance"
+      },
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": null,
+        "expected": {
+          "p25": 1390,
+          "p75": 1520
+        },
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.16,
+      "enrolledSAT": {
+        "p25": 1390,
+        "p75": 1520
+      }
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Harvard University",
+    "slug": "harvard-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 740,
+          "p75": 800
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1580
+        },
+        "note": "section_only (parsed values < 800 suggest single-section, not composite)"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1580
+      }
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Johns Hopkins University",
+    "slug": "johns-hopkins-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Michigan State University",
+    "slug": "michigan-state-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "New York University",
+    "slug": "new-york-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Northwestern University",
+    "slug": "northwestern-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Princeton University",
+    "slug": "princeton-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "medium",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 1510,
+          "p75": 1600
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1560
+        },
+        "delta": {
+          "p25": 0,
+          "p75": 40
+        },
+        "note": "sat_drift_exceeds_tolerance"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1560
+      }
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Purdue University",
+    "slug": "purdue-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Rice University",
+    "slug": "rice-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Stanford University",
+    "slug": "stanford-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "University of Michigan",
+    "slug": "university-of-michigan",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.2015,
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.2015
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "University of Pennsylvania",
+    "slug": "university-of-pennsylvania",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.0587,
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.0587
+    },
+    "scopeFromPDF": null
+  },
+  {
+    "school": "University of Virginia-Main Campus",
+    "slug": "university-of-virginia-main-campus",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "University of Wisconsin-Madison",
+    "slug": "university-of-wisconsin-madison",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  },
+  {
+    "school": "Yale University",
+    "slug": "yale-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "overallAdmitRate",
+        "parsed": null,
+        "expected": 0.045,
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "overallAdmitRate": 0.045
+    },
+    "scopeFromPDF": null
+  }
+]

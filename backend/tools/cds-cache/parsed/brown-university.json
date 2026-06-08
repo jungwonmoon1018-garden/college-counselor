@@ -1,0 +1,33 @@
+{
+  "school": "Brown University",
+  "slug": "brown-university",
+  "tier": "Sub-Ivy",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 48904,
+    "admitted": 2638,
+    "enrolled": 1719
+  },
+  "overallAdmitRate": 0.0539,
+  "yieldRate": 0.6516,
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1580
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 36
+  },
+  "c7": {},
+  "validation": {
+    "school": "Brown University",
+    "slug": "brown-university",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

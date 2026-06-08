@@ -1,0 +1,33 @@
+{
+  "school": "University of Virginia-Main Campus",
+  "slug": "university-of-virginia-main-campus",
+  "tier": "T50",
+  "year": null,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 58951,
+    "admitted": 9909,
+    "enrolled": 3961
+  },
+  "overallAdmitRate": 0.1681,
+  "yieldRate": 0.3997,
+  "enrolledSAT": {
+    "p25": 1410,
+    "p75": 1560
+  },
+  "enrolledACT": {
+    "p25": 32,
+    "p75": 35
+  },
+  "c7": {},
+  "validation": {
+    "school": "University of Virginia-Main Campus",
+    "slug": "university-of-virginia-main-campus",
+    "status": "ok",
+    "discrepancies": [],
+    "overrides": {},
+    "scopeFromPDF": null
+  }
+}

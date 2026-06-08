@@ -1,0 +1,79 @@
+{
+  "school": "Duke University",
+  "slug": "duke-university",
+  "tier": "T20",
+  "year": 2024,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_optional",
+  "b1": {
+    "applied": 51795,
+    "admitted": 2957,
+    "enrolled": 1740
+  },
+  "overallAdmitRate": 0.0571,
+  "yieldRate": 0.5884,
+  "enrolledSAT": {
+    "p25": 1510,
+    "p75": 1570
+  },
+  "enrolledACT": {
+    "p25": 34,
+    "p75": 35
+  },
+  "c7": {
+    "rigor": "very_important",
+    "class_rank": "important",
+    "gpa": "very_important",
+    "test_scores": "considered",
+    "application_essay": "considered",
+    "recommendations": "very_important",
+    "interview": "considered",
+    "ec": "very_important",
+    "talent_ability": "very_important",
+    "character": "very_important",
+    "first_generation": "considered",
+    "alumni_relation": "considered",
+    "geographical_residence": "considered",
+    "state_residency": "considered",
+    "religious_affiliation": "not_considered",
+    "racial_ethnic_status": "not_considered",
+    "volunteer_work": "considered",
+    "work_experience": "considered",
+    "level_of_interest": "considered"
+  },
+  "validation": {
+    "school": "Duke University",
+    "slug": "duke-university",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": {
+          "p25": 740,
+          "p75": 800
+        },
+        "expected": {
+          "p25": 1510,
+          "p75": 1570
+        },
+        "note": "section_only (parsed values < 800 suggest single-section, not composite)"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1510,
+        "p75": 1570
+      }
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "overallAdmitRate": 0.0571,
+    "enrolledSAT": {
+      "p25": 740,
+      "p75": 800
+    }
+  }
+}

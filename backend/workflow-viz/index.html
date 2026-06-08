@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>College Counselor — Architecture Workflow</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2d3154;
+    --accent: #6c7ef7;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --yellow: #fbbf24;
+    --orange: #fb923c;
+    --red: #f87171;
+    --blue: #60a5fa;
+    --pink: #f472b6;
+    --teal: #2dd4bf;
+    --text: #e2e8f0;
+    --muted: #7b83a6;
+    --glow: rgba(108, 126, 247, 0.15);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── header ── */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: .02em; }
+  header p { font-size: .82rem; color: var(--muted); margin-top: 2px; }
+  .badge {
+    background: var(--glow); border: 1px solid var(--accent);
+    color: var(--accent); border-radius: 20px;
+    padding: 3px 10px; font-size: .75rem; font-weight: 600; white-space: nowrap;
+  }
+
+  /* ── tabs ── */
+  .tabs {
+    display: flex; gap: 4px;
+    padding: 16px 32px 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .tab {
+    padding: 9px 18px; border-radius: 8px 8px 0 0;
+    font-size: .83rem; font-weight: 600; cursor: pointer;
+    border: 1px solid transparent; border-bottom: none;
+    color: var(--muted); transition: all .2s;
+  }
+  .tab:hover { color: var(--text); background: var(--surface2); }
+  .tab.active {
+    color: var(--accent); background: var(--bg);
+    border-color: var(--border);
+    position: relative; bottom: -1px;
+  }
+
+  /* ── panels ── */
+  .panel { display: none; padding: 32px; }
+  .panel.active { display: block; }
+
+  /* ── flow diagram ── */
+  .flow {
+    display: flex; flex-direction: column; gap: 0;
+    max-width: 960px; margin: 0 auto;
+  }
+  .flow-row {
+    display: flex; align-items: stretch; gap: 0;
+    position: relative;
+  }
+  .flow-col {
+    display: flex; flex-direction: column; gap: 0;
+    flex: 1;
+  }
+  .node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin: 6px;
+    position: relative;
+    transition: border-color .2s, box-shadow .2s;
+    cursor: default;
+  }
+  .node:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 18px var(--glow);
+  }
+  .node-title {
+    font-size: .82rem; font-weight: 700; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 6px;
+  }
+  .node-label {
+    font-size: 1rem; font-weight: 700;
+  }
+  .node-desc {
+    font-size: .79rem; color: var(--muted); margin-top: 5px; line-height: 1.5;
+  }
+  .node.accent { border-color: var(--accent); box-shadow: 0 0 16px var(--glow); }
+  .node.green  { border-color: var(--green); }
+  .node.yellow { border-color: var(--yellow); }
+  .node.orange { border-color: var(--orange); }
+  .node.blue   { border-color: var(--blue); }
+  .node.pink   { border-color: var(--pink); }
+  .node.teal   { border-color: var(--teal); }
+  .node.red    { border-color: var(--red); }
+
+  .dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 6px; vertical-align: middle;
+  }
+  .dot.green  { background: var(--green); }
+  .dot.yellow { background: var(--yellow); }
+  .dot.orange { background: var(--orange); }
+  .dot.blue   { background: var(--blue); }
+  .dot.accent { background: var(--accent); }
+  .dot.pink   { background: var(--pink); }
+  .dot.teal   { background: var(--teal); }
+  .dot.red    { background: var(--red); }
+
+  /* connectors */
+  .arrow-down {
+    display: flex; justify-content: center; align-items: center;
+    height: 28px; color: var(--muted); font-size: 1.1rem;
+  }
+  .arrow-right {
+    display: flex; align-items: center; color: var(--muted);
+    font-size: .9rem; padding: 0 2px; min-width: 20px;
+  }
+  .arrow-label {
+    font-size: .68rem; color: var(--muted); text-align: center;
+    letter-spacing: .03em;
+  }
+
+  /* provider grid */
+  .provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+    max-width: 960px; margin: 0 auto;
+  }
+  .provider-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    transition: all .2s; cursor: default;
+  }
+  .provider-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 16px var(--glow);
+    transform: translateY(-2px);
+  }
+  .provider-name { font-weight: 700; font-size: .95rem; margin-bottom: 6px; }
+  .provider-key  { font-size: .75rem; color: var(--muted); font-family: monospace; margin-bottom: 10px; }
+  .provider-tier { font-size: .76rem; line-height: 1.8; }
+  .tier-row { display: flex; gap: 6px; align-items: baseline; }
+  .tier-badge {
+    font-size: .65rem; font-weight: 700; letter-spacing: .05em;
+    padding: 1px 7px; border-radius: 20px; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .tier-badge.sm  { background: rgba(52,211,153,.15); color: var(--green); border: 1px solid var(--green); }
+  .tier-badge.md  { background: rgba(96,165,250,.15); color: var(--blue);  border: 1px solid var(--blue); }
+  .tier-badge.lg  { background: rgba(167,139,250,.15); color: var(--accent2); border: 1px solid var(--accent2); }
+  .tier-model { font-family: monospace; font-size: .73rem; color: var(--text); }
+
+  /* tier guide */
+  .tier-guide {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px; max-width: 960px; margin: 0 auto;
+  }
+  .tier-card {
+    background: var(--surface); border-radius: 12px; padding: 20px;
+    border: 1px solid var(--border);
+  }
+  .tier-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .tier-icon {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem;
+  }
+  .tier-icon.sm  { background: rgba(52,211,153,.15); }
+  .tier-icon.md  { background: rgba(96,165,250,.15); }
+  .tier-icon.lg  { background: rgba(167,139,250,.15); }
+  .tier-name { font-weight: 700; font-size: 1rem; }
+  .tier-sub  { font-size: .78rem; color: var(--muted); }
+  .tier-uses { list-style: none; margin-top: 8px; }
+  .tier-uses li { font-size: .8rem; color: var(--text); padding: 5px 0;
+    border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+  .tier-uses li:last-child { border-bottom: none; }
+  .tier-uses li::before { content: "→"; color: var(--muted); }
+
+  /* skill bridge */
+  .skill-flow {
+    display: flex; align-items: flex-start; gap: 20px;
+    max-width: 960px; margin: 0 auto; flex-wrap: wrap;
+  }
+  .skill-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; flex: 1; min-width: 200px;
+  }
+  .skill-box.highlighted {
+    border-color: var(--accent2);
+    box-shadow: 0 0 20px rgba(167,139,250,.2);
+  }
+  .skill-box h3 { font-size: .9rem; font-weight: 700; margin-bottom: 10px; }
+  .skill-box ul { list-style: none; }
+  .skill-box ul li { font-size: .8rem; padding: 4px 0; color: var(--muted);
+    display: flex; gap: 8px; }
+  .skill-box ul li span { color: var(--text); }
+  .skill-box ul li::before { content: "•"; color: var(--accent); }
+  .vert-arrow {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--muted); gap: 4px;
+    font-size: .75rem; min-width: 40px; padding-top: 40px;
+  }
+
+  /* BYOK flow */
+  .byok-flow {
+    display: flex; flex-direction: column; gap: 12px;
+    max-width: 700px; margin: 0 auto;
+  }
+  .byok-step {
+    display: flex; align-items: flex-start; gap: 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+    transition: border-color .2s;
+  }
+  .byok-step:hover { border-color: var(--accent); }
+  .byok-num {
+    min-width: 28px; height: 28px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: .8rem; font-weight: 700; flex-shrink: 0;
+  }
+  .byok-content h4 { font-size: .9rem; font-weight: 700; margin-bottom: 4px; }
+  .byok-content p  { font-size: .79rem; color: var(--muted); line-height: 1.5; }
+  .byok-content code {
+    background: var(--surface2); padding: 1px 6px; border-radius: 4px;
+    font-size: .78rem; font-family: monospace; color: var(--accent);
+  }
+
+  section-title {
+    display: block; font-size: .75rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+    margin-bottom: 16px;
+  }
+
+  .sep { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+  /* legend */
+  .legend {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    font-size: .77rem; color: var(--muted);
+    max-width: 960px; margin: 20px auto 0;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+
+  @media (max-width: 700px) {
+    .tier-guide { grid-template-columns: 1fr; }
+    .skill-flow { flex-direction: column; }
+    .vert-arrow { flex-direction: row; padding-top: 0; }
+    header { flex-direction: column; align-items: flex-start; }
+    .tabs { overflow-x: auto; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>🎓 College Counselor Backend</h1>
+    <p>Provider-Agnostic LLM + collegeapp-ai Skill Bridge — Architecture Workflow</p>
+  </div>
+  <div style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap;">
+    <span class="badge">v1.0 Context Bundle</span>
+    <span class="badge" style="border-color:var(--green);color:var(--green)">10 Providers</span>
+    <span class="badge" style="border-color:var(--accent2);color:var(--accent2)">FAFSA/FERPA/PIPA</span>
+  </div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('request')">Request Flow</div>
+  <div class="tab" onclick="switchTab('providers')">Provider Adapters</div>
+  <div class="tab" onclick="switchTab('tiers')">Tiered Reasoning</div>
+  <div class="tab" onclick="switchTab('skill')">Skill Bridge</div>
+  <div class="tab" onclick="switchTab('byok')">BYOK Flow</div>
+</div>
+
+<!-- ══════════════════════════════════ REQUEST FLOW ══ -->
+<div id="panel-request" class="panel active">
+  <section-title>📡 POST /api/llm — Full Request Pipeline</section-title>
+
+  <div class="flow">
+
+    <!-- Client -->
+    <div class="flow-row">
+      <div class="node accent" style="flex:1;">
+        <div class="node-title">Client / Skill</div>
+        <div class="node-label">POST /api/llm</div>
+        <div class="node-desc">{ provider?, model?, tier?, apiKey?, messages[], system? }<br>Also accepts /api/anthropic for backward compat</div>
+      </div>
+    </div>
+    <div class="arrow-down">↓</div>
+
+    <!-- Input Screening -->
+    <div class="flow-row">
+      <div class="node blue" style="flex:1;">
+        <div class="node-title"><span class="dot blue"></span>Step 1 — Input Screening</div>
+        <div class="node-label">screenInput(userText)</div>
+        <div class="node-desc">Credential detection • PII redaction • Injection check<br>Blocked? → HTTP 400 + audit log entry</div>
+      </div>
+    </div>
+    <div class="arrow-down">↓</div>
+
+    <!-- Policy Router -->
+    <div class="flow-row">
+      <div class="node yellow" style="flex:1;">
+        <div class="node-title"><span class="dot yellow"></span>Step 2 — Policy Router (T0, $0)</div>
+        <div class="node-label">classifyTopic(userText)</div>
+        <div class="node-desc">Deterministic keyword classification into: REGULATED · HIGH_STAKES · COACHING · ADMINISTRATIVE · CRISIS</div>
+      </div>
+    </div>
+
+    <!-- Branch -->
+    <div class="flow-row" style="align-items:flex-start; margin-top:0;">
+      <div style="flex:1; display:flex; flex-direction:column;">
+        <div class="arrow-down">↓</div>
+        <div class="node red" style="text-align:center;">
+          <div class="node-title"><span class="dot red"></span>CRISIS</div>
+          <div class="node-label" style="font-size:.9rem;">Crisis Response</div>
+          <div class="node-desc">Pre-written resources in EN / KO<br>No model call ever made</div>
+        </div>
+      </div>
+      <div class="arrow-right" style="padding-top: 60px; flex-direction:column; gap:4px;">
+        <span style="font-size:.7rem; color:var(--muted);">non-crisis</span>
+        <span>→</span>
+      </div>
+      <div style="flex:3; display:flex; flex-direction:column;">
+        <div class="arrow-down">↓</div>
+        <!-- Korea PIPA -->
+        <div class="node pink">
+          <div class="node-title"><span class="dot pink"></span>Step 3 — Korea PIPA Gate</div>
+          <div class="node-label">hasActiveConsent(cross_border_transfer)</div>
+          <div class="node-desc">Blocks if student hasn't consented to cross-border data transfer. HTTP 403 + consentRequired field.</div>
+        </div>
+        <div class="arrow-down">↓</div>
+        <!-- Provider Resolution -->
+        <div class="node accent">
+          <div class="node-title"><span class="dot accent"></span>Step 4 — Adapter Resolution</div>
+          <div class="node-label">detectProvider + resolveTierDefault</div>
+          <div class="node-desc">
+            Priority: <strong>request.provider</strong> → <strong>request.apiKey</strong> →
+            <strong>student BYOK</strong> (from pii-vault) → <strong>ENV fallback</strong><br>
+            Model: request.model → byok.models[tier] → LLM_*_MODEL env → TIER_DEFAULTS[provider][tier]
+          </div>
+        </div>
+        <div class="arrow-down">↓</div>
+        <!-- callLLM -->
+        <div class="node green">
+          <div class="node-title"><span class="dot green"></span>Step 5 — callLLM(adapter, ...)</div>
+          <div class="node-label">llm-adapters/index.js dispatcher</div>
+          <div class="node-desc">Routes to anthropic.js · openai.js · google.js based on wire protocol<br>60s AbortSignal · normalized error shape {status, code, provider}</div>
+        </div>
+        <div class="arrow-down">↓</div>
+        <!-- Output Screening -->
+        <div class="node blue">
+          <div class="node-title"><span class="dot blue"></span>Step 6 — Output Screening</div>
+          <div class="node-label">screenOutput(responseText)</div>
+          <div class="node-desc">Redacts PII that may have leaked through • Review queue hook for high-stakes outputs</div>
+        </div>
+        <div class="arrow-down">↓</div>
+        <!-- Response -->
+        <div class="node teal">
+          <div class="node-title"><span class="dot teal"></span>Response</div>
+          <div class="node-label">{content[], usage, model, stop_reason, _meta}</div>
+          <div class="node-desc">Anthropic-shaped regardless of provider<br>_meta: { provider, keySource, topicType, ai_disclosure }</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="dot blue"></span> Moderation / screening</div>
+    <div class="legend-item"><span class="dot yellow"></span> Rules-first (no model)</div>
+    <div class="legend-item"><span class="dot red"></span> Crisis gate (no model)</div>
+    <div class="legend-item"><span class="dot pink"></span> Korea PIPA compliance</div>
+    <div class="legend-item"><span class="dot accent"></span> Provider adapter layer</div>
+    <div class="legend-item"><span class="dot green"></span> LLM call</div>
+    <div class="legend-item"><span class="dot teal"></span> Normalized response</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════ PROVIDERS ══ -->
+<div id="panel-providers" class="panel">
+  <section-title>🔌 Provider Adapter Layer — 10 Providers, 2 Wire Protocols + Gemini Native</section-title>
+
+  <!-- architecture note -->
+  <div style="background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px; max-width:960px; margin:0 auto 24px; font-size:.82rem; color:var(--muted); line-height:1.6;">
+    <strong style="color:var(--text);">Single canonical response shape</strong> — every adapter translates its provider's response back into Anthropic format:
+    <code style="background:var(--surface2); padding:2px 8px; border-radius:4px; font-size:.78rem; color:var(--accent);">
+      { content: [{type, text}], usage: {input_tokens, output_tokens}, model, stop_reason }
+    </code>.
+    The rest of the app never branches on provider.
+  </div>
+
+  <div class="provider-grid">
+
+    <div class="provider-card" style="border-color:var(--orange);">
+      <div class="provider-name" style="color:var(--orange);">Anthropic</div>
+      <div class="provider-key">sk-ant-*</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">claude-haiku-4-5</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">claude-sonnet-4</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">claude-opus-4-7</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--green);">
+      <div class="provider-name" style="color:var(--green);">OpenAI</div>
+      <div class="provider-key">sk-* / sk-proj-*</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">gpt-4o-mini</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">gpt-4o</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">gpt-4.1</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--blue);">
+      <div class="provider-name" style="color:var(--blue);">Google Gemini</div>
+      <div class="provider-key">AIza*</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">gemini-2.0-flash</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">gemini-2.5-pro</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">gemini-2.5-pro</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--accent); box-shadow: 0 0 16px var(--glow);">
+      <div class="provider-name" style="color:var(--accent);">OpenRouter <span style="font-size:.7rem; color:var(--green); font-weight:600;">★ default</span></div>
+      <div class="provider-key">sk-or-*</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">google/gemma-4-26b-a4b-it</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">google/gemma-4-31b-it</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">deepseek/deepseek-v4-pro</span></div>
+      </div>
+      <div style="margin-top:8px; font-size:.7rem; color:var(--muted); line-height:1.4;">
+        Prompt caching · web search via <code style="font-size:.68rem;">plugins:[{id:"web"}]</code> · tier-walk fallback on 404/overload
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--teal);">
+      <div class="provider-name" style="color:var(--teal);">DeepSeek</div>
+      <div class="provider-key">baseUrl: api.deepseek.com</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">deepseek-chat</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">deepseek-chat</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">deepseek-reasoner</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--pink);">
+      <div class="provider-name" style="color:var(--pink);">Together.ai</div>
+      <div class="provider-key">baseUrl: api.together.xyz</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">Qwen2.5-7B</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">Qwen2.5-72B</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">Llama-3.3-70B</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--yellow);">
+      <div class="provider-name" style="color:var(--yellow);">Zhipu / GLM</div>
+      <div class="provider-key">baseUrl: bigmodel.cn</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">glm-4-flash</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">glm-4-air</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">glm-4.6</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <div class="provider-name">Ollama <span style="color:var(--green);font-size:.75rem;">local</span></div>
+      <div class="provider-key">localhost:11434</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">llama3.2:3b</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">llama3.1:8b</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">qwen2.5:32b</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card">
+      <div class="provider-name">LM Studio <span style="color:var(--green);font-size:.75rem;">local</span></div>
+      <div class="provider-key">localhost:1234</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">local-model</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">local-model</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">local-model</span></div>
+      </div>
+    </div>
+
+    <div class="provider-card" style="border-color:var(--muted);">
+      <div class="provider-name">Custom Compat</div>
+      <div class="provider-key">any key + explicit baseUrl</div>
+      <div class="provider-tier">
+        <div class="tier-row"><span class="tier-badge sm">small</span><span class="tier-model">gpt-4o-mini default</span></div>
+        <div class="tier-row"><span class="tier-badge md">medium</span><span class="tier-model">gpt-4o default</span></div>
+        <div class="tier-row"><span class="tier-badge lg">large</span><span class="tier-model">gpt-4.1 default</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="max-width:960px; margin:20px auto 0; display:flex; gap:16px; flex-wrap:wrap;">
+    <div style="background:var(--surface); border:1px solid var(--green); border-radius:8px; padding:12px 16px; font-size:.8rem;">
+      <strong style="color:var(--green);">🔵 OpenAI Wire</strong><br>
+      <span style="color:var(--muted);">OpenAI · OpenRouter · DeepSeek · Together · Zhipu · Ollama · LM Studio · Custom</span>
+    </div>
+    <div style="background:var(--surface); border:1px solid var(--orange); border-radius:8px; padding:12px 16px; font-size:.8rem;">
+      <strong style="color:var(--orange);">🟠 Anthropic Wire</strong><br>
+      <span style="color:var(--muted);">Native /v1/messages · anthropic-beta passthrough · PDF support</span>
+    </div>
+    <div style="background:var(--surface); border:1px solid var(--blue); border-radius:8px; padding:12px 16px; font-size:.8rem;">
+      <strong style="color:var(--blue);">🔷 Gemini Wire</strong><br>
+      <span style="color:var(--muted);">systemInstruction field · contents[] · API key in query param</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════ TIERS ══ -->
+<div id="panel-tiers" class="panel">
+  <section-title>⚡ Tiered Reasoning — SMALL / MEDIUM / LARGE</section-title>
+
+  <div class="tier-guide">
+
+    <div class="tier-card" style="border-color:var(--green);">
+      <div class="tier-header">
+        <div class="tier-icon sm">🪶</div>
+        <div>
+          <div class="tier-name" style="color:var(--green);">SMALL</div>
+          <div class="tier-sub">Fast · Cheap · &lt;5s latency</div>
+        </div>
+      </div>
+      <ul class="tier-uses">
+        <li>OCR validation of uploaded certificates &amp; PDFs</li>
+        <li>EC classification (activity type detection)</li>
+        <li>Narrative-fit fallback scoring when keywords inconclusive</li>
+        <li>Award claim verification against extracted text</li>
+        <li>AP subject classification from student input</li>
+        <li>Content moderation &amp; PII detection</li>
+        <li>Policy routing (deterministic, but LLM-assisted edge cases)</li>
+      </ul>
+      <div style="margin-top:12px; font-size:.75rem; color:var(--muted);">
+        Haiku · gpt-4o-mini · gemini-2.0-flash · llama3.2:3b · deepseek-chat · glm-4-flash
+      </div>
+    </div>
+
+    <div class="tier-card" style="border-color:var(--blue);">
+      <div class="tier-header">
+        <div class="tier-icon md">⚖️</div>
+        <div>
+          <div class="tier-name" style="color:var(--blue);">MEDIUM</div>
+          <div class="tier-sub">Source-grounded · Synthesis</div>
+        </div>
+      </div>
+      <ul class="tier-uses">
+        <li>College list synthesis (reach / target / safety)</li>
+        <li>EC bullet draft revisions grounded in vectors</li>
+        <li>Trend analysis across GPA / test / EC snapshots</li>
+        <li>Academic trajectory coaching with cited evidence</li>
+        <li>Major fit analysis vs. course rigor</li>
+        <li>Financial aid scenario exploration (FAFSA-cited)</li>
+        <li>Narrative theme gap analysis</li>
+      </ul>
+      <div style="margin-top:12px; font-size:.75rem; color:var(--muted);">
+        Sonnet · gpt-4o · gemini-2.5-pro · llama3.1:8b · Qwen2.5-72B · glm-4-air
+      </div>
+    </div>
+
+    <div class="tier-card" style="border-color:var(--accent2);">
+      <div class="tier-header">
+        <div class="tier-icon lg">🏛️</div>
+        <div>
+          <div class="tier-name" style="color:var(--accent2);">LARGE</div>
+          <div class="tier-sub">Last resort · Conflict resolution</div>
+        </div>
+      </div>
+      <ul class="tier-uses">
+        <li>Cross-source conflict (GPA percentile vs. EC tier disagree)</li>
+        <li>Full essay draft critique (student-authored text)</li>
+        <li>Nuanced multi-factor strategy ("drop AP Calc for internship?")</li>
+        <li>Sonnet escalation — confidence below 0.45 threshold</li>
+        <li>Regulated topic edge cases not covered by rules engine</li>
+        <li>Complex financial aid conflict across multiple schools</li>
+      </ul>
+      <div style="margin-top:12px; font-size:.75rem; color:var(--muted);">
+        Opus · gpt-4.1 · gemini-2.5-pro · deepseek-v4-pro · deepseek-reasoner · glm-4.6
+      </div>
+    </div>
+
+  </div>
+
+  <hr class="sep">
+
+  <div style="max-width:960px; margin:0 auto;">
+    <section-title>🔀 Tier selection priority</section-title>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:4px;">
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; font-size:.8rem; display:flex; align-items:center; gap:8px;">
+        <span style="background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0;">1</span>
+        <div><strong>request.model</strong><br><span style="color:var(--muted);">Explicit model id in request body</span></div>
+      </div>
+      <div style="color:var(--muted); display:flex; align-items:center;">→</div>
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; font-size:.8rem; display:flex; align-items:center; gap:8px;">
+        <span style="background:var(--blue);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0;">2</span>
+        <div><strong>byok.models[tier]</strong><br><span style="color:var(--muted);">Student's per-tier override from pii-vault</span></div>
+      </div>
+      <div style="color:var(--muted); display:flex; align-items:center;">→</div>
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; font-size:.8rem; display:flex; align-items:center; gap:8px;">
+        <span style="background:var(--green);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0;">3</span>
+        <div><strong>LLM_*_MODEL env</strong><br><span style="color:var(--muted);">Operator env override per tier</span></div>
+      </div>
+      <div style="color:var(--muted); display:flex; align-items:center;">→</div>
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; font-size:.8rem; display:flex; align-items:center; gap:8px;">
+        <span style="background:var(--muted);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0;">4</span>
+        <div><strong>TIER_DEFAULTS[provider][tier]</strong><br><span style="color:var(--muted);">Registry default for provider</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════ SKILL BRIDGE ══ -->
+<div id="panel-skill" class="panel">
+  <section-title>🧠 collegeapp-ai Skill Bridge</section-title>
+
+  <div class="skill-flow">
+
+    <div class="skill-box highlighted">
+      <h3 style="color:var(--accent2);">collegeapp-ai Skill</h3>
+      <ul>
+        <li><span>Invoked via Claude Code</span></li>
+        <li><span>Reads SKILL.md from ~/.claude/skills/collegeapp-ai/</span></li>
+        <li><span>Uses COLLEGEAPP_BACKEND_URL + SESSION_TOKEN</span></li>
+        <li><span>Never sees raw PII — [STUDENT] placeholders only</span></li>
+        <li><span>Crisis passthrough: _meta.topicType === CRISIS → stop</span></li>
+      </ul>
+    </div>
+
+    <div class="vert-arrow">
+      <div>↓ fetch-context.js</div>
+      <div style="color:var(--muted); font-size:.68rem;">GET /api/context/bundle</div>
+      <div>↑ v1.0 JSON</div>
+    </div>
+
+    <div class="skill-box" style="border-color:var(--green);">
+      <h3 style="color:var(--green);">Context Bundle (v1.0)</h3>
+      <ul>
+        <li><span><strong>rag</strong> — baseline + Scorecard context, citations</span></li>
+        <li><span><strong>ecStrength</strong> — 4-factor vectors per EC (dedication, achievement, leadership, narrative_fit)</span></li>
+        <li><span><strong>directionality</strong> — 5-factor academic trajectory</span></li>
+        <li><span><strong>apConcepts</strong> — per-subject mastery vectors</span></li>
+        <li><span><strong>narrative.active</strong> — themes, majorBuckets, hash</span></li>
+        <li><span><strong>tierHints</strong> — what each tier is for</span></li>
+      </ul>
+    </div>
+
+    <div class="vert-arrow">
+      <div>→ POST /api/llm</div>
+      <div style="color:var(--muted); font-size:.68rem;">tier: small|medium|large</div>
+    </div>
+
+    <div class="skill-box" style="border-color:var(--blue);">
+      <h3 style="color:var(--blue);">Any LLM Provider</h3>
+      <ul>
+        <li><span>Anthropic · OpenAI · Google</span></li>
+        <li><span>OpenRouter · DeepSeek · Together</span></li>
+        <li><span>Zhipu/GLM · Ollama · LM Studio</span></li>
+        <li><span>Same Anthropic-shaped response every time</span></li>
+        <li><span>Student BYOK key used if stored</span></li>
+      </ul>
+    </div>
+
+  </div>
+
+  <hr class="sep">
+
+  <div style="max-width:960px; margin:0 auto;">
+    <section-title>🚦 Red Lines enforced by the skill</section-title>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:4px;">
+      <div style="background:var(--surface); border:1px solid var(--red); border-radius:8px; padding:14px; font-size:.8rem;">
+        <strong style="color:var(--red);">No ghostwriting</strong><br>
+        <span style="color:var(--muted);">The skill may draft bullets and outlines from the student's own evidence, but never produces a complete application essay the student didn't write.</span>
+      </div>
+      <div style="background:var(--surface); border:1px solid var(--yellow); border-radius:8px; padding:14px; font-size:.8rem;">
+        <strong style="color:var(--yellow);">FAFSA/FERPA citation required</strong><br>
+        <span style="color:var(--muted);">Every regulated claim must be backed by rag.baselineContext.ruleCitations. No citation = "check your counselor."</span>
+      </div>
+      <div style="background:var(--surface); border:1px solid var(--red); border-radius:8px; padding:14px; font-size:.8rem;">
+        <strong style="color:var(--red);">Crisis passthrough</strong><br>
+        <span style="color:var(--muted);">_meta.topicType === CRISIS → display backend crisis resources verbatim. The skill never attempts to counsel.</span>
+      </div>
+      <div style="background:var(--surface); border:1px solid var(--pink); border-radius:8px; padding:14px; font-size:.8rem;">
+        <strong style="color:var(--pink);">Korea PIPA consent gate</strong><br>
+        <span style="color:var(--muted);">HTTP 403 with consentRequired: "cross_border_transfer" → stop and direct to consent flow. Never reroute providers.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════ BYOK ══ -->
+<div id="panel-byok" class="panel">
+  <section-title>🔑 BYOK — Per-Student API Key Flow</section-title>
+
+  <div class="byok-flow">
+
+    <div class="byok-step">
+      <div class="byok-num">1</div>
+      <div class="byok-content">
+        <h4>Student submits key via PUT /api/students/apikey</h4>
+        <p>Request body: <code>{ apiKey, provider?, baseUrl?, defaultModels?: {small, medium, large} }</code><br>
+        Age gate checked first — BYOK blocked for minors. Model ids validated with <code>isReasonableModelId()</code> before network is touched.</p>
+      </div>
+    </div>
+
+    <div class="byok-step">
+      <div class="byok-num">2</div>
+      <div class="byok-content">
+        <h4>Auto-detect provider from key prefix</h4>
+        <p><code>sk-ant-*</code> → anthropic · <code>sk-or-*</code> → openrouter · <code>sk-*</code> → openai · <code>AIza*</code> → google<br>
+        Explicit <code>provider</code> param always wins. Custom <code>baseUrl</code> can point at any OpenAI-compatible host.</p>
+      </div>
+    </div>
+
+    <div class="byok-step">
+      <div class="byok-num">3</div>
+      <div class="byok-content">
+        <h4>Validate key via adapter ping</h4>
+        <p><code>adapterValidateKey({ provider, apiKey, baseUrl })</code> sends a 1-token request to confirm the key is live.
+        Auth-rejected (401/403) → HTTP 400 "API key rejected". Other errors (bad model id on compat host) → "probably valid".</p>
+      </div>
+    </div>
+
+    <div class="byok-step">
+      <div class="byok-num">4</div>
+      <div class="byok-content">
+        <h4>Encrypt and store in pii-vault.db (AES-256-GCM)</h4>
+        <p>Columns added: <code>provider</code>, <code>base_url</code>, <code>default_small_model</code>, <code>default_medium_model</code>, <code>default_large_model</code><br>
+        Pre-existing rows auto-migrated to <code>provider = 'anthropic'</code>.</p>
+      </div>
+    </div>
+
+    <div class="byok-step">
+      <div class="byok-num">5</div>
+      <div class="byok-content">
+        <h4>Used in every subsequent /api/llm call for that student</h4>
+        <p><code>lookupStudentBYOK(piiStmts, piiVault, studentId)</code> decrypts the key per-request.
+        Priority: <code>request.apiKey</code> → <code>byok.apiKey</code> → <code>ENV</code>.<br>
+        Narrative-fit internal calls (<code>callHaikuForNarrativeFit</code>) also use BYOK via <code>byokLookup</code> callback — scoring runs on the student's bill.</p>
+      </div>
+    </div>
+
+    <div class="byok-step" style="border-color:var(--green);">
+      <div class="byok-num" style="background:var(--green);">✓</div>
+      <div class="byok-content">
+        <h4>Response returns full context</h4>
+        <p><code>{ stored: true, hint: "sk-ant-api0...c0f4", provider: "anthropic", baseUrl: null, defaults: {small, medium, large}, verified: true }</code><br>
+        GET /api/students/apikey now also returns <code>provider</code>, <code>baseUrl</code>, and <code>defaults</code>.</p>
+      </div>
+    </div>
+
+  </div>
+
+  <hr class="sep">
+
+  <div style="max-width:700px; margin:0 auto; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; font-size:.82rem;">
+    <div style="font-weight:700; margin-bottom:10px;">Example: Student stores an OpenRouter key</div>
+    <pre style="background:var(--surface2); border-radius:8px; padding:14px; overflow-x:auto; font-size:.78rem; color:var(--accent); line-height:1.7;">PUT /api/students/apikey
+Authorization: Bearer &lt;student-jwt&gt;
+
+{
+  "apiKey":   "sk-or-v1-abc123...",
+  "provider": "openrouter",
+  "baseUrl":  "https://openrouter.ai/api/v1",
+  "defaultModels": {
+    "small":  "google/gemma-4-26b-a4b-it",
+    "medium": "google/gemma-4-31b-it",
+    "large":  "deepseek/deepseek-v4-pro"
+  }
+}</pre>
+    <div style="color:var(--muted); margin-top:10px;">All subsequent /api/llm calls for this student route through their OpenRouter key. Internal narrative-fit scoring also uses it.</div>
+  </div>
+</div>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

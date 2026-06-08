@@ -1,0 +1,48 @@
+{
+  "school": "California Institute of Technology",
+  "slug": "california-institute-of-technology",
+  "tier": "T20",
+  "year": null,
+  "source": "cds",
+  "parserVersion": 2,
+  "testPolicy": "test_required",
+  "b1": {
+    "applied": 13847,
+    "admitted": 356,
+    "enrolled": 218
+  },
+  "overallAdmitRate": 0.0257,
+  "yieldRate": 0.6124,
+  "c7": {},
+  "validation": {
+    "school": "California Institute of Technology",
+    "slug": "california-institute-of-technology",
+    "status": "discrepancies",
+    "discrepancies": [
+      {
+        "severity": "high",
+        "field": "enrolledSAT",
+        "parsed": null,
+        "expected": {
+          "p25": 1530,
+          "p75": 1580
+        },
+        "note": "parser_missed"
+      }
+    ],
+    "overrides": {
+      "enrolledSAT": {
+        "p25": 1530,
+        "p75": 1580
+      }
+    },
+    "scopeFromPDF": null
+  },
+  "_uncorrected": {
+    "overallAdmitRate": 0.0257
+  },
+  "enrolledSAT": {
+    "p25": 1530,
+    "p75": 1580
+  }
+}
