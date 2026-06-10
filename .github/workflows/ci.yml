@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (tests + lint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install deps
+        run: npm ci
+      - name: Syntax check setup tooling
+        run: |
+          node --check env-file.js
+          node --check server.js
+          node --check scripts/setup-secrets.mjs
+      - name: Test
+        # A dummy key keeps any module that reads it happy; tests don't touch
+        # real PII. NODE_ENV stays development so boot-time fatals don't trip.
+        env:
+          NODE_ENV: development
+          ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          JWT_SECRET: "ci-only-secret-not-used-in-production-0000000000000000"
+        run: npm test
+      - name: Lint
+        # Non-blocking for now: server.js is large and may carry pre-existing
+        # style findings; surface them without failing the build.
+        continue-on-error: true
+        run: npm run lint
+
+  apple:
+    name: Apple build (iOS + macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build native app (apple/)
+        working-directory: apple
+        run: |
+          xcodegen generate
+          xcodebuild build \
+            -project CollegeCounselor.xcodeproj \
+            -scheme CollegeCounselor-iOS \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+          xcodebuild build \
+            -project CollegeCounselor.xcodeproj \
+            -scheme CollegeCounselor-macOS \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build webview wrapper (apple-webview/)
+        working-directory: apple-webview
+        run: |
+          xcodegen generate
+          xcodebuild build \
+            -project CollegeCounselorWeb.xcodeproj \
+            -scheme CollegeCounselorWeb-iOS \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+          xcodebuild build \
+            -project CollegeCounselorWeb.xcodeproj \
+            -scheme CollegeCounselorWeb-macOS \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
