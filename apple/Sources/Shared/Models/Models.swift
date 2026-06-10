@@ -211,6 +211,7 @@ struct SetupResult: Codable {
     var ok: Bool?
     var wrote: [String]?
     var promotedDevKey: Bool?
+    var scorecardVerified: Bool?
     var backup: String?
     var restartRequired: Bool?
     var message: String?

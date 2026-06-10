@@ -55,7 +55,9 @@
 "setup.email_ph" = "you@example.com";
 "setup.score_signup" = "↗ 무료 키 받기 (api.data.gov 가입)";
 "setup.score_key_ph" = "40자리 api.data.gov 키";
-"setup.score_btn" = "Scorecard 키를 .env에 저장";
+"setup.score_btn" = "키 확인 후 저장";
+"setup.score_demo" = "DEMO_KEY 사용";
+"setup.score_verify_note" = "저장 전 api.data.gov에 실시간으로 키를 확인합니다 — 작동하지 않는 키는 저장되지 않습니다.";
 "setup.promoted" = "기존 개발 키를 승격하여 현재 로컬 데이터를 계속 읽을 수 있습니다.";
 "setup.restart" = "적용하려면 백엔드를 재시작하세요.";
 
