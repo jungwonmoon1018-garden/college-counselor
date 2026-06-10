@@ -161,9 +161,11 @@ actor APIClient {
         guard !base.isEmpty else { throw APIError.notConfigured }
 
         let locale = AppConfig.locale
-        var comps = URLComponents(string: base + path)
-        comps?.queryItems = (comps?.queryItems ?? []) + [URLQueryItem(name: "locale", value: locale)]
-        guard let url = comps?.url else { throw APIError.notConfigured }
+        guard var comps = URLComponents(string: base + path) else { throw APIError.notConfigured }
+        var items = comps.queryItems ?? []
+        items.append(URLQueryItem(name: "locale", value: locale))
+        comps.queryItems = items
+        guard let url = comps.url else { throw APIError.notConfigured }
 
         var req = URLRequest(url: url)
         req.httpMethod = method
