@@ -33,6 +33,31 @@
 
 /* Common */
 "common.cancel" = "Cancel";
+"common.close" = "Close";
+
+/* Operator setup */
+"settings.operator" = "Operator";
+"settings.operator_note" = "First-run deployment setup. Only works when this app runs on the same host as the backend.";
+"setup.title" = "Operator Setup";
+"setup.subtitle" = "First-run deployment configuration. Works only on the server host and requires the one-time token printed in the backend console at startup.";
+"setup.status" = "STATUS";
+"setup.enc_done" = "✓ Encryption key configured (via environment)";
+"setup.enc_todo" = "• Encryption key not yet set — generate below";
+"setup.score_done" = "✓ College Scorecard (IPEDS) key configured";
+"setup.score_todo" = "• Scorecard (IPEDS) key not set — backend runs offline";
+"setup.token_label" = "One-time setup token (from the server console)";
+"setup.token_ph" = "paste the [SETUP] token";
+"setup.enc_title" = "1 · Vault encryption key";
+"setup.enc_note" = "Generated on the server and written to .env — the key never appears in this app. First-run only; it will not rotate an existing key.";
+"setup.enc_btn" = "Generate encryption key & save to .env";
+"setup.score_title" = "2 · College Scorecard (IPEDS) data key";
+"setup.score_note" = "Free from api.data.gov. Sign up with your email, then paste the key.";
+"setup.email_ph" = "you@example.com";
+"setup.score_signup" = "↗ Get a free key (api.data.gov signup)";
+"setup.score_key_ph" = "40-character api.data.gov key";
+"setup.score_btn" = "Save Scorecard key to .env";
+"setup.promoted" = "Promoted the existing dev key, so current local data stays readable.";
+"setup.restart" = "Restart the backend to apply.";
 
 /* Tabs */
 "tab.fit" = "College Fit";

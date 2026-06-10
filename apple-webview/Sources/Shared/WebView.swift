@@ -1,9 +1,10 @@
 import SwiftUI
 import WebKit
-
 #if os(macOS)
+import AppKit
 typealias PlatformViewRepresentable = NSViewRepresentable
 #else
+import UIKit
 typealias PlatformViewRepresentable = UIViewRepresentable
 #endif
 
@@ -41,6 +42,39 @@ struct WebView: PlatformViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         let parent: WebView
         init(_ parent: WebView) { self.parent = parent }
+
+        /// Keep app-shell navigation on the configured host; send off-host
+        /// links (external sites, OAuth pop-outs, mailto, etc.) to the system
+        /// browser instead of loading arbitrary pages inside the wrapper.
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard let url = navigationAction.request.url else { decisionHandler(.allow); return }
+            let scheme = url.scheme?.lowercased() ?? ""
+            let appHost = parent.url.host
+            let sameHost = url.host == appHost
+            let webScheme = (scheme == "http" || scheme == "https")
+
+            // Allow same-host web navigation and non-web app schemes handled by
+            // WebKit internally (about:, blob:, data:).
+            if sameHost || !webScheme {
+                if !webScheme && scheme != "about" && scheme != "blob" && scheme != "data" {
+                    openExternally(url); decisionHandler(.cancel); return
+                }
+                decisionHandler(.allow); return
+            }
+            // Off-host http(s) → open in the user's real browser.
+            openExternally(url)
+            decisionHandler(.cancel)
+        }
+
+        private func openExternally(_ url: URL) {
+            #if os(macOS)
+            _ = NSWorkspace.shared.open(url)
+            #else
+            UIApplication.shared.open(url)
+            #endif
+        }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true

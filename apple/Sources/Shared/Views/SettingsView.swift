@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var health: HealthStatus?
     @State private var healthLoading = false
     @State private var healthError = false
+    @State private var showSetupSheet = false
 
     var body: some View {
         NavigationStack {
@@ -58,6 +59,14 @@ struct SettingsView: View {
                     }
                 }
 
+                #if os(macOS)
+                Section("settings.operator") {
+                    Button("setup.title") { showSetupSheet = true }
+                    Text("settings.operator_note")
+                        .font(.caption).foregroundStyle(Theme.textMuted)
+                }
+                #endif
+
                 Section {
                     Text("settings.privacy_note")
                         .font(.caption).foregroundStyle(Theme.textMuted)
@@ -68,6 +77,11 @@ struct SettingsView: View {
             .sheet(isPresented: $showAPIKeySheet) {
                 APIKeyView(onSaved: {}, isModal: true)
                     .preferredColorScheme(.dark)
+            }
+            .sheet(isPresented: $showSetupSheet) {
+                NavigationStack { SetupView() }
+                    .preferredColorScheme(.dark)
+                    .frame(minWidth: 560, minHeight: 600)
             }
         }
     }

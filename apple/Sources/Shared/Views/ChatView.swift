@@ -91,7 +91,10 @@ struct ChatView: View {
         Task {
             defer { sending = false }
             do {
-                let resp = try await APIClient.shared.chat(messages: messages, tier: "medium")
+                // The backend rejects >50 messages; send only the recent turns
+                // so a long conversation doesn't silently start failing.
+                let recent = messages.suffix(30)
+                let resp = try await APIClient.shared.chat(messages: Array(recent), tier: "medium")
                 if let err = resp.error?.message {
                     error = err
                 } else {

@@ -208,6 +208,7 @@ import {
 } from "./course-sequence-catalog.js";
 import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel, detectSubscriptionTier } from "./orchestration-engine.js";
 import { t, resolveLocale, localizeFriendlyLabels } from "./i18n.js";
+import { readEnvLines, getValue, setValue, writeEnvAtomic, resolveFirstRunEncryptionKey, defaultPaths, HEX64, PLACEHOLDER } from "./env-file.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -220,6 +221,15 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173").split(",").map(s => s.trim());
 const NODE_ENV = process.env.NODE_ENV || "development";
 const SCORECARD_API_KEY = process.env.SCORECARD_API_KEY || "";
+// ── First-run setup (guarded operator endpoint, see /api/setup/*) ──
+// A one-time token, regenerated every boot, gates the setup endpoint together
+// with a loopback-only check. We only consider setup "available" (and only
+// print the token) when something still needs configuring — a real
+// ENCRYPTION_KEY from the environment, or a live Scorecard key. This keeps a
+// fully-configured production boot quiet and the token out of its logs.
+const ENCRYPTION_KEY_FROM_ENV = !!process.env.ENCRYPTION_KEY;
+const SETUP_AVAILABLE = !ENCRYPTION_KEY_FROM_ENV || !SCORECARD_API_KEY;
+const SETUP_TOKEN = crypto.randomBytes(24).toString("hex");
 const FAFSA_GUIDANCE_PATH = process.env.FAFSA_GUIDANCE_PATH || path.join(__dirname, "data", "fafsa", "2026-2027.txt");
 const ADMISSIONS_DEADLINES_PATH = process.env.ADMISSIONS_DEADLINES_PATH || path.join(__dirname, "data", "admissions-deadlines.json");
 const RETENTION_MODE = process.env.RETENTION_MODE || "consumer"; // "consumer" or "institutional"
@@ -304,6 +314,11 @@ console.log(`[BOOT] Environment: ${NODE_ENV}`);
 console.log(`[BOOT] Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
 console.log(`[BOOT] Retention mode: ${RETENTION_MODE}`);
 console.log(`[BOOT] College Scorecard API: ${SCORECARD_API_KEY ? "CONFIGURED" : "NOT CONFIGURED (offline mode)"}`);
+if (SETUP_AVAILABLE) {
+  console.log("[SETUP] First-run setup available. One-time token (localhost only):");
+  console.log(`[SETUP]   ${SETUP_TOKEN}`);
+  console.log("[SETUP] Open the Setup screen (web: /setup.html · macOS app) on THIS host and paste the token.");
+}
 
 // ═══════════════════════════════════════════════════════════
 // DATABASE INITIALIZATION — 3 physically separate databases
@@ -6459,6 +6474,119 @@ app.post("/api/consent/grant", studentLimiter, requireStudentAuth, (req, res) =>
   } catch (err) {
     console.error("[CONSENT] Error:", err.message);
     res.status(500).json({ error: "Consent operation failed" });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════
+// FIRST-RUN OPERATOR SETUP (localhost + boot console token)
+// ═══════════════════════════════════════════════════════════
+// Lets an operator finish deployment config from the Setup UI (web /setup.html
+// or the macOS app) instead of hand-editing .env:
+//   • generate the PII-vault ENCRYPTION_KEY (server-side — the secret is NEVER
+//     sent from the client; the client only triggers generation),
+//   • save the College Scorecard (IPEDS) data API key.
+// Guards: the request must originate from loopback AND carry the one-time
+// SETUP_TOKEN printed to the server console at boot. ENCRYPTION_KEY is only
+// ever WRITTEN on first run (when not already provided via env) and is NEVER
+// rotated here — rotation would orphan all stored PII. Writes go through the
+// atomic, backup-taking env-file helpers. Changes require a server restart to
+// take effect (secrets are read at boot).
+
+function isLoopbackRequest(req) {
+  const candidates = [req.ip, req.socket?.remoteAddress, req.connection?.remoteAddress];
+  return candidates.some((a) => {
+    if (!a) return false;
+    return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1" || a.startsWith("127.");
+  });
+}
+
+function setupTokenValid(req) {
+  const provided = req.get("X-Setup-Token") || req.body?.setupToken || "";
+  if (!provided || typeof provided !== "string") return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(SETUP_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// Status is loopback-gated but token-free: it reveals only booleans so the
+// Setup UI can decide what to show. It never returns any secret value.
+app.get("/api/setup/status", (req, res) => {
+  if (!isLoopbackRequest(req)) return res.status(403).json({ error: "Setup is only available on the server host (localhost)." });
+  res.json({
+    setupAvailable: SETUP_AVAILABLE,
+    encryptionKeyConfigured: ENCRYPTION_KEY_FROM_ENV,   // true ⇒ already set via env; cannot generate
+    scorecardConfigured: !!SCORECARD_API_KEY,
+    nodeEnv: NODE_ENV,
+    needsRestartToApply: true,
+  });
+});
+
+const SCORECARD_KEY_RE = /^[A-Za-z0-9]{20,64}$/;
+
+app.post("/api/setup/initialize", (req, res) => {
+  try {
+    if (!isLoopbackRequest(req)) return res.status(403).json({ error: "Setup is only available on the server host (localhost)." });
+    if (!setupTokenValid(req)) return res.status(401).json({ error: "Invalid or missing setup token. Use the one-time token printed in the server console at boot." });
+
+    const { generateEncryptionKey, scorecardApiKey } = req.body || {};
+    const { envPath, examplePath, devKeyPath } = defaultPaths(__dirname);
+    const lines = readEnvLines(envPath, examplePath);
+    const wrote = [];
+    let promotedDevKey = false;
+
+    // ── ENCRYPTION_KEY — first-run generation only ──
+    if (generateEncryptionKey === true) {
+      if (ENCRYPTION_KEY_FROM_ENV) {
+        return res.status(409).json({
+          error: "ENCRYPTION_KEY is already configured via the environment. Refusing to rotate it (that would orphan all stored PII). To rotate intentionally, use the CLI: `npm run setup -- --force-encryption`.",
+        });
+      }
+      const cur = getValue(lines, "ENCRYPTION_KEY");
+      if (cur && HEX64.test(cur)) {
+        return res.status(409).json({ error: "A valid ENCRYPTION_KEY already exists in .env. Refusing to overwrite it." });
+      }
+      const { key, promotedDevKey: promoted } = resolveFirstRunEncryptionKey(devKeyPath);
+      promotedDevKey = promoted;
+      setValue(lines, "ENCRYPTION_KEY", key);
+      wrote.push("ENCRYPTION_KEY");
+      // Generate JWT_SECRET too if it's still a placeholder.
+      const jwt = getValue(lines, "JWT_SECRET");
+      if (!jwt || PLACEHOLDER.test(jwt) || jwt.length < 32) {
+        setValue(lines, "JWT_SECRET", crypto.randomBytes(32).toString("hex"));
+        wrote.push("JWT_SECRET");
+      }
+    }
+
+    // ── SCORECARD_API_KEY (IPEDS data) ──
+    if (typeof scorecardApiKey === "string" && scorecardApiKey.trim()) {
+      const k = scorecardApiKey.trim();
+      if (!SCORECARD_KEY_RE.test(k)) {
+        return res.status(400).json({ error: "That doesn't look like an api.data.gov key (expected 20–64 alphanumeric characters)." });
+      }
+      setValue(lines, "SCORECARD_API_KEY", k);
+      wrote.push("SCORECARD_API_KEY");
+    }
+
+    if (wrote.length === 0) {
+      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true and/or a scorecardApiKey." });
+    }
+
+    const backup = writeEnvAtomic(envPath, lines);
+    stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "setup_initialize", "operator", `wrote ${wrote.join(",")}`, hashIP(req.ip));
+    console.log(`[SETUP] Wrote ${wrote.join(", ")} to .env via setup endpoint (restart required).`);
+
+    res.json({
+      ok: true,
+      wrote,
+      promotedDevKey,
+      backup: backup ? path.basename(backup) : null,
+      restartRequired: true,
+      message: "Saved to .env. Restart the backend for the changes to take effect.",
+    });
+  } catch (err) {
+    console.error("[SETUP] initialize error:", err.message);
+    res.status(500).json({ error: "Setup failed: " + err.message });
   }
 });
 

@@ -33,6 +33,31 @@
 
 /* Common */
 "common.cancel" = "취소";
+"common.close" = "닫기";
+
+/* Operator setup */
+"settings.operator" = "운영자";
+"settings.operator_note" = "최초 실행 배포 설정. 이 앱이 백엔드와 같은 호스트에서 실행될 때만 작동합니다.";
+"setup.title" = "운영자 설정";
+"setup.subtitle" = "최초 실행 배포 구성. 서버 호스트에서만 작동하며 시작 시 백엔드 콘솔에 출력된 일회용 토큰이 필요합니다.";
+"setup.status" = "상태";
+"setup.enc_done" = "✓ 암호화 키 구성됨 (환경 변수)";
+"setup.enc_todo" = "• 암호화 키가 아직 설정되지 않음 — 아래에서 생성하세요";
+"setup.score_done" = "✓ College Scorecard(IPEDS) 키 구성됨";
+"setup.score_todo" = "• Scorecard(IPEDS) 키 미설정 — 백엔드가 오프라인으로 실행됩니다";
+"setup.token_label" = "일회용 설정 토큰 (서버 콘솔에서)";
+"setup.token_ph" = "[SETUP] 토큰을 붙여넣으세요";
+"setup.enc_title" = "1 · 볼트 암호화 키";
+"setup.enc_note" = "서버에서 생성되어 .env에 기록됩니다 — 키는 이 앱에 표시되지 않습니다. 최초 실행 전용이며 기존 키를 교체하지 않습니다.";
+"setup.enc_btn" = "암호화 키 생성 후 .env에 저장";
+"setup.score_title" = "2 · College Scorecard(IPEDS) 데이터 키";
+"setup.score_note" = "api.data.gov에서 무료. 이메일로 가입한 후 키를 붙여넣으세요.";
+"setup.email_ph" = "you@example.com";
+"setup.score_signup" = "↗ 무료 키 받기 (api.data.gov 가입)";
+"setup.score_key_ph" = "40자리 api.data.gov 키";
+"setup.score_btn" = "Scorecard 키를 .env에 저장";
+"setup.promoted" = "기존 개발 키를 승격하여 현재 로컬 데이터를 계속 읽을 수 있습니다.";
+"setup.restart" = "적용하려면 백엔드를 재시작하세요.";
 
 /* Tabs */
 "tab.fit" = "대학 적합도";

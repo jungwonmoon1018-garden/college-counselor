@@ -6,9 +6,10 @@ import Foundation
 enum ConfigKeys {
     static let apiBase = "cc.apiBase"
     static let locale = "cc.locale"
-    static let email = "cc.email"
     static let grade = "cc.grade"
     static let consentGranted = "cc.consentGranted"
+    // Note: email is PII and lives in the Keychain (see APIClient/AppState),
+    // not UserDefaults.
 }
 
 struct AppConfig {

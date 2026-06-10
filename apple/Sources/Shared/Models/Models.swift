@@ -134,14 +134,7 @@ struct CollegeValues: Codable {
     }
 }
 
-// ─── Chat (Anthropic-shaped) ───────────────────────────────────────────────
-struct ChatRequest: Codable {
-    var model: String
-    var max_tokens: Int
-    var system: String?
-    var messages: [ChatMessage]
-}
-
+// ─── Chat ────────────────────────────────────────────────────────────────────
 struct ChatMessage: Codable, Identifiable, Equatable {
     var role: String          // "user" | "assistant"
     var content: String
@@ -203,4 +196,22 @@ struct HealthStatus: Codable {
     var status: String?
     var scorecard: Bool?
     var retentionMode: String?
+}
+
+// ─── Operator setup (first-run) ──────────────────────────────────────────────
+struct SetupStatus: Codable {
+    var setupAvailable: Bool?
+    var encryptionKeyConfigured: Bool?
+    var scorecardConfigured: Bool?
+    var nodeEnv: String?
+    var needsRestartToApply: Bool?
+}
+
+struct SetupResult: Codable {
+    var ok: Bool?
+    var wrote: [String]?
+    var promotedDevKey: Bool?
+    var backup: String?
+    var restartRequired: Bool?
+    var message: String?
 }

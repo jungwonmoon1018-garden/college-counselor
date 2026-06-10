@@ -16,22 +16,22 @@
 //
 // SAFETY: an existing, valid ENCRYPTION_KEY is NEVER overwritten unless you
 // pass --force-encryption AND type the confirmation. Rotating it makes all
-// previously-stored PII permanently undecryptable.
+// previously-stored PII permanently undecryptable. Writes are atomic with a
+// timestamped .env backup (see env-file.js).
 // ═══════════════════════════════════════════════════════════════════════
 
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import {
+  HEX64, PLACEHOLDER, genHex32, readEnvLines, getValue, setValue,
+  writeEnvAtomic, defaultPaths,
+} from "../env-file.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_DIR = path.join(__dirname, "..");
-const ENV_PATH = path.join(BACKEND_DIR, ".env");
-const EXAMPLE_PATH = path.join(BACKEND_DIR, ".env.example");
-
-const HEX64 = /^[0-9a-fA-F]{64}$/;
-const PLACEHOLDER = /^REPLACE_WITH/i;
+const { envPath: ENV_PATH, examplePath: EXAMPLE_PATH } = defaultPaths(BACKEND_DIR);
 
 // ─── CLI args ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -45,39 +45,6 @@ const opts = Object.fromEntries(
 const NON_INTERACTIVE = flags.has("--yes") || flags.has("--non-interactive");
 const FORCE_ENCRYPTION = flags.has("--force-encryption");
 
-// ─── .env line helpers (preserve comments + ordering) ────────────────────
-function readEnvLines() {
-  if (fs.existsSync(ENV_PATH)) return fs.readFileSync(ENV_PATH, "utf8").split(/\r?\n/);
-  if (fs.existsSync(EXAMPLE_PATH)) {
-    console.log("• No .env found — starting from .env.example");
-    return fs.readFileSync(EXAMPLE_PATH, "utf8").split(/\r?\n/);
-  }
-  console.log("• No .env or .env.example found — creating a fresh .env");
-  return [];
-}
-
-function getValue(lines, key) {
-  const re = new RegExp(`^\\s*${key}\\s*=(.*)$`);
-  for (const line of lines) {
-    const m = line.match(re);
-    if (m) return m[1].trim();
-  }
-  return undefined;
-}
-
-function setValue(lines, key, value) {
-  const re = new RegExp(`^\\s*${key}\\s*=.*$`);
-  for (let i = 0; i < lines.length; i++) {
-    if (re.test(lines[i])) { lines[i] = `${key}=${value}`; return lines; }
-  }
-  // Not present — append (keep file tidy with a trailing entry).
-  if (lines.length && lines[lines.length - 1] !== "") lines.push("");
-  lines.push(`${key}=${value}`);
-  return lines;
-}
-
-function genHex32() { return crypto.randomBytes(32).toString("hex"); }
-
 function ask(rl, question) {
   return new Promise((resolve) => rl.question(question, (a) => resolve(a.trim())));
 }
@@ -85,7 +52,8 @@ function ask(rl, question) {
 // ─── Main ────────────────────────────────────────────────────────────────
 async function main() {
   console.log("\n=== College Counselor — backend secrets setup ===\n");
-  const lines = readEnvLines();
+  if (!fs.existsSync(ENV_PATH)) console.log("• No .env found — starting from .env.example");
+  const lines = readEnvLines(ENV_PATH, EXAMPLE_PATH);
   const rl = NON_INTERACTIVE ? null : readline.createInterface({ input: process.stdin, output: process.stdout });
   const summary = [];
 
@@ -139,13 +107,10 @@ async function main() {
 
   rl?.close();
 
-  // Write atomically with 0600 perms (secrets file).
-  let out = lines.join("\n");
-  if (!out.endsWith("\n")) out += "\n";
-  fs.writeFileSync(ENV_PATH, out, { mode: 0o600 });
-  try { fs.chmodSync(ENV_PATH, 0o600); } catch { /* non-fatal on some FS */ }
-
-  console.log(`\n✓ Wrote ${path.relative(process.cwd(), ENV_PATH)} (permissions 600)\n`);
+  const backup = writeEnvAtomic(ENV_PATH, lines);
+  console.log(`\n✓ Wrote ${path.relative(process.cwd(), ENV_PATH)} (atomic, permissions 600 where supported)`);
+  if (backup) console.log(`  Backup of previous .env: ${path.relative(process.cwd(), backup)}`);
+  console.log("");
   for (const s of summary) console.log("  • " + s);
   console.log("\nNext: start the backend with `npm start` and confirm the boot banner shows");
   console.log("      'Scorecard: LIVE' (or OFFLINE) and no ENCRYPTION_KEY fatal.\n");

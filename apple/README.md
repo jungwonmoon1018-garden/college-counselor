@@ -98,6 +98,9 @@ apple/
   `POST /api/students/auth` returns the session token). The session summary's
   "unlock with passphrase" describes the web client's local-encryption step,
   which isn't required by the backend.
-- `Sources/Shared/Models/Models.swift` keeps `ChatRequest` for the Anthropic-
-  shaped `/api/anthropic` endpoint if you later want server-key chat; the app
-  currently uses the BYOK `/api/llm` path.
+- Chat uses the BYOK `/api/llm` path (tier-based), so the client never names a
+  model.
+- **Operator setup (macOS):** Settings → Operator → "Operator Setup" can
+  generate the backend's vault `ENCRYPTION_KEY` (server-side) and save the
+  Scorecard/IPEDS key, via the loopback + console-token-guarded `/api/setup/*`
+  endpoints. Only works when the app runs on the backend host.

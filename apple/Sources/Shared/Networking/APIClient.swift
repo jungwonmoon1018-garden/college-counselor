@@ -34,10 +34,19 @@ actor APIClient {
     /// Email is kept in memory after sign-in so a 401 can silently re-auth.
     private var email: String?
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.default
+            cfg.timeoutIntervalForRequest = 30
+            cfg.timeoutIntervalForResource = 60
+            self.session = URLSession(configuration: cfg)
+        }
         self.token = Keychain.get(account: "token")
-        self.email = UserDefaults.standard.string(forKey: ConfigKeys.email)
+        // Email is PII — keep it in the Keychain, not UserDefaults (which lands
+        // unencrypted in device backups).
+        self.email = Keychain.get(account: "email")
     }
 
     // ─── Session lifecycle ───────────────────────────────────────────────
@@ -45,12 +54,14 @@ actor APIClient {
         self.token = token
         self.email = email
         if let token { Keychain.set(token, account: "token") } else { Keychain.delete(account: "token") }
-        if let email { UserDefaults.standard.set(email, forKey: ConfigKeys.email) }
+        if let email { Keychain.set(email, account: "email") }
     }
 
     func clearSession() {
         token = nil
+        email = nil
         Keychain.delete(account: "token")
+        Keychain.delete(account: "email")
     }
 
     var hasToken: Bool { token != nil }
@@ -84,6 +95,19 @@ actor APIClient {
 
     func health() async throws -> HealthStatus {
         try await request("/health", method: "GET", authed: false)
+    }
+
+    // ─── Operator first-run setup (localhost + console token) ────────────
+    func setupStatus() async throws -> SetupStatus {
+        try await request("/setup/status", method: "GET", authed: false)
+    }
+
+    func setupInitialize(token: String, generateEncryptionKey: Bool, scorecardApiKey: String?) async throws -> SetupResult {
+        var body: [String: Any] = [:]
+        if generateEncryptionKey { body["generateEncryptionKey"] = true }
+        if let k = scorecardApiKey, !k.isEmpty { body["scorecardApiKey"] = k }
+        return try await request("/setup/initialize", method: "POST", body: body,
+                                 authed: false, extraHeaders: ["X-Setup-Token": token])
     }
 
     func apiKeyStatus() async throws -> APIKeyStatus {
@@ -130,6 +154,7 @@ actor APIClient {
     private func request<T: Decodable>(
         _ path: String, method: String,
         body: [String: Any]? = nil, authed: Bool = true,
+        extraHeaders: [String: String] = [:],
         isRetry: Bool = false
     ) async throws -> T {
         let base = AppConfig.apiBase
@@ -152,6 +177,7 @@ actor APIClient {
             guard let token else { throw APIError.noToken }
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        for (k, v) in extraHeaders { req.setValue(v, forHTTPHeaderField: k) }
 
         let data: Data, response: URLResponse
         do { (data, response) = try await session.data(for: req) }
@@ -165,7 +191,7 @@ actor APIClient {
             // Token expired — re-auth once and retry the original call.
             _ = try? await auth(email: email)
             if token != nil {
-                return try await request(path, method: method, body: body, authed: authed, isRetry: true)
+                return try await request(path, method: method, body: body, authed: authed, extraHeaders: extraHeaders, isRetry: true)
             }
         }
 
