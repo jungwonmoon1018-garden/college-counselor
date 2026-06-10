@@ -9,6 +9,11 @@
 
 # Builds
 **/dist/
+**/bin/
+**/obj/
+
+# Editor / local tooling
+.claude/launch.json
 
 # Environment / secrets
 **/.env

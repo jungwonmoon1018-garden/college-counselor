@@ -8,10 +8,6 @@ Deadline Tracker, Narrative Editor, Calibrated Fit Card, …) — and stays in s
 with `frontend/` automatically. This is the Windows parallel to
 [`../apple-webview`](../apple-webview).
 
-> Prefer this over the native `../windows` app for feature parity. The native
-> WPF app is a lightweight, from-scratch client that intentionally implements
-> only the core flow.
-
 ## Build & run (on Windows)
 Requires the **.NET 8 SDK** and the **Microsoft Edge WebView2 Runtime**
 (Evergreen — preinstalled on current Windows 10/11).

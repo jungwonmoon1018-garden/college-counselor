@@ -64,20 +64,6 @@ jobs:
           xcode-version: latest-stable
       - name: Install XcodeGen
         run: brew install xcodegen
-      - name: Build native app (apple/)
-        working-directory: apple
-        run: |
-          xcodegen generate
-          xcodebuild build \
-            -project CollegeCounselor.xcodeproj \
-            -scheme CollegeCounselor-iOS \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO
-          xcodebuild build \
-            -project CollegeCounselor.xcodeproj \
-            -scheme CollegeCounselor-macOS \
-            -destination 'generic/platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO
       - name: Build webview wrapper (apple-webview/)
         working-directory: apple-webview
         run: |
@@ -94,16 +80,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
   windows:
-    name: Windows app build (WPF / .NET 8)
+    name: Windows app build (WebView2 / .NET 8)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - name: Build native app (windows/)
-        working-directory: windows/CollegeCounselor
-        run: dotnet build -c Release
       - name: Build WebView2 wrapper (windows-webview/)
         working-directory: windows-webview/CollegeCounselorWeb
         run: dotnet build -c Release
