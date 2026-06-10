@@ -101,6 +101,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - name: Build
+      - name: Build native app (windows/)
         working-directory: windows/CollegeCounselor
+        run: dotnet build -c Release
+      - name: Build WebView2 wrapper (windows-webview/)
+        working-directory: windows-webview/CollegeCounselorWeb
         run: dotnet build -c Release
