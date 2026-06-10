@@ -1,13 +1,10 @@
-# College Counselor — WebView wrapper (macOS + iOS)
+# College Counselor — macOS + iOS app (WKWebView)
 
-The **fast v1**: a thin native `WKWebView` shell around the existing React SPA
+The Apple app: a thin native `WKWebView` shell around the React SPA
 (`../frontend`). One Swift codebase, two Apple targets (iOS + macOS). No
-JavaScript build coupling — the app just loads a configurable frontend URL, and
-all the existing web client behavior (auth, consent, BYOK, College Fit, chat)
-comes along for free.
-
-Use this for a quick ship; use the native app in [`../apple`](../apple) when you
-want platform-native UX.
+JavaScript build coupling — it loads a configurable frontend URL, so the **full**
+web client (survey onboarding, consent, BYOK, College Fit, full chat and every
+component) comes along automatically and stays in sync with `frontend/`.
 
 ## Build (on a Mac)
 
@@ -53,6 +50,4 @@ apple-webview/
 - Cookies/localStorage persist (`WKWebsiteDataStore.default()`), so the web
   app's session token survives relaunches.
 - App icon is not set — add an `Assets.xcassets`/`AppIcon` before shipping.
-- This wrapper and the native app share the same display name but **different**
-  bundle IDs (`ai.collegecounselor.web.app` vs `ai.collegecounselor.app`), so
-  both can be installed side by side.
+- Bundle ID: `ai.collegecounselor.web.app`.
