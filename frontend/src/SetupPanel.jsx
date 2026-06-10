@@ -136,11 +136,20 @@ export default function SetupPanel() {
           </a>
           <label style={label}>Paste the key you received</label>
           <input style={{ ...input, marginBottom: 10 }} value={scorecard} onChange={(e) => setScorecard(e.target.value)}
-                 placeholder="40-character api.data.gov key" autoComplete="off" spellCheck={false} />
-          <button style={btn(C.blue)} disabled={needsToken || !scorecard.trim() || busy === "score"}
-                  onClick={() => initialize({ scorecardApiKey: scorecard.trim() }, "score")}>
-            {busy === "score" ? "Saving…" : "Save Scorecard key to .env"}
-          </button>
+                 placeholder="40-character api.data.gov key (or DEMO_KEY)" autoComplete="off" spellCheck={false} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button style={btn(C.blue)} disabled={needsToken || !scorecard.trim() || busy === "score"}
+                    onClick={() => initialize({ scorecardApiKey: scorecard.trim() }, "score")}>
+              {busy === "score" ? "Verifying…" : "Verify & save to .env"}
+            </button>
+            <button style={btnGhost} disabled={needsToken || busy === "demo"}
+                    onClick={() => initialize({ scorecardApiKey: "DEMO_KEY" }, "demo")}>
+              {busy === "demo" ? "Verifying…" : "Use DEMO_KEY (rate-limited)"}
+            </button>
+          </div>
+          <p style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>
+            The key is checked live against api.data.gov before saving — it won't store a dead key.
+          </p>
         </div>
 
         {error && <div style={{ ...box, borderColor: C.red, color: C.red }}>⚠ {error}</div>}
@@ -148,6 +157,7 @@ export default function SetupPanel() {
           <div style={{ ...box, borderColor: C.green }}>
             <Row color={C.green}>✓ {result.message}</Row>
             <Row color={C.sub}>Wrote: {result.wrote.join(", ")}{result.backup ? ` · backup: ${result.backup}` : ""}</Row>
+            {result.scorecardVerified && <Row color={C.green}>Scorecard key verified live against api.data.gov ✓</Row>}
             {result.promotedDevKey && <Row color={C.sub}>Promoted the existing dev key, so current local data stays readable.</Row>}
             <Row color={C.orange}>Restart the backend (<code>npm start</code>) to apply.</Row>
           </div>

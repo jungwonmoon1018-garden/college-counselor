@@ -13,6 +13,8 @@
 # Environment / secrets
 **/.env
 **/.env.local
+**/.env.bak-*
+**/.env.tmp-*
 *.enc.json
 **/.dev-encryption-key
 

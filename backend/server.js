@@ -220,7 +220,11 @@ const PORT = parseInt(process.env.PORT || "3001", 10);
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173").split(",").map(s => s.trim());
 const NODE_ENV = process.env.NODE_ENV || "development";
-const SCORECARD_API_KEY = process.env.SCORECARD_API_KEY || "";
+// Treat an unfilled `.env.example` placeholder (REPLACE_WITH…) as unset, so a
+// freshly-copied .env doesn't make the server think a bogus key is live data.
+const SCORECARD_API_KEY = /^REPLACE_WITH/i.test(process.env.SCORECARD_API_KEY || "")
+  ? ""
+  : (process.env.SCORECARD_API_KEY || "");
 // ── First-run setup (guarded operator endpoint, see /api/setup/*) ──
 // A one-time token, regenerated every boot, gates the setup endpoint together
 // with a loopback-only check. We only consider setup "available" (and only
@@ -6524,12 +6528,28 @@ app.get("/api/setup/status", (req, res) => {
 
 const SCORECARD_KEY_RE = /^[A-Za-z0-9]{20,64}$/;
 
-app.post("/api/setup/initialize", (req, res) => {
+// Verify a College Scorecard / IPEDS key against the LIVE api.data.gov API so
+// we never persist a dead key. Requires outbound internet. `DEMO_KEY` is
+// api.data.gov's public, rate-limited test key (no signup needed).
+async function verifyScorecardKeyLive(apiKey) {
+  try {
+    const url = `https://api.data.gov/ed/collegescorecard/v1/schools?api_key=${encodeURIComponent(apiKey)}&per_page=1&fields=id`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (r.status === 200) return { ok: true, status: 200 };
+    if (r.status === 401 || r.status === 403) return { ok: false, status: r.status, message: "api.data.gov rejected that key. Double-check it, or use DEMO_KEY for testing." };
+    if (r.status === 429) return { ok: false, status: 429, message: "api.data.gov is rate-limiting right now (429). Try again shortly." };
+    return { ok: false, status: r.status, message: `Scorecard API returned HTTP ${r.status}.` };
+  } catch {
+    return { ok: false, status: 0, message: "Couldn't reach api.data.gov to verify the key (network error). Is the server online?" };
+  }
+}
+
+app.post("/api/setup/initialize", async (req, res) => {
   try {
     if (!isLoopbackRequest(req)) return res.status(403).json({ error: "Setup is only available on the server host (localhost)." });
     if (!setupTokenValid(req)) return res.status(401).json({ error: "Invalid or missing setup token. Use the one-time token printed in the server console at boot." });
 
-    const { generateEncryptionKey, scorecardApiKey } = req.body || {};
+    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey } = req.body || {};
     const { envPath, examplePath, devKeyPath } = defaultPaths(__dirname);
     const lines = readEnvLines(envPath, examplePath);
     const wrote = [];
@@ -6558,11 +6578,17 @@ app.post("/api/setup/initialize", (req, res) => {
       }
     }
 
-    // ── SCORECARD_API_KEY (IPEDS data) ──
+    // ── SCORECARD_API_KEY (IPEDS data) — live-verified over the internet ──
+    let scorecardVerified = false;
     if (typeof scorecardApiKey === "string" && scorecardApiKey.trim()) {
       const k = scorecardApiKey.trim();
-      if (!SCORECARD_KEY_RE.test(k)) {
-        return res.status(400).json({ error: "That doesn't look like an api.data.gov key (expected 20–64 alphanumeric characters)." });
+      if (k !== "DEMO_KEY" && !SCORECARD_KEY_RE.test(k)) {
+        return res.status(400).json({ error: "That doesn't look like an api.data.gov key (DEMO_KEY, or 20–64 alphanumeric characters)." });
+      }
+      if (verifyScorecardKey !== false) {
+        const check = await verifyScorecardKeyLive(k);
+        if (!check.ok) return res.status(400).json({ error: check.message, scorecardVerify: check });
+        scorecardVerified = true;
       }
       setValue(lines, "SCORECARD_API_KEY", k);
       wrote.push("SCORECARD_API_KEY");
@@ -6580,6 +6606,7 @@ app.post("/api/setup/initialize", (req, res) => {
       ok: true,
       wrote,
       promotedDevKey,
+      scorecardVerified,
       backup: backup ? path.basename(backup) : null,
       restartRequired: true,
       message: "Saved to .env. Restart the backend for the changes to take effect.",

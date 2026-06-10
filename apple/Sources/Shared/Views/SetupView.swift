@@ -110,11 +110,20 @@ struct SetupView: View {
             TextField("setup.score_key_ph", text: $scorecard)
                 .textFieldStyle(.roundedBorder).disableAutocorrection(true)
                 .font(.system(.footnote, design: .monospaced))
-            Button(action: { run("score") { try await APIClient.shared.setupInitialize(token: token, generateEncryptionKey: false, scorecardApiKey: scorecard.trimmingCharacters(in: .whitespaces)) } }) {
-                HStack { if busy == "score" { ProgressView().controlSize(.small) }; Text("setup.score_btn") }
+            HStack {
+                Button(action: { run("score") { try await APIClient.shared.setupInitialize(token: token, generateEncryptionKey: false, scorecardApiKey: scorecard.trimmingCharacters(in: .whitespaces)) } }) {
+                    HStack { if busy == "score" { ProgressView().controlSize(.small) }; Text("setup.score_btn") }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(needsToken || scorecard.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
+
+                Button(action: { run("demo") { try await APIClient.shared.setupInitialize(token: token, generateEncryptionKey: false, scorecardApiKey: "DEMO_KEY") } }) {
+                    HStack { if busy == "demo" { ProgressView().controlSize(.small) }; Text("setup.score_demo") }
+                }
+                .buttonStyle(.bordered)
+                .disabled(needsToken || busy != nil)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(needsToken || scorecard.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
+            Text("setup.score_verify_note").font(.caption2).foregroundStyle(Theme.textMuted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .ccCard()

@@ -55,7 +55,9 @@
 "setup.email_ph" = "you@example.com";
 "setup.score_signup" = "↗ Get a free key (api.data.gov signup)";
 "setup.score_key_ph" = "40-character api.data.gov key";
-"setup.score_btn" = "Save Scorecard key to .env";
+"setup.score_btn" = "Verify & save key";
+"setup.score_demo" = "Use DEMO_KEY";
+"setup.score_verify_note" = "The key is checked live against api.data.gov before saving — a dead key is never stored.";
 "setup.promoted" = "Promoted the existing dev key, so current local data stays readable.";
 "setup.restart" = "Restart the backend to apply.";
 
