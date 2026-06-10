@@ -92,3 +92,15 @@ jobs:
             -scheme CollegeCounselorWeb-macOS \
             -destination 'generic/platform=macOS' \
             CODE_SIGNING_ALLOWED=NO
+
+  windows:
+    name: Windows app build (WPF / .NET 8)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build
+        working-directory: windows/CollegeCounselor
+        run: dotnet build -c Release
