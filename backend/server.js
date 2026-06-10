@@ -6445,7 +6445,7 @@ app.get("/api/baselines/status", (_req, res) => {
         admissionsDeadlinesLoaded: orchestrationCatalog.deadlines?.entries?.length || 0,
       },
       status: gpaCount > 0 && satCount > 0 && collegeCount > 0 ? "ready" : "needs_seeding",
-      freshness: { datasets, staleCount: datasets.filter(d => d.stale).length },
+      freshness: { datasets, staleCount: datasets.filter(d => d.stale).length, lastChecked: new Date().toISOString() },
       retentionMode: RETENTION_MODE,
     });
   } catch (err) {
@@ -7534,6 +7534,7 @@ async function loadDashboard() {
         <div class="stat-card"><div class="label">Retention Mode</div><div class="value" style="font-size:1rem">\${data.retentionMode || "consumer"}</div></div>
         <div class="stat-card"><div class="label">Status</div><div class="value" style="font-size:1rem;color:var(--green)">\${data.status || "unknown"}</div></div>
       </div>
+      \${data.freshness?.datasets ? '<h2 style="margin-top:18px">Baseline Data Freshness</h2>' : ""}
       \${data.freshness?.datasets ? data.freshness.datasets.map(d => \`
         <div class="freshness-item">
           <div><strong>\${d.label}</strong><div style="color:var(--muted);font-size:0.8rem">\${d.count.toLocaleString()} records</div></div>

@@ -518,8 +518,11 @@ describe("GET /api/students/export", () => {
 describe("POST /api/agents/orchestrate", () => {
   it("routes a college-match query with masking and structured grounding", async () => {
     const { token } = await createStudentSession();
+    // NOTE: SSNs are now rejected outright by input screening (see the
+    // "blocks credential input" case below), so this masking test uses an
+    // email — a PII value that is masked-and-processed rather than blocked.
     const { status, data } = await req("POST", "/api/agents/orchestrate", {
-      query: "Can I get into UMich Ross? My SSN is 123-45-6789 and my email is student@example.com.",
+      query: "Can I get into UMich Ross? My email is student@example.com.",
     }, {
       Authorization: `Bearer ${token}`,
     });
@@ -528,12 +531,22 @@ describe("POST /api/agents/orchestrate", () => {
     assert.equal(data.route.intent, "college_match");
     assert.equal(data.executionPlan.primaryAgent.id, "data_miner");
     assert.equal(data.compliance.piiMasking.applied, true);
-    assert.match(data.query.masked, /STUDENT_SSN_01/);
     assert.match(data.query.masked, /STUDENT_EMAIL_01/);
     assert.ok(Array.isArray(data.retrieval.structured.colleges));
     assert.ok(data.retrieval.structured.colleges.some(c => c.name.includes("University of Michigan")));
     assert.ok(Array.isArray(data.retrieval.unstructured.topDocuments));
     assert.ok(data.retrieval.unstructured.topDocuments.length > 0);
+  });
+
+  it("blocks credential input (SSN) instead of processing it", async () => {
+    const { token } = await createStudentSession();
+    const { status, data } = await req("POST", "/api/agents/orchestrate", {
+      query: "Can I get into UMich? My SSN is 123-45-6789.",
+    }, {
+      Authorization: `Bearer ${token}`,
+    });
+    assert.equal(status, 400);
+    assert.equal(data.blocked, true);
   });
 
   it("routes FAFSA queries to the compliance officer and reports missing corpus honestly", async () => {

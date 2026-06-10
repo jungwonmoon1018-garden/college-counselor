@@ -31,16 +31,12 @@ jobs:
           node --check env-file.js
           node --check server.js
           node --check scripts/setup-secrets.mjs
-      - name: Generate college profiles (when IPEDS source present)
-        # baseline-data.js now tolerates a missing generated file (falls back to
-        # manual profiles), so this is optional — generate the full set only
-        # when the IPEDS CSVs happen to be available.
-        run: |
-          if [ -f data/ipeds/hd2023_unzipped/hd2023.csv ] && [ -f data/ipeds/adm2023_unzipped/adm2023.csv ]; then
-            npm run generate:colleges
-          else
-            echo "IPEDS CSVs absent — baseline-data.js will use manual profiles."
-          fi
+      - name: Generate college profiles from test fixture
+        # Build the generated profiles from a small committed IPEDS fixture so
+        # the integration tests that look up specific schools (UMich, MIT,
+        # Vanderbilt, Georgetown) have deterministic data. Production uses the
+        # full IPEDS CSVs via `npm run generate:colleges` with no args.
+        run: npm run generate:colleges -- --hd tests/fixtures/ipeds/hd2023.csv --adm tests/fixtures/ipeds/adm2023.csv
       - name: Test
         # Dummy secrets keep modules that read them happy; tests don't touch real
         # PII. NODE_ENV stays development so boot-time fatals don't trip.
