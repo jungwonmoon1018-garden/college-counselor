@@ -8,6 +8,7 @@
   },
   "scripts": {
     "generate:colleges": "node scripts/generate-college-profiles.mjs",
+    "setup": "node scripts/setup-secrets.mjs",
     "start": "node server.js",
     "start:sim": "node simulation-sidecar.js",
     "dev": "node --watch server.js",
