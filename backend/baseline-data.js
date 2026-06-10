@@ -4,8 +4,19 @@
 // Sources: NCES, CollegeBoard, ACT.org, NACAC
 // This file is imported by server.js and seeded into SQLite on first run.
 
-// ─── GPA Distributions (Source: NCES HSLS:09 + ELS longitudinal studies) ───
-import { GENERATED_COLLEGE_PROFILES } from "./generated/college-profiles.generated.js";
+// ─── Generated college profiles (optional) ───
+// generated/college-profiles.generated.js is built offline from IPEDS CSVs
+// (`npm run generate:colleges`) and is git-ignored, so it's absent on a fresh
+// clone / CI. Load it via a guarded dynamic import and fall back to the
+// manually-curated profiles below when it's missing, instead of crashing the
+// whole process at import time.
+let GENERATED_COLLEGE_PROFILES = [];
+try {
+  ({ GENERATED_COLLEGE_PROFILES } = await import("./generated/college-profiles.generated.js"));
+} catch (err) {
+  if (err?.code !== "ERR_MODULE_NOT_FOUND") throw err;
+  console.warn("[baseline] generated college profiles not found — using manual profiles only. Run `npm run generate:colleges` for the full IPEDS set.");
+}
 
 export const GPA_BASELINES = [
   // National — Unweighted

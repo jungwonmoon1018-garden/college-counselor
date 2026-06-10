@@ -31,25 +31,19 @@ jobs:
           node --check env-file.js
           node --check server.js
           node --check scripts/setup-secrets.mjs
-      - name: Prepare generated college profiles
-        # baseline-data.js statically imports generated/college-profiles.generated.js.
-        # That file is git-ignored and is built from IPEDS CSVs that aren't in the
-        # repo. Generate it when the source data is present; otherwise write an
-        # empty stub so the module resolves and the (non-IPEDS) tests can run.
+      - name: Generate college profiles (when IPEDS source present)
+        # baseline-data.js now tolerates a missing generated file (falls back to
+        # manual profiles), so this is optional — generate the full set only
+        # when the IPEDS CSVs happen to be available.
         run: |
           if [ -f data/ipeds/hd2023_unzipped/hd2023.csv ] && [ -f data/ipeds/adm2023_unzipped/adm2023.csv ]; then
             npm run generate:colleges
           else
-            mkdir -p generated
-            echo 'export const GENERATED_COLLEGE_PROFILES = [];' > generated/college-profiles.generated.js
-            echo "::warning::IPEDS CSVs absent; using an empty generated-profiles stub for CI."
+            echo "IPEDS CSVs absent — baseline-data.js will use manual profiles."
           fi
       - name: Test
         # Dummy secrets keep modules that read them happy; tests don't touch real
-        # PII. Non-blocking: the suite includes integration tests that boot the
-        # server and depend on data not committed to the repo, so it can't be a
-        # clean-checkout gate yet. Syntax checks above are the hard gate.
-        continue-on-error: true
+        # PII. NODE_ENV stays development so boot-time fatals don't trip.
         env:
           NODE_ENV: development
           ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
