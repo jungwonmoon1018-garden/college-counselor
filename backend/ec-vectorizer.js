@@ -6,14 +6,19 @@ export const EC_FACTORS = Object.freeze([
   "passion_and_consistency",
   "talents_and_awards",
   "relevance_to_intended_major",
+  "community_and_character",
 ]);
 
+// Weights sum to 1.0. The sixth factor (community_and_character) takes 0.10;
+// the original five were reduced ~proportionally to make room while keeping
+// their relative ordering intact.
 export const EC_FACTOR_WEIGHTS_DEFAULT = Object.freeze({
-  impact_and_scope: 0.22,
-  leadership_and_initiative: 0.22,
-  passion_and_consistency: 0.22,
-  talents_and_awards: 0.18,
-  relevance_to_intended_major: 0.16,
+  impact_and_scope: 0.20,
+  leadership_and_initiative: 0.20,
+  passion_and_consistency: 0.20,
+  talents_and_awards: 0.16,
+  relevance_to_intended_major: 0.14,
+  community_and_character: 0.10,
 });
 
 export const WELLBEING_LIMITS = Object.freeze({
@@ -39,6 +44,12 @@ export const LEXICON = {
   passion: {
     output: ["portfolio", "website", "repository", "github", "published", "performances", "exhibits", "pieces", "songs", "albums", "papers", "videos", "articles", "posts", "blog", "series", "matches played"],
     time_phrases: ["since 9th grade", "since 8th grade", "since middle school", "for 4 years", "for 3 years", "for 2 years", "every week", "every day", "daily", "weekly"],
+  },
+  community: {
+    service: ["volunteer", "volunteering", "community service", "service trip", "charity", "charitable", "donat", "fundrais", "nonprofit", "non-profit", "ngo", "shelter", "food bank", "soup kitchen", "homeless", "outreach", "relief", "humanitarian", "habitat for humanity", "red cross", "philanthrop"],
+    mentorship: ["mentor", "mentoring", "tutor", "tutoring", "taught", "teaching", "coached", "coaching", "guided", "peer support", "peer counsel", "big brother", "big sister", "advised younger", "role model"],
+    inclusivity: ["inclusion", "inclusiv", "diversity", "equity", "accessib", "underserved", "underrepresented", "marginalized", "first-generation", "first gen", "disabilit", "special needs", "esl", "refugee", "immigrant", "low-income"],
+    character: ["integrity", "empathy", "empathetic", "compassion", "ethic", "honesty", "responsib", "kindness", "civic", "advocacy", "activism", "social justice", "gave back", "community impact"],
   },
   awards: {
     international: ["international", "world championship", "imo", "ipho", "icho", "ibo", "intel isef", "isef finalist", "olympiad gold"],
@@ -200,6 +211,7 @@ export function vectorizeEC(ec, majorInterest = null) {
     passion_and_consistency: [],
     talents_and_awards: [],
     relevance_to_intended_major: [],
+    community_and_character: [],
   };
 
   let impact = 0;
@@ -278,12 +290,33 @@ export function vectorizeEC(ec, majorInterest = null) {
   }
   relevance = clamp01(relevance);
 
+  // Community & character: intangible service / empathy / integrity signals.
+  // Primary signal is keyword-driven (service, mentorship, inclusivity,
+  // character). A gentle floor derived from impact/leadership/passion keeps
+  // genuinely high-commitment, service-leaning work from scoring zero when the
+  // student simply didn't spell out the soft qualities. Explicit signals
+  // dominate; the derived floor only lifts, never caps.
+  let community = 0;
+  const serviceHits = countHits(desc, LEXICON.community.service);
+  const mentorHits = countHits(desc, LEXICON.community.mentorship);
+  const inclusivityHits = countHits(desc, LEXICON.community.inclusivity);
+  const characterHits = countHits(desc, LEXICON.community.character);
+  if (serviceHits > 0) { community += Math.min(0.4, 0.15 * serviceHits); reasoning.community_and_character.push(`Service signals: ${serviceHits}`); }
+  if (mentorHits > 0) { community += Math.min(0.3, 0.15 * mentorHits); reasoning.community_and_character.push(`Mentorship signals: ${mentorHits}`); }
+  if (inclusivityHits > 0) { community += Math.min(0.25, 0.12 * inclusivityHits); reasoning.community_and_character.push(`Inclusivity / equity signals: ${inclusivityHits}`); }
+  if (characterHits > 0) { community += Math.min(0.2, 0.1 * characterHits); reasoning.community_and_character.push(`Character / civic signals: ${characterHits}`); }
+  const derivedFloor = round2(((impact + leadership + passion) / 3) * 0.4);
+  if (community < derivedFloor) { community = derivedFloor; reasoning.community_and_character.push(`Derived floor from impact/leadership/passion: ${derivedFloor}`); }
+  if (reasoning.community_and_character.length === 0) reasoning.community_and_character.push("No explicit community / character signals detected");
+  community = clamp01(community);
+
   const vector = {
     impact_and_scope: round2(impact),
     leadership_and_initiative: round2(leadership),
     passion_and_consistency: round2(passion),
     talents_and_awards: round2(awards),
     relevance_to_intended_major: round2(relevance),
+    community_and_character: round2(community),
   };
   const composite = computeComposite(vector);
   const label = compositeLabel(composite);
@@ -444,13 +477,25 @@ export function buildNextStepPlan({
   );
   const wellbeing = assessWellbeing(totalWeeklyHours);
 
-  // Detect the student's weakest EC factor (where growth has most headroom)
+  // Detect the student's weakest EC factor (where growth has most headroom).
+  // Only factors that actually appear in at least one vector are eligible to
+  // be flagged "weakest" — otherwise a factor no vector carries (e.g. an
+  // older stored vector predating community_and_character) would always read
+  // as 0 and dominate the suggestion list spuriously.
   const factorAverages = {};
+  const presentFactors = [];
   for (const f of EC_FACTORS) {
-    const vals = ecVectors.map((v) => Number(v[f] ?? v.vector?.[f] ?? 0)).filter((n) => !isNaN(n));
-    factorAverages[f] = vals.length ? round2(vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
+    const vals = ecVectors
+      .map((v) => Number(v[f] ?? v.vector?.[f]))
+      .filter((n) => Number.isFinite(n));
+    if (vals.length) {
+      factorAverages[f] = round2(vals.reduce((a, b) => a + b, 0) / vals.length);
+      presentFactors.push(f);
+    } else {
+      factorAverages[f] = 0;
+    }
   }
-  const sortedFactors = [...EC_FACTORS].sort(
+  const sortedFactors = [...(presentFactors.length ? presentFactors : EC_FACTORS)].sort(
     (a, b) => factorAverages[a] - factorAverages[b]
   );
   const weakestFactor = sortedFactors[0];
@@ -526,6 +571,11 @@ export function buildNextStepPlan({
       title: "Explore 2-3 possible majors lightly before committing",
       detail: "Without a declared major, relevance is hard to score. Try a short, low-commitment exploration (a summer course, an online project, an informational interview) before reshaping your ECs.",
       timeCostPerWeek: 1,
+    },
+    community_and_character: {
+      title: "Engage in a community-impact initiative",
+      detail: "Demonstrate empathy and service through mentoring or volunteer work tied to something you already care about. Authentic, sustained service speaks louder than one-off hours — pick a cause and show up for it consistently, and let it grow naturally out of an activity you already do rather than bolting on a new one.",
+      timeCostPerWeek: Math.min(2, headroomHours),
     },
   };
 

@@ -19,6 +19,8 @@ import crypto from "node:crypto";
 
 import {
   LEXICON,
+  EC_FACTORS,
+  EC_FACTOR_WEIGHTS_DEFAULT,
   countHits,
   extractNumericImpact,
   detectCompetitiveActivity,
@@ -1197,14 +1199,16 @@ export function projectStrengthToLegacyVector(factors = {}) {
     passion_and_consistency: round2(dedication),
     talents_and_awards: round2(clamp01((achievement * 0.6) + (prestige * 0.4))),
     relevance_to_intended_major: round2(clamp01((majorSpike * 0.8) + (narrativeFit * 0.2))),
+    // Community & character: the strength model has no explicit service factor,
+    // so project it from sustained dedication + leadership + narrative
+    // authenticity, which are the closest proxies for empathy/service/integrity.
+    community_and_character: round2(clamp01((dedication * 0.4) + (leadership * 0.3) + (narrativeFit * 0.3))),
   };
 
-  const composite =
-    (vector.impact_and_scope * 0.22) +
-    (vector.leadership_and_initiative * 0.22) +
-    (vector.passion_and_consistency * 0.22) +
-    (vector.talents_and_awards * 0.18) +
-    (vector.relevance_to_intended_major * 0.16);
+  // Composite uses the shared EC weights so this projection stays in lockstep
+  // with EC_FACTOR_WEIGHTS_DEFAULT (no duplicated literals to drift).
+  let composite = 0;
+  for (const k of EC_FACTORS) composite += (vector[k] || 0) * (EC_FACTOR_WEIGHTS_DEFAULT[k] || 0);
 
   let label = "early_stage";
   if (composite >= 0.8) label = "exceptional";

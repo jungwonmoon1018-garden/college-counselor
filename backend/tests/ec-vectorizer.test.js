@@ -13,13 +13,14 @@ import {
 } from "../ec-vectorizer.js";
 
 describe("EC_FACTORS", () => {
-  it("exposes the five factors in fixed order", () => {
-    assert.equal(EC_FACTORS.length, 5);
+  it("exposes the six factors in fixed order", () => {
+    assert.equal(EC_FACTORS.length, 6);
     assert.ok(EC_FACTORS.includes("impact_and_scope"));
     assert.ok(EC_FACTORS.includes("leadership_and_initiative"));
     assert.ok(EC_FACTORS.includes("passion_and_consistency"));
     assert.ok(EC_FACTORS.includes("talents_and_awards"));
     assert.ok(EC_FACTORS.includes("relevance_to_intended_major"));
+    assert.ok(EC_FACTORS.includes("community_and_character"));
   });
 });
 
@@ -103,6 +104,32 @@ describe("vectorizeEC", () => {
     for (const f of EC_FACTORS) {
       assert.ok(vector[f] >= 0 && vector[f] <= 1, `${f} out of range: ${vector[f]}`);
     }
+  });
+
+  it("rewards service / mentorship via community_and_character", () => {
+    const service = vectorizeEC({
+      name: "Community Tutoring",
+      role: "Volunteer mentor",
+      description: "I volunteer weekly tutoring underserved first-generation students at a local nonprofit, mentoring them in math with empathy and patience.",
+      hoursPerWeek: 4,
+      weeksPerYear: 40,
+      yearsOfParticipation: 3,
+    }, "Education");
+    const solo = vectorizeEC({
+      name: "Competitive Coding",
+      role: "Member",
+      description: "I grind LeetCode problems alone to prepare for programming contests.",
+      hoursPerWeek: 4,
+      weeksPerYear: 40,
+      yearsOfParticipation: 3,
+    }, "Computer Science");
+    assert.ok(service.vector.community_and_character >= 0.3, `community too low: ${service.vector.community_and_character}`);
+    assert.ok(
+      service.vector.community_and_character > solo.vector.community_and_character,
+      `service (${service.vector.community_and_character}) should exceed solo (${solo.vector.community_and_character})`,
+    );
+    assert.ok(Array.isArray(service.reasoning.community_and_character));
+    assert.ok(service.reasoning.community_and_character.length > 0);
   });
 });
 
