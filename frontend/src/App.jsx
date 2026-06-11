@@ -8,6 +8,7 @@ import FactorVector5 from "./components/FactorVector5.jsx";
 import SpikeFinder from "./components/SpikeFinder.jsx";
 import CalibratedFitCard from "./components/CalibratedFitCard.jsx";
 import CourseSequencer from "./components/CourseSequencer.jsx";
+import SetupPanel from "./SetupPanel.jsx";
 import { detectLocale, t as tt } from "./i18n.js";
 
 // ═══════════════════════════════════════════════════════════
@@ -2481,7 +2482,7 @@ select option:hover, select option:focus, select option:checked{background:rgba(
 // ═══════════════════════════════════════════════════════════
 // MAIN APP — 4 screens: CREATE ACCOUNT → SURVEY → LOGIN → CHAT
 // ═══════════════════════════════════════════════════════════
-const S = { LOADING:0, CREATE:1, LOGIN:2, APIKEY:5, SURVEY:3, CHAT:4 };
+const S = { LOADING:0, CREATE:1, LOGIN:2, APIKEY:5, SURVEY:3, CHAT:4, SETUP:6 };
 
 // Per-provider deep-link to the page where the user creates an API key.
 // Opens in a new tab — the student creates a key in their own console,
@@ -2522,7 +2523,12 @@ export default function App() {
   const [accounts, setAccounts] = useState({});
 
   // Create account fields
-  const [cName, setCName] = useState("");
+  // Name is collected as first + last (browser autofill via autoComplete
+  // given-name/family-name); cName stays as the combined value the rest of
+  // the app and the backend already expect.
+  const [cFirst, setCFirst] = useState("");
+  const [cLast, setCLast] = useState("");
+  const cName = `${cFirst} ${cLast}`.replace(/\s+/g, " ").trim();
   const [cEmail, setCEmail] = useState("");
   const [cGrade, setCGrade] = useState("");
   const [cPass, setCPass] = useState("");
@@ -3596,7 +3602,8 @@ export default function App() {
   // ─── CREATE ACCOUNT ───
   const handleCreate = useCallback(async () => {
     setCError("");
-    if (!cName.trim()) { setCError("Name is required"); return; }
+    if (!cFirst.trim()) { setCError("First name is required"); return; }
+    if (!cLast.trim()) { setCError("Last name is required"); return; }
     if (!cEmail.trim()) { setCError("Email is required"); return; }
     if (!cEmail.includes("@") || !cEmail.includes(".")) { setCError("Please enter a valid email address."); return; }
     if (!cGrade) { setCError("Select your grade"); return; }
@@ -3660,10 +3667,21 @@ export default function App() {
       } catch (err) { console.warn("RAG registration failed (non-blocking):", err?.message); }
     }
 
-    // Go to API-key prerequisite → then survey
+    // First-run only: if the backend still needs an encryption/IPEDS key
+    // (and we're on the server host, where /api/setup/status answers), route
+    // through the one-time server-setup step. Once configured — or for a
+    // remote backend that 403s the loopback-only status — skip straight to
+    // the API-key prerequisite. The setup step itself hands off to
+    // gateToScreen(S.SURVEY), so the API-key scene always comes next.
     setSurveyStep(0);
-    gateToScreen(S.SURVEY);
-  }, [cName, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData, accounts, gateToScreen]);
+    let needsSetup = false;
+    try {
+      const sres = await fetch("/api/setup/status");
+      if (sres.ok) { const sj = await sres.json(); needsSetup = !!sj.setupAvailable; }
+    } catch { /* no backend / not on host → skip setup */ }
+    if (needsSetup) setScreen(S.SETUP);
+    else gateToScreen(S.SURVEY);
+  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData, accounts, gateToScreen]);
 
   // ─── LOGIN ───
   const [loginAttempts, setLoginAttempts] = useState({});
@@ -4081,9 +4099,17 @@ export default function App() {
           </div>
 
           <div style={{ display:"flex",flexDirection:"column",gap:14 }}>
-            <div>
-              <label style={labelStyle}>Full name</label>
-              <input value={cName} onChange={e=>setCName(e.target.value)} placeholder="Alex Kim" style={inputStyle} />
+            <div style={{ display:"flex",gap:10 }}>
+              <div style={{ flex:1 }}>
+                <label style={labelStyle}>First name</label>
+                <input value={cFirst} onChange={e=>setCFirst(e.target.value)} placeholder="Alex"
+                       name="given-name" autoComplete="given-name" autoCapitalize="words" style={inputStyle} />
+              </div>
+              <div style={{ flex:1 }}>
+                <label style={labelStyle}>Last name</label>
+                <input value={cLast} onChange={e=>setCLast(e.target.value)} placeholder="Kim"
+                       name="family-name" autoComplete="family-name" autoCapitalize="words" style={inputStyle} />
+              </div>
             </div>
             <div>
               <label style={labelStyle}>School or organizational email</label>
@@ -4172,6 +4198,22 @@ export default function App() {
     );
   }
 
+
+  // ═══════════════════════════════════════════════════════════
+  // FIRST-RUN SERVER SETUP SCREEN (encryption key + IPEDS)
+  // ═══════════════════════════════════════════════════════════
+  // Reached only right after registration when /api/setup/status reports the
+  // backend still needs an encryption/IPEDS key (i.e. first run on the server
+  // host). The embedded SetupPanel hands off to the API-key scene via
+  // onComplete, so "API key comes next" once .env is saved.
+  if (screen === S.SETUP) {
+    return (
+      <>
+        <SetupPanel embedded onComplete={() => gateToScreen(S.SURVEY)} />
+        <style>{GLOBAL_CSS}</style>
+      </>
+    );
+  }
 
   // ═══════════════════════════════════════════════════════════
   // SURVEY SCREEN
