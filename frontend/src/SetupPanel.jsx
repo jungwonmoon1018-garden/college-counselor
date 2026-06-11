@@ -28,7 +28,12 @@ const input = { width: "100%", padding: "9px 11px", borderRadius: 8, background:
 const btn = (bg) => ({ padding: "9px 16px", borderRadius: 8, border: "none", background: bg, color: "#0a0e17", fontWeight: 600, cursor: "pointer", fontSize: 14 });
 const btnGhost = { padding: "9px 16px", borderRadius: 8, border: `1px solid ${C.border}`, background: "transparent", color: C.text, cursor: "pointer", fontSize: 14 };
 
-export default function SetupPanel() {
+// Props:
+//   embedded   — rendered inside the registration flow (vs the standalone
+//                /setup.html page). Adds a "Continue to API key" handoff.
+//   onComplete — called when the operator finishes (or skips) this step;
+//                the flow uses it to advance to the API-key scene.
+export default function SetupPanel({ embedded = false, onComplete } = {}) {
   const [status, setStatus] = useState(null);
   const [statusErr, setStatusErr] = useState("");
   const [token, setToken] = useState("");
@@ -71,11 +76,15 @@ export default function SetupPanel() {
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, padding: "32px 16px" }}>
       <div style={{ maxWidth: 620, margin: "0 auto" }}>
-        <h1 style={{ fontSize: 24, marginBottom: 4 }}>Operator Setup</h1>
+        <h1 style={{ fontSize: 24, marginBottom: 4 }}>
+          {embedded ? "One-time server setup" : "Operator Setup"}
+        </h1>
         <p style={{ color: C.sub, fontSize: 14, marginBottom: 20 }}>
-          First-run deployment configuration. This page only works on the server host and
-          requires the one-time token printed in the backend console at startup
-          (<code>[SETUP] …</code>).
+          {embedded
+            ? "Your account is created. Before the AI features turn on, the backend needs its encryption key and (optionally) live college data. This runs once for the whole deployment — paste the one-time token from your server console below, then continue."
+            : <>First-run deployment configuration. This page only works on the server host and
+              requires the one-time token printed in the backend console at startup
+              (<code>[SETUP] …</code>).</>}
         </p>
 
         {/* Status */}
@@ -160,6 +169,19 @@ export default function SetupPanel() {
             {result.scorecardVerified && <Row color={C.green}>Scorecard key verified live against api.data.gov ✓</Row>}
             {result.promotedDevKey && <Row color={C.sub}>Promoted the existing dev key, so current local data stays readable.</Row>}
             <Row color={C.orange}>Restart the backend (<code>npm start</code>) to apply.</Row>
+          </div>
+        )}
+
+        {embedded && (
+          <div style={{ ...box, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <span style={{ color: C.muted, fontSize: 12 }}>
+              {scoreConfigured && encConfigured
+                ? "Both keys configured."
+                : "You can finish this later from the Setup page — the app still works."}
+            </span>
+            <button style={btn(C.green)} onClick={() => onComplete && onComplete()}>
+              Continue to API key →
+            </button>
           </div>
         )}
       </div>
