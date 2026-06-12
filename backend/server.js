@@ -84,6 +84,8 @@ import { composeAnswer, composeDeterministicAnswer } from "./answer-composer.js"
 import { initReviewQueue, prepareReviewStatements, submitForReview, shouldTriggerReview, getQueueStats } from "./review-queue.js";
 import { initPIIVault, preparePIIStatements, storeStudentPII, retrieveStudentPII, deleteAllStudentPII, cleanExpiredDocuments, hashStudentIdForProvider, isBYOKAllowed, lookupStudentBYOK } from "./pii-vault.js";
 import { migrateAllStudentClaudeModels, migrateOneStudentClaudeModels, ensureBudgetColumn, getStudentBudget, setStudentBudget, getMonthlySpendUsd, checkBudget, CURRENT_TARGETS, loadCachedTargetsIntoMemory, refreshClaudeTargetsAndMigrate } from "./claude-model-migration.js";
+import { OPENROUTER_TARGETS, OPENROUTER_STATUS, refreshOpenRouterTargets } from "./openrouter-model-refresh.js";
+import { buildMethodology } from "./methodology.js";
 import * as chatHistory from "./chat-history.js";
 import { makeWebSearchTool, makeWebFetchTool, buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS } from "./credible-sources.js";
 import { extractCollegeValues, computeFit } from "./college-values.js";
@@ -92,7 +94,7 @@ import { screenInput, screenOutput, restorePII } from "./content-moderation.js";
 import { grantConsent, hasActiveConsent, validateRequiredConsents, getOnboardingConsentRequirements } from "./consent.js";
 import { initDomainMonitor, prepareMonitorStatements } from "./domain-monitor.js";
 import { runRetentionCleanup, getRetentionReport } from "./retention.js";
-import { registerStandardJobs, startAllJobs, stopAllJobs, getJobStatus } from "./batch-jobs.js";
+import { registerStandardJobs, registerJob, startAllJobs, stopAllJobs, getJobStatus } from "./batch-jobs.js";
 import { initVectorStore, prepareVectorStatements, keywordSearch, getVectorStoreStats } from "./vector-store.js";
 import { validateEvidenceSources } from "./source-registry.js";
 import { initRAGTables, seedBaselines, prepareRAGStatements, syncStudentData, assembleRAGContext, getDirectStructuredStudentData, getStudentTrends, enhancedCollegeMatch, fetchAndPersistCollegeHistory, buildCollegeHistoryContext, extractGoalUnitIds } from "./rag-engine.js";
@@ -394,9 +396,11 @@ try {
 //     single tiny call per day. If the API is unreachable, we keep using
 //     the cached/default targets and try again next cycle.
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let claudeTargetsLastRefresh = null; // ISO string, surfaced via /api/methodology
 async function refreshClaudeTargetsNow(reason = "scheduled") {
   if (!process.env.ANTHROPIC_API_KEY) return;
   const r = await refreshClaudeTargetsAndMigrate(piiVault, process.env.ANTHROPIC_API_KEY);
+  claudeTargetsLastRefresh = new Date().toISOString();
   if (r.refreshed && r.changes.length > 0) {
     console.log(`[CLAUDE-MIGRATE] Live refresh (${reason}): ${r.changes.length} target(s) updated; ${r.migrated}/${r.scanned} students migrated`);
   } else if (r.refreshed) {
@@ -406,6 +410,14 @@ async function refreshClaudeTargetsNow(reason = "scheduled") {
 refreshClaudeTargetsNow("boot").catch(err => console.warn("[CLAUDE-MIGRATE] Boot refresh threw:", err.message));
 setInterval(() => {
   refreshClaudeTargetsNow("daily").catch(err => console.warn("[CLAUDE-MIGRATE] Daily refresh threw:", err.message));
+}, REFRESH_INTERVAL_MS).unref();
+
+// 2c. OpenRouter recommended-model refresh — same 24h cadence, but migration
+//     is PROPOSE-ONLY (human approval via the BYOK "Update models" prompt). No
+//     student row is rewritten automatically for BYOK providers.
+refreshOpenRouterTargets({ reason: "boot" }).catch(err => console.warn("[OR-MIGRATE] Boot refresh threw:", err.message));
+setInterval(() => {
+  refreshOpenRouterTargets({ reason: "daily" }).catch(err => console.warn("[OR-MIGRATE] Daily refresh threw:", err.message));
 }, REFRESH_INTERVAL_MS).unref();
 
 // 3. Vector Store (separate DB, no PII)
@@ -483,6 +495,28 @@ registerStandardJobs({
   monitorStmts,
   retentionMode: RETENTION_MODE,
 });
+
+// Opt-in auto-refresh of Common Data Set records (the daily domain_monitor
+// already watches official pages; this re-ingests the newest registered CDS
+// cycle). OFF by default because it does network I/O across many schools —
+// enable with AUTO_REFRESH_CDS=1, tune cycle via CDS_REFRESH_CYCLE. Only
+// data from operator-registered authoritative CDS links is ingested; nothing
+// is fabricated. AP concept data is a curated catalog (no live source).
+if (process.env.AUTO_REFRESH_CDS === "1") {
+  const CDS_CYCLE = process.env.CDS_REFRESH_CYCLE || "2024-25";
+  registerJob("cds_refresh", async () => {
+    const { ingestBulk, getRepositoryIndex } = await import("./cds-ingest-pipeline.js");
+    const index = await getRepositoryIndex();
+    const targets = index.map((e) => e.name).filter(Boolean);
+    if (!targets.length) return;
+    console.log(`[CDS-REFRESH] Auto-refreshing ${targets.length} school(s) to cycle ${CDS_CYCLE}…`);
+    const results = await ingestBulk(ragStmts, targets, { concurrency: 2, year: CDS_CYCLE });
+    const ok = results.filter((r) => r.status === "ok" || r.status === "ok_with_overrides").length;
+    console.log(`[CDS-REFRESH] Done: ${ok}/${results.length} ingested.`);
+  }, 7 * 24 * 60 * 60 * 1000, { runOnStartup: false }); // weekly
+  console.log(`[BOOT] AUTO_REFRESH_CDS enabled — weekly CDS re-ingest for cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}.`);
+}
+
 startAllJobs();
 
 // ═══════════════════════════════════════════════════════════
@@ -1262,16 +1296,26 @@ app.get("/api/llm/providers", apiLimiter, (_req, res) => {
     // CURRENT_TARGETS is the only edit needed — both the migration and
     // the providers endpoint pick it up.
     const providers = listProviders().map(p => {
-      if (p.id !== "anthropic") return p;
-      return {
-        ...p,
-        defaults: {
-          ...(p.defaults || {}),
-          small: CURRENT_TARGETS.haiku,
-          medium: CURRENT_TARGETS.sonnet,
-          large: CURRENT_TARGETS.opus,
-        },
-      };
+      if (p.id === "anthropic") {
+        return {
+          ...p,
+          defaults: {
+            ...(p.defaults || {}),
+            small: CURRENT_TARGETS.haiku,
+            medium: CURRENT_TARGETS.sonnet,
+            large: CURRENT_TARGETS.opus,
+          },
+        };
+      }
+      // OpenRouter's recommended defaults are refreshed live (propose-only) so
+      // the BYOK "Update models" prompt can offer newer models for approval.
+      if (p.id === "openrouter") {
+        return {
+          ...p,
+          defaults: { ...(p.defaults || {}), ...OPENROUTER_TARGETS },
+        };
+      }
+      return p;
     });
     res.json({
       version: "1.1",
@@ -1285,6 +1329,25 @@ app.get("/api/llm/providers", apiLimiter, (_req, res) => {
   } catch (err) {
     console.error("[LLM providers] error:", err.message);
     res.status(500).json({ error: "Failed to list providers" });
+  }
+});
+
+// GET /api/methodology — full transparency surface: EC factor weights, scoring
+// logic, narrative-quality policy, data sources + freshness, and model-
+// migration status. Read-only, no auth — the whole point is openness.
+app.get("/api/methodology", apiLimiter, (_req, res) => {
+  try {
+    res.json(buildMethodology({
+      claudeTargets: { haiku: CURRENT_TARGETS.haiku, sonnet: CURRENT_TARGETS.sonnet, opus: CURRENT_TARGETS.opus },
+      claudeLastRefresh: claudeTargetsLastRefresh,
+      providerMigration: { openrouter: OPENROUTER_STATUS },
+      scorecardConfigured: !!SCORECARD_API_KEY,
+      baselineYear: 2024,
+      domainMonitorDaily: true,
+    }));
+  } catch (err) {
+    console.error("[methodology] error:", err.message);
+    res.status(500).json({ error: "Failed to build methodology" });
   }
 });
 
