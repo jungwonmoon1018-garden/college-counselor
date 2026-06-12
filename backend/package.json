@@ -8,6 +8,9 @@
   },
   "scripts": {
     "generate:colleges": "node scripts/generate-college-profiles.mjs",
+    "refresh:colleges": "node scripts/refresh-college-data.mjs",
+    "cds:add-cycle": "node scripts/add-cds-cycle.mjs",
+    "refresh:cds": "node scripts/refresh-cds.mjs",
     "setup": "node scripts/setup-secrets.mjs",
     "start": "node server.js",
     "start:sim": "node simulation-sidecar.js",

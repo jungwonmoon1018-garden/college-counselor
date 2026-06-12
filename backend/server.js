@@ -813,7 +813,10 @@ RULES:
 - First person ("I ..."). ${NARRATIVE_MIN_CHARS}-${NARRATIVE_MAX_CHARS} characters.
 - Use ONLY evidence from the profile. Never invent awards, titles, or experiences.
 - Name the intended major/field and 1-2 concrete activities or courses that show the thread.
+- If the profile shows service, mentorship, inclusivity, or community impact, you may surface it as part of who this student is — but reflect ONLY what the evidence actually supports. Never manufacture empathy, motives, or character qualities the student did not state.
 - Plain, authentic, specific — not flowery. One short paragraph.
+
+This is editable scaffolding in the student's OWN voice — a starting point they will rewrite, not a finished essay and not words handed to them. Leave room for the student to add the lived detail and reflection only they can write; do not over-polish it into something that no longer sounds like them.
 
 Return ONLY the draft text, no quotes, no preamble.`;
 
@@ -4853,16 +4856,17 @@ TASK: Suggest ${count} extracurricular activity IDEAS this student could realist
 
 RULES:
 - Build on what the student already does (depth over breadth). Prefer deepening or extending existing activities and a coherent "spike" over scattered new clubs.${targetSchools.length ? "\n- Favor ideas that strengthen fit for what the target schools value above, but only where it fits the student's genuine direction." : ""}
+- Include at least one idea that builds community & character (service, mentorship, inclusivity, or authentic community impact) where it grows naturally out of something the student already cares about — never as résumé-padding.
 - NEVER claim the student has won an award, held a title, or done something not in the profile.
-- Each idea must be something the student does themselves; frame as a suggestion to consider.
+- Each idea must be something the student does themselves; frame as a suggestion to consider. These are activity ideas the student carries out and later writes about in their OWN words — never draft the essay or the story for them.
 
 Return ONLY a JSON array of exactly ${count} objects, no prose, no markdown:
 [
   {
     "name": "<short activity name>",
-    "category": "<research|service|leadership|competition|creative|work|club|project|other>",
+    "category": "<research|service|leadership|competition|creative|work|club|project|community|other>",
     "rationale": "<1-2 sentences tying this to the student's specific evidence above>",
-    "dimension": "<which strength it builds: leadership|achievement|dedication|major_spike|prestige|narrative_fit>",
+    "dimension": "<which strength it builds: leadership|achievement|dedication|major_spike|prestige|narrative_fit|community_and_character>",
     "hoursPerWeekEstimate": <integer>
   }
 ]`;
