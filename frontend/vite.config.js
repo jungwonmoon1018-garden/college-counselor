@@ -13,6 +13,7 @@ export default defineConfig({
         setup: resolve(__dirname, "setup.html"),
         methodology: resolve(__dirname, "methodology.html"),
         presignup: resolve(__dirname, "pre-signup.html"),
+        login: resolve(__dirname, "login.html"),
       },
     },
   },
