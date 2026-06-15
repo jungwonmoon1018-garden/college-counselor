@@ -364,6 +364,19 @@ db.exec(`
     error TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_notif_status ON notification_queue(status);
+
+  CREATE TABLE IF NOT EXISTS beta_signups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    grade_level TEXT,
+    school_location TEXT,
+    student_background TEXT,
+    help_wanted_json TEXT,
+    feedback_willingness TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_beta_email ON beta_signups(email);
 `);
 
 // 2. PII Vault (separate encrypted DB)
@@ -1274,6 +1287,7 @@ const auditLimiter = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: (req) 
 const notifyLimiter = rateLimit({ windowMs: 300_000, max: 3, keyGenerator: (req) => hashIP(req.ip), skipFailedRequests: true, message: { error: "Notification rate limit exceeded." } });
 const studentLimiter = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: (req) => hashIP(req.ip) });
 const scorecardLimiter = rateLimit({ windowMs: 60_000, max: 40, keyGenerator: (req) => hashIP(req.ip), message: { error: "Too many college search requests." } });
+const betaLimiter = rateLimit({ windowMs: 300_000, max: 8, keyGenerator: (req) => hashIP(req.ip), skipFailedRequests: true, message: { error: "Too many signups from this network. Please try again in a few minutes." } });
 
 
 // ═══════════════════════════════════════════════════════════
@@ -3077,6 +3091,94 @@ app.get("/api/credible-sources", apiLimiter, (_req, res) => {
   res.json({
     domains: DEFAULT_ALLOWED_DOMAINS,
     description: "Web search and fetch tools are restricted to .edu / .gov / common application platforms. Forum, ranking, and essay-mill sites are excluded.",
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// BETA SIGNUP + PUBLIC IMPACT (pre-signup / launch page)
+// ═══════════════════════════════════════════════════════════
+// Both routes are PUBLIC (no auth) — they back the unauthenticated
+// /pre-signup launch page. Honest metrics only: studentsJoinedBeta is the
+// real beta_signups row count; the rest are 0 until backed by real data.
+
+// Prepared statements for the beta list.
+const betaStmts = {
+  insert: db.prepare(`
+    INSERT INTO beta_signups
+      (id, name, email, grade_level, school_location, student_background, help_wanted_json, feedback_willingness, created_at)
+    VALUES (@id, @name, @email, @grade_level, @school_location, @student_background, @help_wanted_json, @feedback_willingness, @created_at)
+  `),
+  getByEmail: db.prepare(`SELECT id FROM beta_signups WHERE email = ?`),
+  count: db.prepare(`SELECT COUNT(*) AS n FROM beta_signups`),
+};
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Trim, strip control chars, and cap length so a single field can't bloat the row.
+const cleanField = (v, max = 200) =>
+  typeof v === "string" ? v.replace(/\p{Cc}/gu, "").trim().slice(0, max) : "";
+
+app.post("/api/beta-signup", betaLimiter, (req, res) => {
+  try {
+    const body = req.body || {};
+    const name = cleanField(body.name, 120);
+    const email = cleanField(body.email, 200).toLowerCase();
+
+    if (!name || !email) {
+      return res.status(400).json({ error: "Name and email are required." });
+    }
+    if (!EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: "Please enter a valid email address." });
+    }
+
+    // Graceful idempotency: a repeat email sees the same thank-you, no error.
+    if (betaStmts.getByEmail.get(email)) {
+      return res.json({ success: true, alreadyJoined: true });
+    }
+
+    // helpWanted is a list of checkbox values — normalize, clean, cap to 20.
+    const helpWanted = Array.isArray(body.helpWanted)
+      ? body.helpWanted.map((h) => cleanField(h, 80)).filter(Boolean).slice(0, 20)
+      : [];
+
+    // Accept a client ISO createdAt only if it parses; otherwise stamp now.
+    const ts = cleanField(body.createdAt, 40);
+    const createdAt = ts && !Number.isNaN(Date.parse(ts)) ? ts : new Date().toISOString();
+
+    betaStmts.insert.run({
+      id: crypto.randomUUID(),
+      name,
+      email,
+      grade_level: cleanField(body.gradeLevel, 40) || null,
+      school_location: cleanField(body.schoolLocation, 200) || null,
+      student_background: cleanField(body.studentBackground, 80) || null,
+      help_wanted_json: JSON.stringify(helpWanted),
+      feedback_willingness: cleanField(body.feedbackWillingness, 60) || null,
+      created_at: createdAt,
+    });
+
+    console.log(`[BETA] New signup (${email.slice(0, 3)}…@…) — total now ${betaStmts.count.get().n}`);
+    res.status(201).json({ success: true });
+  } catch (err) {
+    console.error("[BETA] Signup error:", err.message);
+    res.status(500).json({ error: "Could not save your signup. Please try again." });
+  }
+});
+
+app.get("/api/beta-impact", apiLimiter, (_req, res) => {
+  let studentsJoinedBeta = 0;
+  try {
+    studentsJoinedBeta = betaStmts.count.get().n;
+  } catch (err) {
+    console.error("[BETA] Impact count error:", err.message);
+  }
+  // Honest metrics: only the count we actually have is non-zero. The other
+  // four stay 0 until real data tables back them — never fabricate impact.
+  res.json({
+    studentsJoinedBeta,
+    schoolsCommunitiesReached: 0,
+    ecPlansGenerated: 0,
+    coursePlansGenerated: 0,
+    volunteerContributors: 0,
   });
 });
 

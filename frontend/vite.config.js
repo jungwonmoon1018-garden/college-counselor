@@ -12,6 +12,7 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         setup: resolve(__dirname, "setup.html"),
         methodology: resolve(__dirname, "methodology.html"),
+        presignup: resolve(__dirname, "pre-signup.html"),
       },
     },
   },

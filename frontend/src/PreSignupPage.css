@@ -1,0 +1,111 @@
+/* ════════════════════════════════════════════════════════════════════
+   PreSignupPage.css — public launch / pre-signup page.
+   Intentionally a LIGHT, serious education-tech theme (the student app and
+   the other standalone pages are dark). Self-contained; no shared deps.
+   ════════════════════════════════════════════════════════════════════ */
+
+.ps-root {
+  --ink: #1a2332;
+  --muted: #5b6678;
+  --bg: #f7f9fc;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --brand: #2563a8;
+  --brand-dark: #1c4a82;
+  --accent: #0f7a5a;
+  --shadow: 0 1px 3px rgba(16, 32, 64, 0.06), 0 8px 24px rgba(16, 32, 64, 0.05);
+
+  color: var(--ink);
+  background: var(--bg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+.ps-container { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+.ps-section { padding: 56px 0; }
+.ps-section + .ps-section { border-top: 1px solid var(--border); }
+
+/* ─── Typography ─── */
+.ps-eyebrow {
+  text-transform: uppercase; letter-spacing: 0.08em; font-size: 12px;
+  font-weight: 700; color: var(--brand); margin-bottom: 12px;
+}
+.ps-h1 { font-size: clamp(28px, 4.5vw, 44px); font-weight: 800; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 16px; }
+.ps-h2 { font-size: clamp(22px, 3vw, 30px); font-weight: 750; letter-spacing: -0.01em; margin: 0 0 20px; }
+.ps-lead { font-size: clamp(16px, 2vw, 19px); color: var(--muted); max-width: 680px; margin: 0 0 28px; }
+.ps-p { font-size: 16px; color: var(--ink); max-width: 720px; margin: 0 0 16px; }
+.ps-note { font-size: 14px; color: var(--muted); }
+
+/* ─── Buttons ─── */
+.ps-btn-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.ps-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 650; padding: 12px 22px; border-radius: 10px;
+  cursor: pointer; border: 1px solid transparent; text-decoration: none;
+  transition: background 0.15s, border-color 0.15s, transform 0.05s;
+}
+.ps-btn:active { transform: translateY(1px); }
+.ps-btn-primary { background: var(--brand); color: #fff; }
+.ps-btn-primary:hover { background: var(--brand-dark); }
+.ps-btn-primary:disabled { background: #9db4cf; cursor: not-allowed; }
+.ps-btn-secondary { background: #fff; color: var(--brand); border-color: var(--border); }
+.ps-btn-secondary:hover { border-color: var(--brand); }
+
+/* ─── Hero ─── */
+.ps-hero { padding: 72px 0 60px; background: linear-gradient(180deg, #eef3fa 0%, var(--bg) 100%); }
+
+/* ─── Impact metric cards ─── */
+.ps-metric-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px; margin: 8px 0 20px;
+}
+.ps-metric {
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  padding: 22px 20px; box-shadow: var(--shadow);
+}
+.ps-metric-num { font-size: 38px; font-weight: 800; color: var(--brand); line-height: 1; margin: 4px 0 8px; }
+.ps-metric-name { font-size: 14px; font-weight: 700; }
+.ps-metric-desc { font-size: 13px; color: var(--muted); margin-top: 6px; }
+
+/* ─── Forms ─── */
+.ps-form { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 28px; box-shadow: var(--shadow); max-width: 720px; }
+.ps-field { margin-bottom: 18px; }
+.ps-label { display: block; font-size: 14px; font-weight: 650; margin-bottom: 6px; }
+.ps-input, .ps-select {
+  width: 100%; font-size: 15px; padding: 11px 13px; border-radius: 9px;
+  border: 1px solid var(--border); background: #fff; color: var(--ink);
+  font-family: inherit;
+}
+.ps-input:focus, .ps-select:focus { outline: 2px solid var(--brand); outline-offset: 1px; border-color: var(--brand); }
+.ps-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 16px; }
+.ps-check { display: flex; align-items: flex-start; gap: 9px; font-size: 14px; color: var(--ink); cursor: pointer; }
+.ps-check input { margin-top: 3px; width: 16px; height: 16px; accent-color: var(--brand); flex-shrink: 0; }
+.ps-form-msg { margin-top: 14px; font-size: 14px; padding: 12px 14px; border-radius: 9px; }
+.ps-form-msg.ok { background: #e7f5ef; color: #0f6b4f; border: 1px solid #b9e3d2; }
+.ps-form-msg.err { background: #fdecec; color: #b3261e; border: 1px solid #f3c2bf; }
+
+/* ─── Contributor role cards ─── */
+.ps-role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.ps-role { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+.ps-role h3 { font-size: 16px; font-weight: 700; margin: 0 0 6px; }
+.ps-role p { font-size: 14px; color: var(--muted); margin: 0; }
+
+/* ─── Ethics ─── */
+.ps-ethics { background: #f0f5fb; border: 1px solid #d6e3f2; border-radius: 14px; padding: 24px 26px; }
+.ps-ethics ul { margin: 12px 0 0; padding-left: 20px; }
+.ps-ethics li { margin-bottom: 8px; font-size: 15px; }
+
+/* ─── Footer ─── */
+.ps-footer { background: #11203a; color: #cdd8e8; padding: 40px 0; }
+.ps-footer a { color: #9fc4ee; text-decoration: none; }
+.ps-footer a:hover { text-decoration: underline; }
+.ps-footer-title { font-size: 16px; font-weight: 700; color: #fff; }
+.ps-footer-links { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 14px; font-size: 14px; }
+
+@media (max-width: 600px) {
+  .ps-section { padding: 40px 0; }
+  .ps-hero { padding: 48px 0 40px; }
+  .ps-form { padding: 20px; }
+}
