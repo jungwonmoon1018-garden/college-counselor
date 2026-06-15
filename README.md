@@ -11,6 +11,10 @@ evidence graph, and tiered LLM routing.
 | [`backend/`](./backend) | Node/Express + better-sqlite3 (ESM) | API, PII vault, rules/positioning engine, CDS store, BYOK LLM routing, web grounding |
 | [`frontend/`](./frontend) | React + Vite | Single-page counselor UI (chat, College Fit, ECs, courses, deadlines) |
 
+The frontend has a **Disclosures** button in the chat sidebar that opens a panel
+explaining the tool's AI usage, advisory-only scope, FAFSA status, and
+data/privacy practices.
+
 This repo was combined from two previously separate repositories; the full
 commit history of each is preserved under its subdirectory.
 

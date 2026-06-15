@@ -28,7 +28,23 @@ export const STRINGS = {
     "chat.tools.narrative": "Edit your story",
     "chat.tools.candidates": "Rank EC ideas",
     "chat.tools.deadlines": "Deadlines",
+    "chat.tools.disclosure": "Disclosures",
     "chat.modal.close": "Close",
+
+    // ─── Disclosure panel (full "how this works / your rights") ──
+    "disclosure.title": "Disclosures & how this works",
+    "disclosure.intro": "Please read how this tool generates guidance, what it is and isn't, and how your data is handled.",
+    "disclosure.ai.title": "This service uses AI",
+    "disclosure.ai.body": "Guidance is generated with AI assistance through your own connected provider (BYOK). AI-generated content is clearly labeled. Verified facts are sourced from official publications and cited; inferences and suggestions are AI-generated and should not be treated as professional advice.",
+    "disclosure.advisory.title": "Informational guidance only",
+    "disclosure.advisory.body": "This tool provides informational guidance only. It is not a substitute for professional college counseling, financial advice, or official determinations by educational institutions or government agencies. Always confirm official information with your school counselor and institutional sources.",
+    "disclosure.lanes.title": "Three trust lanes",
+    "disclosure.lanes.body": "Everything we tell you is sorted into what's verified (from official sources, cited), what's a model inference (AI-generated, grounded in your data), and what's coaching (non-binding suggestions). Treat each accordingly.",
+    "disclosure.fafsa.title": "Not an official FAFSA tool",
+    "disclosure.fafsa.body": "This is NOT an official FAFSA tool and does not replace StudentAid.gov. Only the U.S. Department of Education can make official financial aid determinations.",
+    "disclosure.privacy.title": "Your data & privacy",
+    "disclosure.privacy.body": "Your profile is encrypted (AES-256-GCM) and never sold. Your provider API key is stored encrypted server-side and is never logged, echoed, or read back. We follow FERPA and Korea's PIPA, including cross-border transfer consent — you can withdraw consent at any time.",
+    "disclosure.footer": "Questions about your data or these terms? Contact your counselor or the program administrator.",
 
     // ─── Drift banner ──
     "drift.dismiss": "Dismiss",
@@ -153,7 +169,23 @@ export const STRINGS = {
     "chat.tools.narrative": "\ub0b4 \uc774\uc57c\uae30 \ud3b8\uc9d1",
     "chat.tools.candidates": "\ud65c\ub3d9 \uc544\uc774\ub514\uc5b4 \uc21c\uc704",
     "chat.tools.deadlines": "\ub9c8\uac10\uc77c",
+    "chat.tools.disclosure": "\uace0\uc9c0\uc0ac\ud56d",
     "chat.modal.close": "\ub2eb\uae30",
+
+    // \u2500\u2500\u2500 \uace0\uc9c0\uc0ac\ud56d \ud328\ub110 (\uc791\ub3d9 \ubc29\uc2dd / \uc774\uc6a9\uc790 \uad8c\ub9ac) \u2500\u2500
+    "disclosure.title": "\uace0\uc9c0\uc0ac\ud56d \ubc0f \uc791\ub3d9 \ubc29\uc2dd",
+    "disclosure.intro": "\uc774 \ub3c4\uad6c\uac00 \uc548\ub0b4\ub97c \uc5b4\ub5bb\uac8c \uc0dd\uc131\ud558\ub294\uc9c0, \ubb34\uc5c7\uc774\uace0 \ubb34\uc5c7\uc774 \uc544\ub2cc\uc9c0, \uadf8\ub9ac\uace0 \ud559\uc0dd\ub2d8\uc758 \ub370\uc774\ud130\uac00 \uc5b4\ub5bb\uac8c \ucc98\ub9ac\ub418\ub294\uc9c0 \uaf2d \uc77d\uc5b4\ubcf4\uc138\uc694.",
+    "disclosure.ai.title": "\uc774 \uc11c\ube44\uc2a4\ub294 AI\ub97c \uc0ac\uc6a9\ud569\ub2c8\ub2e4",
+    "disclosure.ai.body": "\uc548\ub0b4\ub294 \ud559\uc0dd\ub2d8\uc774 \uc5f0\uacb0\ud55c \uc81c\uacf5\uc790(BYOK)\ub97c \ud1b5\ud574 AI \uc9c0\uc6d0\uc73c\ub85c \uc0dd\uc131\ub429\ub2c8\ub2e4. AI \uc0dd\uc131 \ucf58\ud150\uce20\ub294 \uba85\ud655\ud558\uac8c \ud45c\uc2dc\ub429\ub2c8\ub2e4. \ud655\uc778\ub41c \uc0ac\uc2e4\uc740 \uacf5\uc2dd \ucd9c\ud310\ubb3c\uc5d0\uc11c \uac00\uc838\uc640 \ucd9c\ucc98\ub97c \ud45c\uae30\ud558\uba70, \ucd94\ub860\uacfc \uc81c\uc548\uc740 AI\uac00 \uc0dd\uc131\ud55c \uac83\uc774\ubbc0\ub85c \uc804\ubb38\uc801\uc778 \uc870\uc5b8\uc73c\ub85c \ucde8\uae09\ud574\uc11c\ub294 \uc548 \ub429\ub2c8\ub2e4.",
+    "disclosure.advisory.title": "\uc815\ubcf4 \uc548\ub0b4\ub9cc \uc81c\uacf5\ud569\ub2c8\ub2e4",
+    "disclosure.advisory.body": "\uc774 \ub3c4\uad6c\ub294 \uc815\ubcf4 \uc548\ub0b4\ub9cc \uc81c\uacf5\ud569\ub2c8\ub2e4. \uc804\ubb38 \ub300\ud559 \uc0c1\ub2f4, \uc7ac\uc815 \uc870\uc5b8 \ub610\ub294 \uad50\uc721 \uae30\uad00\u00b7\uc815\ubd80 \uae30\uad00\uc758 \uacf5\uc2dd \uacb0\uc815\uc744 \ub300\uccb4\ud558\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \uacf5\uc2dd \uc815\ubcf4\ub294 \ud56d\uc0c1 \ud559\uad50 \uce74\uc6b4\uc2ac\ub7ec\uc640 \uae30\uad00 \ucd9c\ucc98\ub97c \ud1b5\ud574 \ud655\uc778\ud558\uc138\uc694.",
+    "disclosure.lanes.title": "\uc138 \uac00\uc9c0 \uc2e0\ub8b0 \uad6c\ubd84",
+    "disclosure.lanes.body": "\ubaa8\ub4e0 \uc548\ub0b4\ub294 \uac80\uc99d\ub41c \uc0ac\uc2e4(\uacf5\uc2dd \ucd9c\ucc98 \uae30\ubc18, \ucd9c\ucc98 \ud45c\uae30), \ubaa8\ub378 \ucd94\ub860(\ud559\uc0dd\ub2d8 \ub370\uc774\ud130\uc5d0 \uadfc\uac70\ud55c AI \uc0dd\uc131), \ucf54\uce6d(\uad6c\uc18d\ub825 \uc5c6\ub294 \uc81c\uc548)\uc73c\ub85c \uad6c\ubd84\ub429\ub2c8\ub2e4. \uac01\uac01\uc5d0 \ub9de\uac8c \ud310\ub2e8\ud558\uc138\uc694.",
+    "disclosure.fafsa.title": "\uacf5\uc2dd FAFSA \ub3c4\uad6c\uac00 \uc544\ub2d9\ub2c8\ub2e4",
+    "disclosure.fafsa.body": "\uc774\uac83\uc740 \uacf5\uc2dd FAFSA \ub3c4\uad6c\uac00 \uc544\ub2c8\uba70 StudentAid.gov\ub97c \ub300\uccb4\ud558\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \uacf5\uc2dd\uc801\uc778 \uc7ac\uc815 \uc9c0\uc6d0 \uacb0\uc815\uc740 \ubbf8\uad6d \uad50\uc721\ubd80\ub9cc \ub0b4\ub9b4 \uc218 \uc788\uc2b5\ub2c8\ub2e4.",
+    "disclosure.privacy.title": "\ub370\uc774\ud130 \ubc0f \uac1c\uc778\uc815\ubcf4",
+    "disclosure.privacy.body": "\ud504\ub85c\ud544\uc740 \uc554\ud638\ud654(AES-256-GCM)\ub418\uba70 \uc808\ub300 \ud310\ub9e4\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \uc81c\uacf5\uc790 API \ud0a4\ub294 \uc11c\ubc84\uc5d0 \uc554\ud638\ud654\ub418\uc5b4 \uc800\uc7a5\ub418\uba70 \uae30\ub85d\u00b7\ub178\ucd9c\u00b7\uc7ac\uc870\ud68c\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. FERPA\uc640 \ud55c\uad6d \uac1c\uc778\uc815\ubcf4\ubcf4\ud638\ubc95(PIPA)\uc744 \uc900\uc218\ud558\uba70 \uad6d\uc678 \uc774\uc804 \ub3d9\uc758\ub97c \ud3ec\ud568\ud569\ub2c8\ub2e4. \ub3d9\uc758\ub294 \uc5b8\uc81c\ub4e0\uc9c0 \ucca0\ud68c\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.",
+    "disclosure.footer": "\ub370\uc774\ud130\ub098 \uc774\uc6a9 \uc57d\uad00\uc5d0 \ub300\ud55c \ubb38\uc758\ub294 \ub2f4\ub2f9 \uce74\uc6b4\uc2ac\ub7ec \ub610\ub294 \ud504\ub85c\uadf8\ub7a8 \uad00\ub9ac\uc790\uc5d0\uac8c \uc5f0\ub77d\ud558\uc138\uc694.",
 
     // ─── 드리프트 배너 ──
     "drift.dismiss": "\ub2eb\uae30",

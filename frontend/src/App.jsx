@@ -8,6 +8,7 @@ import FactorVector5 from "./components/FactorVector5.jsx";
 import SpikeFinder from "./components/SpikeFinder.jsx";
 import CalibratedFitCard from "./components/CalibratedFitCard.jsx";
 import CourseSequencer from "./components/CourseSequencer.jsx";
+import DisclosurePanel from "./components/DisclosurePanel.jsx";
 import SetupPanel from "./SetupPanel.jsx";
 import { detectLocale, t as tt } from "./i18n.js";
 
@@ -5317,6 +5318,9 @@ export default function App() {
             <button onClick={()=>setActivePanel("deadlines")} style={sidebarToolBtn}>
               {tt(locale, "chat.tools.deadlines")}
             </button>
+            <button onClick={()=>setActivePanel("disclosure")} style={sidebarToolBtn}>
+              {tt(locale, "chat.tools.disclosure")}
+            </button>
           </div>
 
           {/* ─── Locale toggle (Round 5) ─── */}
@@ -5715,6 +5719,9 @@ export default function App() {
             {/* the chat (role:"tool" cards). Only deadlines here. */}
             {activePanel === "deadlines" && (
               <DeadlineTracker locale={locale} />
+            )}
+            {activePanel === "disclosure" && (
+              <DisclosurePanel locale={locale} />
             )}
           </div>
         </div>
