@@ -45,12 +45,80 @@ export const OPENROUTER_STATUS = {
   note: "Recommended OpenRouter models are proposed, never auto-applied. Approve changes in your API-key settings.",
 };
 
-export async function fetchOpenRouterModelIds(fetchImpl = fetch) {
+// ─── Live model catalog cache ────────────────────────────────────────────
+// Populated from OpenRouter's /api/v1/models. Drives two things:
+//   1. GET /api/llm/openrouter/models — the BYOK model dropdown is built from
+//      this live list so it only ever shows currently-served model IDs.
+//   2. Budget tracking — usage-budget.js prices token usage off the per-model
+//      `pricing.prompt` / `pricing.completion` fields here (USD per token).
+export const OPENROUTER_CATALOG = {
+  models: [],            // [{ id, name, contextLength, pricing:{inputPerMTok, outputPerMTok} }]
+  byId: new Map(),       // id → catalog entry
+  lastFetched: null,     // ISO string
+  reachable: null,       // boolean
+};
+
+// Fetch the full model catalog (id, name, context, pricing). pricing.prompt /
+// pricing.completion are USD-per-token strings; we expose them as USD per
+// 1M tokens for the budget tracker and UI.
+export async function fetchOpenRouterModels(fetchImpl = fetch) {
   const res = await fetchImpl(OPENROUTER_MODELS_URL, { signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`OpenRouter /models ${res.status}`);
   const json = await res.json();
   const list = Array.isArray(json?.data) ? json.data : [];
-  return new Set(list.map((m) => String(m.id)).filter(Boolean));
+  return list
+    .map((m) => {
+      const id = String(m?.id || "").trim();
+      if (!id) return null;
+      const promptPerTok = Number(m?.pricing?.prompt);
+      const completionPerTok = Number(m?.pricing?.completion);
+      return {
+        id,
+        name: String(m?.name || id),
+        contextLength: Number(m?.context_length) || null,
+        pricing: {
+          inputPerMTok: Number.isFinite(promptPerTok) ? promptPerTok * 1_000_000 : null,
+          outputPerMTok: Number.isFinite(completionPerTok) ? completionPerTok * 1_000_000 : null,
+        },
+        free: /:free$/.test(id) || promptPerTok === 0,
+      };
+    })
+    .filter(Boolean);
+}
+
+// Refresh the in-memory catalog. Safe to call at boot and on a daily timer.
+export async function refreshOpenRouterCatalog({ fetchImpl = fetch } = {}) {
+  try {
+    const models = await fetchOpenRouterModels(fetchImpl);
+    OPENROUTER_CATALOG.models = models;
+    OPENROUTER_CATALOG.byId = new Map(models.map((m) => [m.id, m]));
+    OPENROUTER_CATALOG.reachable = true;
+    OPENROUTER_CATALOG.lastFetched = nowISO();
+  } catch (err) {
+    OPENROUTER_CATALOG.reachable = false;
+    OPENROUTER_CATALOG.lastFetched = nowISO();
+    console.warn("[OR-CATALOG] refresh failed:", String(err.message).slice(0, 160));
+  }
+  return OPENROUTER_CATALOG;
+}
+
+// Pricing lookup for the budget tracker. Returns { input, output } USD per
+// 1M tokens, or null when the model isn't in the catalog (caller treats
+// unknown as $0 — better to undercount than block on a missing price).
+export function getOpenRouterPricingUSDPerMTok(modelId) {
+  if (!modelId) return null;
+  const entry = OPENROUTER_CATALOG.byId.get(String(modelId));
+  if (!entry || !entry.pricing) return null;
+  const { inputPerMTok, outputPerMTok } = entry.pricing;
+  if (inputPerMTok == null && outputPerMTok == null) return null;
+  return { input: inputPerMTok || 0, output: outputPerMTok || 0 };
+}
+
+// Backwards-compatible helper: the tier-default refresh only needs the set
+// of available IDs.
+export async function fetchOpenRouterModelIds(fetchImpl = fetch) {
+  const models = await fetchOpenRouterModels(fetchImpl);
+  return new Set(models.map((m) => m.id));
 }
 
 /**

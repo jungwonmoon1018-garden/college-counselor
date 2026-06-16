@@ -1,8 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 // TIER DEFAULTS — provider → {small, medium, large} model registry
 // ═══════════════════════════════════════════════════════════════════════
-// Every provider exposes three reasoning tiers that mirror the backend's
-// internal HAIKU / SONNET / OPUS ladder:
+// Every provider exposes three reasoning tiers:
 //
 //   small  — routing, extraction, classification, moderation, OCR validation,
 //            narrative-fit fallback scoring. Fast, cheap, <5s latency.
@@ -10,18 +9,13 @@
 //   large  — cross-source conflict resolution, essay critique, last-resort
 //            reasoning when medium reports low confidence.
 //
-// Per-student BYOK rows can override any of these; env vars
-// (LLM_SMALL_MODEL / LLM_MEDIUM_MODEL / LLM_LARGE_MODEL) override when no
-// student override exists; otherwise we pick the registry default below.
+// OpenRouter is the default/primary provider. Per-student BYOK rows can
+// override any tier; env vars (LLM_SMALL_MODEL / LLM_MEDIUM_MODEL /
+// LLM_LARGE_MODEL) override when no student override exists; otherwise we
+// pick the registry default below.
 // ═══════════════════════════════════════════════════════════════════════
 
 export const TIER_DEFAULTS = Object.freeze({
-  // Native Anthropic — the backend's original home.
-  anthropic: Object.freeze({
-    small: "claude-haiku-4-5-20251001",
-    medium: "claude-sonnet-4-20250514",
-    large: "claude-opus-4-6",
-  }),
   // OpenAI proper.
   openai: Object.freeze({
     small: "gpt-4o-mini",
@@ -102,24 +96,41 @@ export const TIER_DEFAULTS = Object.freeze({
 // render a "Pick your LLM" wizard without hard-coding anything.
 export const PROVIDER_META = Object.freeze([
   {
-    id: "anthropic",
-    label: "Anthropic (Claude)",
-    keyPrefix: "sk-ant-",
+    id: "openrouter",
+    label: "OpenRouter",
+    keyPrefix: "sk-or-",
     baseUrlOptional: false,
-    // Current published Anthropic models. The daily refresh from
-    // claude-model-migration.js → fetchLatestClaudeTargetsFromAnthropic
-    // keeps the "recommended" defaults in sync, but this static list is
-    // what the BYOK dropdowns display as user-selectable options.
+    baseUrl: "https://openrouter.ai/api/v1",
+    // OpenRouter is the default/primary provider. The BYOK dropdown is
+    // populated from OpenRouter's LIVE /api/v1/models catalog (served via
+    // GET /api/llm/openrouter/models) so it only ever shows currently-
+    // available model IDs. This curated list is a static FALLBACK used
+    // when the live catalog can't be reached. `:free` models are zero
+    // per-token cost (rate-limited); listed first for cost-conscious
+    // students. Free availability rotates, so the live list is preferred.
     knownModels: [
-      "claude-opus-4-7",
-      "claude-opus-4-6",
-      "claude-sonnet-4-6",
-      "claude-haiku-4-5",
-      // Older but still active aliases — useful for cost control or
-      // pinning, exposed in case a student wants them.
-      "claude-opus-4-5",
-      "claude-opus-4-1",
-      "claude-sonnet-4-5",
+      // ── Free tier (zero per-token cost) ──
+      "meta-llama/llama-3.3-70b-instruct:free",
+      "qwen/qwen-2.5-72b-instruct:free",
+      "deepseek/deepseek-r1:free",
+      "z-ai/glm-4.5-air:free",
+      // ── Cheap & student-friendly (Gemma 4 family) ──
+      "google/gemma-4-26b-a4b-it",
+      "google/gemma-4-31b-it",
+      // ── Frontier reasoning at low cost (DeepSeek V4) ──
+      "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4-flash",
+      // ── Paid: GLM family (Zhipu) ──
+      "z-ai/glm-5.1",
+      "z-ai/glm-4.6",
+      // ── Paid: other strong options ──
+      "openai/gpt-4o",
+      "openai/gpt-4o-mini",
+      "google/gemini-2.5-pro",
+      "google/gemini-2.0-flash",
+      "deepseek/deepseek-chat",
+      "meta-llama/llama-3.3-70b-instruct",
+      "qwen/qwen-2.5-72b-instruct",
     ],
   },
   {
@@ -138,54 +149,6 @@ export const PROVIDER_META = Object.freeze([
       "gemini-2.0-flash",
       "gemini-2.5-pro",
       "gemini-2.5-flash",
-    ],
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    keyPrefix: "sk-or-",
-    baseUrlOptional: false,
-    baseUrl: "https://openrouter.ai/api/v1",
-    // Curated list — `:free` suffixed models are zero-cost on OpenRouter
-    // (rate-limited but unlimited per-token). Listed first so they sort to
-    // the top of the dropdown for cost-conscious students. The exact free
-    // models on OpenRouter shift over time; if any of these become
-    // unavailable, the BYOK flow accepts the `unverified: true` validator
-    // signal so the key still saves and the dropdown lets the student
-    // pick a different model.
-    knownModels: [
-      // ── Free tier (zero per-token cost) ──
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "qwen/qwen-2.5-72b-instruct:free",
-      "deepseek/deepseek-r1:free",
-      "z-ai/glm-4.5-air:free",
-      "nousresearch/hermes-3-llama-3.1-405b:free",
-      // ── Cheap & student-friendly (Gemma 4 family) ──
-      "google/gemma-4-26b-a4b-it",
-      "google/gemma-4-26b-a4b-it:free",
-      "google/gemma-4-31b-it",
-      "google/gemma-4-31b-it:free",
-      // ── Frontier reasoning at low cost (DeepSeek V4) ──
-      "deepseek/deepseek-v4-pro",
-      "deepseek/deepseek-v4-flash",
-      "deepseek/deepseek-v4-flash:free",
-      // ── Paid: GLM family (Zhipu) ──
-      "z-ai/glm-5.1",
-      "z-ai/glm-4.6",
-      "z-ai/glm-4.5",
-      // ── Paid: Claude pass-throughs ──
-      "anthropic/claude-haiku-4.5",
-      "anthropic/claude-sonnet-4",
-      "anthropic/claude-opus-4",
-      // ── Paid: other strong options ──
-      "openai/gpt-4o",
-      "openai/gpt-4o-mini",
-      "google/gemini-2.5-pro",
-      "google/gemini-2.0-flash",
-      "deepseek/deepseek-chat",
-      "deepseek/deepseek-reasoner",
-      "meta-llama/llama-3.3-70b-instruct",
-      "qwen/qwen-2.5-72b-instruct",
     ],
   },
   {
@@ -242,10 +205,9 @@ export const PROVIDER_META = Object.freeze([
 ]);
 
 // Build a reverse map: providerId → which adapter kind handles it on the wire.
-// Anthropic and Google have bespoke wire protocols; everybody else speaks
-// OpenAI Chat Completions.
+// Google has a bespoke wire protocol; everybody else speaks OpenAI Chat
+// Completions (OpenRouter, OpenAI, DeepSeek, Together, Zhipu, Ollama, etc.).
 export const PROVIDER_WIRE_PROTOCOL = Object.freeze({
-  anthropic: "anthropic",
   google: "google",
   openai: "openai",
   openai_compat: "openai",
@@ -269,7 +231,6 @@ const REASONING_MODEL_PATTERNS = [
   /^deepseek-reasoner/i,
   /^openai\/o1/i,
   /^openai\/o3/i,
-  /^anthropic\/.*-(reasoning|thinking)/i,
   /^z-ai\/glm-.*-reasoning/i,
 ];
 export function isReasoningModel(modelId) {

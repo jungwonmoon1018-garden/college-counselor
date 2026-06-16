@@ -5,16 +5,16 @@
 // LLM API. The rest of the app now speaks in provider-agnostic verbs:
 //
 //   - detectProvider({apiKey, provider, baseUrl})   → normalized provider id
-//   - callLLM({provider, ...})                       → Anthropic-shape response
+//   - callLLM({provider, ...})                       → normalized response
 //   - validateKey({provider, apiKey, baseUrl})       → cheap "is this alive"
 //   - listKnownModels(provider)                      → seed list for UI
 //
-// Every response — no matter which provider answered — comes back shaped as
+// Every response — no matter which provider answered — comes back in the
+// backend's normalized shape:
 // { content: [{type:"text",text}], usage: {input_tokens, output_tokens},
 //   model, stop_reason, _raw, _responseHeaders }.
 // ═══════════════════════════════════════════════════════════════════════
 
-import { callAnthropic, validateAnthropicKey } from "./anthropic.js";
 import { callOpenAI,    validateOpenAIKey }    from "./openai.js";
 import { callGoogle,    validateGoogleKey }    from "./google.js";
 import {
@@ -27,7 +27,6 @@ import {
 import { sanitizeProviderPayload } from "../content-moderation.js";
 
 export const PROVIDERS = Object.freeze({
-  ANTHROPIC: "anthropic",
   OPENAI: "openai",
   OPENAI_COMPAT: "openai_compat",
   GOOGLE: "google",
@@ -82,13 +81,11 @@ export function detectProvider({ apiKey = "", provider = "", baseUrl = "" } = {}
     if (url.includes("11434")) return PROVIDERS.OLLAMA;
     if (url.includes("1234")) return PROVIDERS.LMSTUDIO;
     if (url.includes("generativelanguage.googleapis.com")) return PROVIDERS.GOOGLE;
-    if (url.includes("api.anthropic.com")) return PROVIDERS.ANTHROPIC;
     if (url.includes("api.openai.com")) return PROVIDERS.OPENAI;
     // Unknown baseUrl + key present → generic compat.
     if (key) return PROVIDERS.OPENAI_COMPAT;
   }
 
-  if (key.startsWith("sk-ant-")) return PROVIDERS.ANTHROPIC;
   if (key.startsWith("sk-or-")) return PROVIDERS.OPENROUTER;
   if (key.startsWith("AIza")) return PROVIDERS.GOOGLE;
   // sk-proj-*, sk-* — default to OpenAI; user can override with baseUrl.
@@ -112,9 +109,9 @@ export function detectProvider({ apiKey = "", provider = "", baseUrl = "" } = {}
  * @param {string} [opts.system]
  * @param {number} [opts.maxTokens]
  * @param {number} [opts.temperature]
- * @param {string} [opts.anthropicBeta]
  * @param {object} [opts.extraHeaders]
- * @param {Array}  [opts.tools]       — Anthropic tool definitions (native tool use + web_search); non-Anthropic providers reject.
+ * @param {object} [opts.webPlugin]    — OpenRouter web plugin opts ({enabled, ...}); other providers ignore.
+ * @param {Array}  [opts.tools]        — custom tool defs; unsupported on the OpenAI/Google wire (callers strip + retry).
  * @param {object|string} [opts.toolChoice]
  * @param {AbortSignal} [opts.signal]
  * @param {function}   [opts.fetchImpl]
@@ -147,18 +144,18 @@ export async function callLLM(opts = {}) {
 
   const wire = PROVIDER_WIRE_PROTOCOL[provider];
   const hasTools = Array.isArray(opts.tools) && opts.tools.length > 0;
-  if (hasTools && wire !== "anthropic") {
-    // OpenRouter has a native web plugin that we route web search through
-    // for non-Anthropic models. If the caller is asking for web access via
-    // Anthropic-shape tools and we're on OpenRouter, fall through silently
-    // and let the OpenAI adapter pick up the webPlugin opt — never throw
-    // tools_unsupported when there's a viable alternative.
+  if (hasTools) {
+    // No provider on the OpenAI/Google wire executes the backend's custom
+    // function tools. OpenRouter routes web access through its native web
+    // plugin instead — when that's requested, fall through silently and let
+    // the OpenAI adapter pick up the webPlugin opt. For every other case,
+    // tool-use is unsupported; callers strip tools and retry.
     if (provider === PROVIDERS.OPENROUTER && opts.webPlugin && opts.webPlugin.enabled) {
       // ok — adapter will use plugins: [{id:"web"}] instead of native tools.
     } else {
       const err = new Error(
-        `Provider "${provider}" does not support Anthropic-native tools (web_search). ` +
-        `Tool-use calls currently require an Anthropic-shaped provider.`
+        `Provider "${provider}" does not support custom tool-use. ` +
+        `Use OpenRouter's web plugin for web access, or drop the tools.`
       );
       err.status = 400;
       err.code = "tools_unsupported";
@@ -194,21 +191,6 @@ export async function callLLM(opts = {}) {
   };
 
   switch (wire) {
-    case "anthropic":
-      return attachRedaction(await callAnthropic({
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-        model,
-        messages: sanitizedPayload.messages,
-        system: sanitizedPayload.system,
-        maxTokens: effectiveMaxTokens,
-        temperature: opts.temperature,
-        anthropicBeta: opts.anthropicBeta,
-        tools: sanitizedPayload.tools,
-        toolChoice: sanitizedPayload.toolChoice,
-        signal: opts.signal,
-        fetchImpl: opts.fetchImpl,
-      }));
     case "google":
       return attachRedaction(await callGoogle({
         apiKey: opts.apiKey,
@@ -246,7 +228,6 @@ export async function validateKey({ provider, apiKey, baseUrl, fetchImpl, signal
     return { valid: false, status: 400, code: "unknown_provider", message: "Cannot detect provider from inputs" };
   }
   const wire = PROVIDER_WIRE_PROTOCOL[detected];
-  if (wire === "anthropic") return validateAnthropicKey({ apiKey, baseUrl, fetchImpl, signal });
   if (wire === "google")    return validateGoogleKey({ apiKey, baseUrl, fetchImpl, signal });
   return validateOpenAIKey({
     apiKey,

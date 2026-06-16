@@ -20,15 +20,16 @@ const MAX_TOKENS = 80;
 const MAX_NARRATIVE_CHARS = 1200;
 const MAX_EC_CHARS = 1200;
 
-// Legacy export — keeps working for call sites that still reference the
-// old Anthropic-only constant. New code should read the resolved model
-// from the returned row (`model` column) or from callLLM's response.
-export const NARRATIVE_FIT_LLM_MODEL = "claude-haiku-4-5";
+// Legacy export — retained for any call site that still references this
+// constant. New code should read the resolved model from the returned row
+// (`model` column) or from callLLM's response. The real model is the
+// student's BYOK "small" tier (OpenRouter by default).
+export const NARRATIVE_FIT_LLM_MODEL = "small";
 
 // Table DDL + prepared statements — these live in counselor.db so we can
 // piggy-back on the shared connection opened by rag-engine.js. The
 // `provider` column was added alongside multi-LLM support; existing rows
-// migrate with NULL provider (treated as "anthropic" for audit display).
+// migrate with NULL provider (treated as "openrouter" for audit display).
 export function initNarrativeFitCacheTable(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS narrative_fit_cache (
@@ -113,13 +114,13 @@ function resolveAdapterConfig(options = {}) {
     }
   }
 
-  // 4. Env fallbacks.
-  if (process.env.ANTHROPIC_API_KEY) {
+  // 4. Env fallbacks (operator key — OpenRouter preferred, then OpenAI, Google).
+  if (process.env.OPENROUTER_API_KEY) {
     return {
-      provider: "anthropic",
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      baseUrl: null,
-      model: process.env.LLM_SMALL_MODEL || resolveTierDefault("anthropic", "small"),
+      provider: "openrouter",
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: process.env.LLM_SMALL_MODEL || resolveTierDefault("openrouter", "small"),
     };
   }
   if (process.env.OPENAI_API_KEY) {

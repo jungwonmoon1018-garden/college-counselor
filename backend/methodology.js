@@ -59,8 +59,6 @@ export const COMPOSITE_THRESHOLDS = Object.freeze([
  */
 export function buildMethodology(status = {}) {
   const {
-    claudeTargets = null,        // { haiku, sonnet, opus }
-    claudeLastRefresh = null,    // ISO string | null
     providerMigration = null,    // { openrouter: {...}, ... }
     scorecardConfigured = false,
     cdsCycleLatest = null,       // e.g. "2024-25"
@@ -124,14 +122,9 @@ export function buildMethodology(status = {}) {
     },
     modelTransparency: {
       whyItMatters:
-        "Free-text guidance quality depends on the LLM behind your BYOK key. A weak or outdated model can produce generic or hallucinated suggestions. We keep recommended models current and tell you when yours is behind.",
-      anthropic: {
-        policy: "Retired Anthropic model IDs are auto-migrated to the current recommended target (no action needed).",
-        currentTargets: claudeTargets,
-        lastRefresh: claudeLastRefresh,
-      },
-      otherProviders: {
-        policy: "For OpenRouter and other BYOK providers, newer recommended models are detected and PROPOSED — migration happens only with your explicit approval, never silently.",
+        "Free-text guidance quality depends on the LLM behind your BYOK key. A weak or outdated model can produce generic or hallucinated suggestions. We surface newer recommended models and tell you when yours is behind.",
+      provider: {
+        policy: "The counselor runs on your own OpenRouter (or other OpenAI-compatible) key. The model dropdown is built from OpenRouter's live catalog, so it only ever offers models that currently exist. Newer recommended defaults are detected and PROPOSED — migration happens only with your explicit approval, never silently.",
         status: providerMigration,
       },
     },

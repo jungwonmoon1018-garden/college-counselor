@@ -83,11 +83,12 @@ import { initEvidenceGraph, prepareEvidenceStatements, getEvidenceProfile, build
 import { composeAnswer, composeDeterministicAnswer } from "./answer-composer.js";
 import { initReviewQueue, prepareReviewStatements, submitForReview, shouldTriggerReview, getQueueStats } from "./review-queue.js";
 import { initPIIVault, preparePIIStatements, storeStudentPII, retrieveStudentPII, deleteAllStudentPII, cleanExpiredDocuments, hashStudentIdForProvider, isBYOKAllowed, lookupStudentBYOK } from "./pii-vault.js";
-import { migrateAllStudentClaudeModels, migrateOneStudentClaudeModels, ensureBudgetColumn, getStudentBudget, setStudentBudget, getMonthlySpendUsd, checkBudget, CURRENT_TARGETS, loadCachedTargetsIntoMemory, refreshClaudeTargetsAndMigrate } from "./claude-model-migration.js";
-import { OPENROUTER_TARGETS, OPENROUTER_STATUS, refreshOpenRouterTargets } from "./openrouter-model-refresh.js";
+import { ensureBudgetColumn, getStudentBudget, setStudentBudget, getMonthlySpendUsd, checkBudget } from "./usage-budget.js";
+import { OPENROUTER_TARGETS, OPENROUTER_STATUS, OPENROUTER_CATALOG, refreshOpenRouterTargets, refreshOpenRouterCatalog } from "./openrouter-model-refresh.js";
+import { randomExemplarGroup, exemplarsPromptBlock } from "./crimson-ec-exemplars.js";
 import { buildMethodology } from "./methodology.js";
 import * as chatHistory from "./chat-history.js";
-import { makeWebSearchTool, makeWebFetchTool, buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS } from "./credible-sources.js";
+import { buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS } from "./credible-sources.js";
 import { extractCollegeValues, computeFit } from "./college-values.js";
 import { callLLM as adapterCallLLM, detectProvider, validateKey as adapterValidateKey, listProviders, isReasonableModelId as adapterIsReasonableModelId, resolveTierDefault, TIER_DEFAULTS, PROVIDERS } from "./llm-adapters/index.js";
 import { screenInput, screenOutput, restorePII } from "./content-moderation.js";
@@ -208,7 +209,7 @@ import {
   getCourseSequence,
   diffCoursesAgainstSequence,
 } from "./course-sequence-catalog.js";
-import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel, detectSubscriptionTier } from "./orchestration-engine.js";
+import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel } from "./orchestration-engine.js";
 import { t, resolveLocale, localizeFriendlyLabels } from "./i18n.js";
 import { readEnvLines, getValue, setValue, writeEnvAtomic, resolveFirstRunEncryptionKey, defaultPaths, HEX64, PLACEHOLDER } from "./env-file.js";
 
@@ -219,7 +220,23 @@ const __dirname = path.dirname(__filename);
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════
 const PORT = parseInt(process.env.PORT || "3001", 10);
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+// Optional server-side operator LLM key — used only for unauthenticated
+// utility calls when a student has no BYOK on file. Provider-neutral:
+// OpenRouter is preferred, then OpenAI/compatible, then Google. There is NO
+// operator fallback for student chat — that path is BYOK-only.
+function resolveOperatorLLM() {
+  const orKey = (process.env.OPENROUTER_API_KEY || "").trim();
+  if (orKey) return { provider: "openrouter", apiKey: orKey, baseUrl: "https://openrouter.ai/api/v1" };
+  const oaKey = (process.env.OPENAI_API_KEY || "").trim();
+  if (oaKey) {
+    const base = (process.env.OPENAI_BASE_URL || "").trim();
+    return { provider: base ? "openai_compat" : "openai", apiKey: oaKey, baseUrl: base || null };
+  }
+  const gKey = (process.env.GOOGLE_API_KEY || "").trim();
+  if (gKey) return { provider: "google", apiKey: gKey, baseUrl: null };
+  return null;
+}
+const OPERATOR_LLM = resolveOperatorLLM();
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173").split(",").map(s => s.trim());
 const NODE_ENV = process.env.NODE_ENV || "development";
 // Treat an unfilled `.env.example` placeholder (REPLACE_WITH…) as unset, so a
@@ -295,10 +312,10 @@ const ENCRYPTION_KEY = resolveEncryptionKey();
 // ═══════════════════════════════════════════════════════════
 // STARTUP VALIDATION
 // ═══════════════════════════════════════════════════════════
-if (!ANTHROPIC_API_KEY) {
-  console.warn("[BOOT] WARNING: ANTHROPIC_API_KEY not set — AI features disabled until configured.");
+if (!OPERATOR_LLM) {
+  console.warn("[BOOT] No operator LLM key set (OPENROUTER_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY) — server-side utility calls are disabled. Student chat uses each student's own BYOK key.");
 } else {
-  console.log("[BOOT] Anthropic API key configured.");
+  console.log(`[BOOT] Operator LLM key configured (provider: ${OPERATOR_LLM.provider}).`);
 }
 if (!COUNSELOR_PASS && NODE_ENV === "production") {
   console.error("FATAL: COUNSELOR_PASS is required in production for audit dashboard access.");
@@ -383,46 +400,19 @@ db.exec(`
 const piiVault = initPIIVault(DATA_DIR, ENCRYPTION_KEY, NODE_ENV);
 const piiStmts = preparePIIStatements(piiVault);
 
-// 2a. Ensure the per-student budget cap column exists, load the cached
-//     Claude targets from disk (fast), then sweep every Anthropic BYOK row
-//     and rewrite retired/older Claude model IDs to the current targets.
-//     Source of truth: claude-model-migration.js.
+// 2a. Ensure the per-student budget cap column exists.
 ensureBudgetColumn(piiVault);
-loadCachedTargetsIntoMemory();
-try {
-  const m = migrateAllStudentClaudeModels(piiVault);
-  if (m.migrated > 0) {
-    console.log(`[CLAUDE-MIGRATE] Boot sweep: ${m.migrated}/${m.scanned} students migrated`);
-    for (const c of m.changes.slice(0, 20)) {
-      console.log(`[CLAUDE-MIGRATE]   ${c.studentId.slice(0,8)}… ${c.tier}: ${c.from} → ${c.to}`);
-    }
-    if (m.changes.length > 20) console.log(`[CLAUDE-MIGRATE]   …and ${m.changes.length - 20} more`);
-  } else {
-    console.log(`[CLAUDE-MIGRATE] Boot sweep: ${m.scanned} students scanned, all up to date (targets: opus=${CURRENT_TARGETS.opus}, sonnet=${CURRENT_TARGETS.sonnet}, haiku=${CURRENT_TARGETS.haiku})`);
-  }
-} catch (err) {
-  console.error("[CLAUDE-MIGRATE] Boot sweep failed:", err.message);
-}
 
-// 2b. Live refresh from Anthropic's /v1/models — fire async at boot and
-//     repeat every 24h. The operator's ANTHROPIC_API_KEY pays for this
-//     single tiny call per day. If the API is unreachable, we keep using
-//     the cached/default targets and try again next cycle.
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
-let claudeTargetsLastRefresh = null; // ISO string, surfaced via /api/methodology
-async function refreshClaudeTargetsNow(reason = "scheduled") {
-  if (!process.env.ANTHROPIC_API_KEY) return;
-  const r = await refreshClaudeTargetsAndMigrate(piiVault, process.env.ANTHROPIC_API_KEY);
-  claudeTargetsLastRefresh = new Date().toISOString();
-  if (r.refreshed && r.changes.length > 0) {
-    console.log(`[CLAUDE-MIGRATE] Live refresh (${reason}): ${r.changes.length} target(s) updated; ${r.migrated}/${r.scanned} students migrated`);
-  } else if (r.refreshed) {
-    console.log(`[CLAUDE-MIGRATE] Live refresh (${reason}): targets already current`);
-  }
-}
-refreshClaudeTargetsNow("boot").catch(err => console.warn("[CLAUDE-MIGRATE] Boot refresh threw:", err.message));
+
+// 2b. OpenRouter live catalog refresh — fetch the full model list (ids,
+//     pricing, context) at boot and every 24h. This drives the BYOK model
+//     dropdown (GET /api/llm/openrouter/models) and budget pricing
+//     (usage-budget.js). If OpenRouter is unreachable we keep the last-known
+//     catalog and the static fallback list and retry next cycle.
+refreshOpenRouterCatalog().catch(err => console.warn("[OR-CATALOG] Boot refresh threw:", err.message));
 setInterval(() => {
-  refreshClaudeTargetsNow("daily").catch(err => console.warn("[CLAUDE-MIGRATE] Daily refresh threw:", err.message));
+  refreshOpenRouterCatalog().catch(err => console.warn("[OR-CATALOG] Daily refresh threw:", err.message));
 }, REFRESH_INTERVAL_MS).unref();
 
 // 2c. OpenRouter recommended-model refresh — same 24h cadence, but migration
@@ -685,12 +675,6 @@ function requireCounselorAuth(req, res, next) {
   next();
 }
 
-// ─── Prestige adapter resolver ──────────────────────────────
-// Prestige research requires Anthropic's native web_search tool. Prefer
-// the student's Anthropic BYOK (so the student pays for their own research);
-// fall back to the server's ANTHROPIC_API_KEY. Returns null when no
-// Anthropic credentials are available — callers pass null through and the
-// vectorizer records source:"unavailable" rather than throwing.
 function snapshotToStudentProfile(snapshot, narrative = null) {
   return {
     gpa: { unweighted: snapshot.gpa_unweighted, weighted: snapshot.gpa_weighted },
@@ -723,30 +707,13 @@ async function callSimulationSidecar(pathname, options = {}) {
   return data;
 }
 
-function resolvePrestigeAdapter(studentId) {
-  try {
-    if (studentId) {
-      const byok = lookupStudentBYOK(piiStmts, piiVault, studentId);
-      if (byok && byok.provider === "anthropic" && byok.apiKey) {
-        return {
-          provider: "anthropic",
-          apiKey: byok.apiKey,
-          baseUrl: byok.baseUrl || null,
-          model: byok.models?.medium || resolveTierDefault("anthropic", "medium"),
-        };
-      }
-    }
-  } catch {
-    // Non-fatal — fall through to server key.
-  }
-  if (ANTHROPIC_API_KEY) {
-    return {
-      provider: "anthropic",
-      apiKey: ANTHROPIC_API_KEY,
-      baseUrl: null,
-      model: process.env.LLM_MEDIUM_MODEL || resolveTierDefault("anthropic", "medium"),
-    };
-  }
+// ─── Prestige adapter resolver ──────────────────────────────
+// Prestige web-research was built on Anthropic's native web_search tool, which
+// has been removed. competition-research.js short-circuits to source:
+// "unavailable" for any non-Anthropic adapter, so we return null here and the
+// vectorizer records "unavailable" instead of throwing. Re-enabling web-
+// enriched prestige on OpenRouter's web plugin is a tracked follow-up.
+function resolvePrestigeAdapter(_studentId) {
   return null;
 }
 
@@ -761,29 +728,25 @@ function buildStudentCallLLM(studentId) {
   const byok = lookupStudentBYOK(piiStmts, piiVault, studentId);
   if (!byok) return { byok: null, callLLM: null };
   const callLLM = async (args) => {
-    const provIsAnthropic = byok.provider === "anthropic";
     const provIsOR = byok.provider === "openrouter";
-    const rawTools = Array.isArray(args.tools) ? args.tools : [];
-    const ANTHROPIC_ONLY_TOOL_RE = /^(web_search|web_fetch|text_editor|bash|computer|code_execution|str_replace_based_edit_tool)/;
-    const passThruTools = provIsAnthropic
-      ? rawTools
-      : rawTools.filter(t => !ANTHROPIC_ONLY_TOOL_RE.test(t?.type || ""));
-    const orModelIsAnthropic = provIsOR && /^anthropic\//.test(args.model || byok.models.large || "");
-    const useORWebPlugin = provIsOR && args.wantsWeb && !orModelIsAnthropic;
+    // No provider on the OpenAI/Google wire executes the backend's custom
+    // function tools; OpenRouter gets web access via its native web plugin
+    // when the caller asks for it (wantsWeb).
+    const useORWebPlugin = provIsOR && !!args.wantsWeb;
     const orAllowedDomains = buildAllowedDomains(args.extraDomains);
+    const model = args.model || byok.models.medium || byok.models.large;
     const result = await adapterCallLLM({
       provider: byok.provider,
       apiKey: byok.apiKey,
       baseUrl: byok.baseUrl,
-      model: args.model || byok.models.medium || byok.models.large || CURRENT_TARGETS.sonnet,
+      model,
       maxTokens: args.max_tokens,
       system: args.system,
       messages: args.messages,
-      tools: passThruTools.length ? passThruTools : undefined,
       webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
     });
     try {
-      ragStmts.insertUsage.run(studentId, `${byok.provider}:${args.model || byok.models.medium || byok.models.large}`, result?.usage?.input_tokens || 0, result?.usage?.output_tokens || 0, "personal");
+      ragStmts.insertUsage.run(studentId, `${byok.provider}:${model}`, result?.usage?.input_tokens || 0, result?.usage?.output_tokens || 0, "personal");
     } catch { /* ignore */ }
     return result;
   };
@@ -1072,7 +1035,6 @@ function buildAdmissionsCalendar(now = new Date()) {
 async function fetchSchoolDeadlinesViaWeb(callLLM, byok, schoolNames, cycleEntryYear) {
   const list = schoolNames.slice(0, 8).map((s, i) => `${i + 1}. ${s}`).join("\n");
   const extraDomains = [];
-  const tools = [makeWebSearchTool(extraDomains), makeWebFetchTool(extraDomains)];
   const prompt = `Find the admissions & financial-aid deadlines for the CURRENT cycle (students entering Fall ${cycleEntryYear}) for these universities. Use web search of each school's official admissions/financial-aid pages.
 
 SCHOOLS:
@@ -1101,7 +1063,6 @@ Return ONLY a JSON array, one object per school, no prose:
     max_tokens: 8192,
     system: "You are a meticulous admissions-deadline researcher. Report real dates from official sources only; use null when unsure. Output ONLY the requested JSON array.",
     messages: [{ role: "user", content: prompt }],
-    tools,
     wantsWeb: true,
     extraDomains,
   });
@@ -1303,24 +1264,7 @@ const LLM_TIMEOUT_MS = 60_000;
 // No auth required — this is a read-only registry.
 app.get("/api/llm/providers", apiLimiter, (_req, res) => {
   try {
-    // Overlay Anthropic's "current recommended" defaults with the values
-    // from claude-model-migration.js so the BYOK prerequisite UI and the
-    // boot/on-access migration agree on what "current" means. When the
-    // /claude-api skill ships a new Opus / Sonnet / Haiku, bumping
-    // CURRENT_TARGETS is the only edit needed — both the migration and
-    // the providers endpoint pick it up.
     const providers = listProviders().map(p => {
-      if (p.id === "anthropic") {
-        return {
-          ...p,
-          defaults: {
-            ...(p.defaults || {}),
-            small: CURRENT_TARGETS.haiku,
-            medium: CURRENT_TARGETS.sonnet,
-            large: CURRENT_TARGETS.opus,
-          },
-        };
-      }
       // OpenRouter's recommended defaults are refreshed live (propose-only) so
       // the BYOK "Update models" prompt can offer newer models for approval.
       if (p.id === "openrouter") {
@@ -1346,14 +1290,34 @@ app.get("/api/llm/providers", apiLimiter, (_req, res) => {
   }
 });
 
+// GET /api/llm/openrouter/models — the LIVE OpenRouter model catalog that
+// populates the BYOK model dropdown. Served from the in-memory cache refreshed
+// at boot + every 24h (openrouter-model-refresh.js). When the catalog is
+// empty/unreachable the client falls back to the static knownModels list.
+// Optional ?free=1 returns only zero-cost models. No auth — read-only.
+app.get("/api/llm/openrouter/models", apiLimiter, (req, res) => {
+  try {
+    const freeOnly = req.query.free === "1" || req.query.free === "true";
+    let models = OPENROUTER_CATALOG.models || [];
+    if (freeOnly) models = models.filter(m => m.free);
+    res.json({
+      reachable: OPENROUTER_CATALOG.reachable,
+      lastFetched: OPENROUTER_CATALOG.lastFetched,
+      count: models.length,
+      models, // [{ id, name, contextLength, pricing:{inputPerMTok,outputPerMTok}, free }]
+    });
+  } catch (err) {
+    console.error("[OpenRouter models] error:", err.message);
+    res.status(500).json({ error: "Failed to list OpenRouter models" });
+  }
+});
+
 // GET /api/methodology — full transparency surface: EC factor weights, scoring
 // logic, narrative-quality policy, data sources + freshness, and model-
 // migration status. Read-only, no auth — the whole point is openness.
 app.get("/api/methodology", apiLimiter, (_req, res) => {
   try {
     res.json(buildMethodology({
-      claudeTargets: { haiku: CURRENT_TARGETS.haiku, sonnet: CURRENT_TARGETS.sonnet, opus: CURRENT_TARGETS.opus },
-      claudeLastRefresh: claudeTargetsLastRefresh,
       providerMigration: { openrouter: OPENROUTER_STATUS },
       scorecardConfigured: !!SCORECARD_API_KEY,
       baselineYear: 2024,
@@ -1454,21 +1418,18 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
       payload.provider ||
       (byok && byok.provider) ||
       detectProvider({ apiKey: payload.apiKey, baseUrl: payload.baseUrl }) ||
-      (process.env.ANTHROPIC_API_KEY ? PROVIDERS.ANTHROPIC : null) ||
-      (process.env.OPENAI_API_KEY ? (process.env.OPENAI_BASE_URL ? PROVIDERS.OPENAI_COMPAT : PROVIDERS.OPENAI) : null) ||
-      (process.env.GOOGLE_API_KEY ? PROVIDERS.GOOGLE : null);
+      (OPERATOR_LLM ? OPERATOR_LLM.provider : null);
     if (!provider) {
       return res.status(503).json({ error: "No LLM provider configured." });
     }
 
-    const apiKey =
-      payload.apiKey ||
-      (byok && byok.apiKey) ||
-      (provider === "anthropic"   ? process.env.ANTHROPIC_API_KEY :
-       provider === "openai"      ? process.env.OPENAI_API_KEY    :
-       provider === "google"      ? process.env.GOOGLE_API_KEY    :
-       provider === "openai_compat" ? process.env.OPENAI_API_KEY : null);
-    const baseUrl = payload.baseUrl || (byok && byok.baseUrl) ||
+    // Operator key only fills in when the caller has no request key and no
+    // BYOK on file (unauthenticated utility calls) and the operator provider
+    // matches the resolved provider.
+    const operatorKey = (OPERATOR_LLM && OPERATOR_LLM.provider === provider) ? OPERATOR_LLM.apiKey : null;
+    const operatorBase = (OPERATOR_LLM && OPERATOR_LLM.provider === provider) ? OPERATOR_LLM.baseUrl : null;
+    const apiKey = payload.apiKey || (byok && byok.apiKey) || operatorKey;
+    const baseUrl = payload.baseUrl || (byok && byok.baseUrl) || operatorBase ||
                     (provider === "openai_compat" ? process.env.OPENAI_BASE_URL : null);
 
     const keySource =
@@ -1504,24 +1465,15 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
       }
     }
 
-    // ── Credible-sources web tools ──
-    // For Anthropic providers, append web_search + web_fetch tools restricted
-    // to the .edu / .gov / common-application allowlist (see
-    // credible-sources.js). The student can pass `extraDomains: [...]` in
-    // the request body when they want to research a specific school whose
-    // domain isn't on the default list — only .edu/.gov/.org TLDs are
-    // accepted as runtime additions. The model decides whether to invoke
-    // the tools; callers don't have to manage that.
-    const inheritedTools = Array.isArray(payload.tools) ? payload.tools : [];
-    const wantsWeb = payload.web !== false; // opt-out via {web:false}
-    let toolset = inheritedTools;
-    if (wantsWeb && provider === "anthropic") {
-      toolset = [
-        ...inheritedTools.filter(t => !/^web_(search|fetch)_/.test(t?.type || "")),
-        makeWebSearchTool(payload.extraDomains),
-        makeWebFetchTool(payload.extraDomains),
-      ];
-    }
+    // ── Web access ──
+    // No provider on the OpenAI/Google wire executes custom function tools.
+    // OpenRouter gets web access via its native web plugin, restricted to the
+    // .edu / .gov / common-application allowlist (credible-sources.js). The
+    // student can pass `extraDomains: [...]` to research a specific school
+    // whose domain isn't on the default list. Opt out with {web:false}.
+    const wantsWeb = payload.web !== false;
+    const useORWebPlugin = wantsWeb && provider === "openrouter";
+    const orAllowedDomains = buildAllowedDomains(payload.extraDomains);
 
     // ── Call adapter ──
     const controller = new AbortController();
@@ -1536,9 +1488,8 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
         messages: payload.messages,
         system: payload.system,
         maxTokens,
-        tools: toolset.length ? toolset : undefined,
         temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
-        anthropicBeta: payload.anthropic_beta || req.headers["anthropic-beta"] || undefined,
+        webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
         signal: controller.signal,
       });
     } catch (llmErr) {
@@ -1919,18 +1870,21 @@ app.get("/api/context/bundle", studentLimiter, requireStudentAuth, async (req, r
 
 
 // ═══════════════════════════════════════════════════════════
-// POST /api/anthropic — legacy Anthropic-only proxy (kept for backward compat)
+// POST /api/chat — the counseling chat path (provider-neutral, BYOK-first)
 // ═══════════════════════════════════════════════════════════
 // Flow: Input screening → Policy router → Rules engine (T0) →
 //       [Model only if needed] → Output screening → 3-lane answer
 //
-// New code should hit POST /api/llm, which speaks every supported provider.
+// The frontend sends a `tier` (small|medium|large); the student's BYOK model
+// for that tier is used. `model` is accepted as an explicit override. Every
+// provider routes through the adapter layer; OpenRouter is the default.
 
-app.post("/api/anthropic", apiLimiter, async (req, res) => {
+app.post("/api/chat", apiLimiter, async (req, res) => {
   try {
     let payload = req.body;
     if (!payload || typeof payload !== "object") return res.status(400).json({ error: "Invalid request body" });
-    if (!payload.model || !isReasonableModelId(payload.model)) {
+    // `model` is optional — the tier + BYOK resolve it. Validate only when set.
+    if (payload.model != null && !isReasonableModelId(payload.model)) {
       return res.status(400).json({ error: "Invalid model id. Must be 3-120 chars, no whitespace or control characters." });
     }
     if (payload.max_tokens && payload.max_tokens > MAX_TOKENS_LIMIT) payload.max_tokens = MAX_TOKENS_LIMIT;
@@ -1959,8 +1913,14 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
     }
 
     // ── Step 1: Input screening (credential detection, PII redaction) ──
+    // Flatten array content blocks too (attachments arrive as structured
+    // content) so screening / crisis detection never silently skip them.
     const lastMessage = payload.messages[payload.messages.length - 1];
-    const userText = typeof lastMessage?.content === "string" ? lastMessage.content : "";
+    const userText = typeof lastMessage?.content === "string"
+      ? lastMessage.content
+      : Array.isArray(lastMessage?.content)
+          ? lastMessage.content.filter((b) => b?.type === "text").map((b) => b.text).join("\n")
+          : "";
     const inputScreen = screenInput(userText);
 
     if (inputScreen.blocked) {
@@ -2013,47 +1973,23 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
       }
     }
 
-    // ── Step 5: Forward to Anthropic ──
-    if (!ANTHROPIC_API_KEY) {
-      return res.status(503).json({ error: { message: "AI service not configured." } });
-    }
-
-    const hasPdfDoc = JSON.stringify(payload).includes('"type":"document"');
-    const betaFeatures = [];
-    if (hasPdfDoc) betaFeatures.push("pdfs-2024-09-25");
-    const clientBeta = req.headers["anthropic-beta"];
-    if (clientBeta) {
-      for (const b of clientBeta.split(",").map(s => s.trim())) {
-        if (b && !betaFeatures.includes(b)) betaFeatures.push(b);
-      }
-    }
-
-    // ── Provider-aware dispatch ──
-    // If the student stored a personal BYOK key, route through the adapter
-    // layer using their provider (Anthropic / OpenAI / Google / OpenRouter /
-    // DeepSeek / Together / Zhipu / Ollama / LM Studio). The adapter
-    // normalizes every provider's response into Anthropic-shape, so the
-    // rest of this handler (output screening, restorePII, review-queue)
-    // stays unchanged. Falls back to the operator's ANTHROPIC_API_KEY
-    // only when no BYOK is on file — useful for the rare case of an
-    // unauthenticated utility call.
+    // ── Step 5: Resolve the LLM credentials ──
+    // Route through the adapter layer using the student's own BYOK key
+    // (OpenRouter / OpenAI / Google / DeepSeek / Together / Zhipu / Ollama /
+    // LM Studio). The adapter normalizes every provider's response into the
+    // backend's internal shape, so the rest of this handler (output
+    // screening, restorePII, review-queue) stays unchanged. There is NO
+    // operator fallback for chat — students must have a BYOK key (the
+    // prerequisite screen enforces this). The operator key is only used for
+    // the rare unauthenticated utility call below.
     const byok = studentId ? lookupStudentBYOK(piiStmts, piiVault, studentId) : null;
+    if (!byok && !OPERATOR_LLM) {
+      return res.status(503).json({ error: { message: "No API key on file. Add your own LLM key in Edit profile → API key." } });
+    }
 
-    // Append credible-sources web tools for Anthropic. We do this for
-    // BOTH the BYOK and operator paths so the model has the right
-    // research tools available either way.
-    // Tools sent by the frontend ride along in payload.tools. The adapter
-    // layer only knows how to translate "custom" tools across providers —
-    // Anthropic-native tool types (web_search_*, web_fetch_*, text_editor_*,
-    // bash_*, computer_*, code_execution_*) only work on Anthropic-wire
-    // providers. Strip them when dispatching to OpenRouter / OpenAI /
-    // Google / Ollama / etc. so the adapter doesn't reject the whole call.
-    const ANTHROPIC_ONLY_TOOL_RE = /^(web_search|web_fetch|text_editor|bash|computer|code_execution|str_replace_based_edit_tool)/;
-    const provIsAnthropic = !byok || byok.provider === "anthropic";
-    const rawTools = Array.isArray(payload.tools) ? payload.tools : [];
-    const inheritedTools = provIsAnthropic
-      ? rawTools
-      : rawTools.filter(t => !ANTHROPIC_ONLY_TOOL_RE.test(t?.type || ""));
+    // No provider on the OpenAI/Google wire executes the frontend's custom
+    // function tools. OpenRouter gets web access via its web plugin; other
+    // providers answer from the auto-injected profile context below.
     const wantsWeb = payload.web !== false; // opt-out via {web:false}
 
     // ── System-prompt rewrite for tool-less providers ─────────────────
@@ -2146,12 +2082,11 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
       }
     };
 
-    const effectiveSystem = provIsAnthropic
-      ? payload.system
-      : (rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId));
+    // Every provider is tool-less now, so always strip the "ALWAYS call X
+    // tool" directives and auto-inject the student's profile context.
+    const effectiveSystem = rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
 
     let data;
-    let dispatchStatus = 200;
 
     if (byok) {
       // Route through the adapter using the student's own key.
@@ -2162,6 +2097,8 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
       // college-list reasoning are now pinned to LARGE by the router, so
       // they automatically get the student's "large" model (Opus on
       // Anthropic). Other topic types stay on their assigned tier.
+      // tier-name synonyms → BYOK model slot. The policy router may emit
+      // either small/medium/large or the legacy opus/sonnet/haiku names.
       const tierToSlot = {
         opus: "large",   small: "small",
         sonnet: "medium", medium: "medium",
@@ -2169,29 +2106,13 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
       };
       const tierSlot = tierToSlot[classification.modelTier] || "large";
       const tierModel = byok.models?.[tierSlot];
-      const provModel = (
-        byok.provider === "anthropic"
-          ? (tierModel || payload.model || byok.models.large || CURRENT_TARGETS.opus)
-          : (tierModel || byok.models.large || payload.model)
-      );
+      const provModel = tierModel || payload.model || byok.models.large || byok.models.medium;
 
-      const toolset = provIsAnthropic && wantsWeb
-        ? [
-            ...inheritedTools.filter(t => !/^web_(search|fetch)_/.test(t?.type || "")),
-            makeWebSearchTool(payload.extraDomains),
-            makeWebFetchTool(payload.extraDomains),
-          ]
-        : inheritedTools;
-
-      // ── OpenRouter web access (non-Anthropic models) ──────────────
-      // Anthropic models on OpenRouter still use native tool blocks
-      // (passthrough). Every OTHER OpenRouter model — Gemma, GLM,
-      // DeepSeek, Llama, etc. — relies on OpenRouter's `web` plugin
-      // for internet access. Without this branch, non-Anthropic
-      // students get zero web search after the Anthropic-only tool
-      // filter strips the native tools above.
-      const orModelIsAnthropic = byok.provider === "openrouter" && /^anthropic\//.test(provModel || "");
-      const useORWebPlugin = byok.provider === "openrouter" && wantsWeb && !orModelIsAnthropic;
+      // ── OpenRouter web access ──────────────
+      // OpenRouter models reach the internet through OpenRouter's `web`
+      // plugin (results injected before the model answers). Other providers
+      // have no web access and answer from the injected profile context.
+      const useORWebPlugin = byok.provider === "openrouter" && wantsWeb;
       const orAllowedDomains = buildAllowedDomains(payload.extraDomains);
 
       // ── Tier-walk fallback chain ─────────────────────────────────
@@ -2250,13 +2171,6 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
       for (let attempt = 0; attempt < tierChain.length; attempt++) {
         const candidate = tierChain[attempt];
         const isFirstAttempt = attempt === 0;
-        // Drop tools on tools_unsupported retries — sending the same
-        // toolset would fail the same way.
-        const dropTools = lastErr && lastErr.code === "tools_unsupported";
-        const attemptTools = dropTools ? undefined : (toolset.length ? toolset : undefined);
-        // Re-evaluate the OpenRouter web-plugin gating per candidate.
-        const candIsAnthropicOR = byok.provider === "openrouter" && /^anthropic\//.test(candidate || "");
-        const candUseORWebPlugin = byok.provider === "openrouter" && wantsWeb && !candIsAnthropicOR;
 
         if (!isFirstAttempt) {
           console.log(`[PROXY] Falling back ${tierChain[attempt - 1]} → ${candidate} (reason: ${lastErr?.code || "unknown"})`);
@@ -2272,9 +2186,7 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
             system: effectiveSystem,
             maxTokens: payload.max_tokens || 1024,
             temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
-            tools: attemptTools,
-            anthropicBeta: betaFeatures.length ? betaFeatures.join(",") : undefined,
-            webPlugin: candUseORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
+            webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
           });
           // Reasoning-model empty-response guard. If the model used
           // its entire max_tokens budget on internal thinking and
@@ -2318,9 +2230,7 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
         const modelMissing = status === 404 || /no endpoints found|model_not_found|does not exist/i.test(msg);
         const triedList = tierChain.join(", ");
         const userMsg = code === "credit_exhausted"
-          ? (byok.provider === "anthropic"
-              ? "Your Anthropic account is out of credits. Top up at console.anthropic.com/settings/billing — or switch providers via Edit profile → API key."
-              : `Your ${byok.provider} account is out of credits.`)
+          ? `Your ${byok.provider} account is out of credits. Top up with that provider, or switch via Edit profile → API key.`
           : code === "auth_rejected"
             ? `Your ${byok.provider} API key was rejected. Re-enter it via Edit profile → API key.`
             : modelMissing
@@ -2329,34 +2239,34 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
         return res.status(status).json({ error: { message: userMsg, code, provider: byok.provider, triedModels: tierChain } });
       }
     } else {
-      // Fallback to operator's Anthropic key. This path is only hit when
-      // the student has no BYOK on file — the prerequisite screen enforces
-      // having one, so this is mainly an edge-case safety net.
-      const anthropicHeaders = {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      };
-      if (betaFeatures.length) anthropicHeaders["anthropic-beta"] = betaFeatures.join(",");
-      // Attach credible-sources tools if not already provided.
-      const bodyWithTools = (wantsWeb && !inheritedTools.some(t => /^web_(search|fetch)_/.test(t?.type || "")))
-        ? { ...payload, tools: [...inheritedTools, makeWebSearchTool(payload.extraDomains), makeWebFetchTool(payload.extraDomains)] }
-        : payload;
-
-      const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: anthropicHeaders,
-        body: JSON.stringify(bodyWithTools),
-      });
-      dispatchStatus = anthropicRes.status;
-      data = await anthropicRes.json();
-
-      if (!anthropicRes.ok) {
-        console.error(`[PROXY] Anthropic API error ${anthropicRes.status}:`, data?.error?.message);
-        if (anthropicRes.status === 401 || anthropicRes.status === 403) {
-          return res.status(anthropicRes.status).json({ error: { message: "API key rejected by Anthropic.", keyError: true } });
-        }
-        return res.status(anthropicRes.status).json({ error: { message: data?.error?.message || `Anthropic API returned ${anthropicRes.status}` } });
+      // Operator-key fallback — only reached for unauthenticated utility
+      // calls (a student with a BYOK never lands here). Routes through the
+      // adapter layer using the provider-neutral operator key.
+      const opModel = payload.model
+        || (OPERATOR_LLM.provider === "openrouter" ? OPENROUTER_TARGETS.medium : resolveTierDefault(OPERATOR_LLM.provider, "medium"));
+      const opUseWeb = wantsWeb && OPERATOR_LLM.provider === "openrouter";
+      try {
+        const resp = await adapterCallLLM({
+          provider: OPERATOR_LLM.provider,
+          apiKey: OPERATOR_LLM.apiKey,
+          baseUrl: OPERATOR_LLM.baseUrl,
+          model: opModel,
+          messages: payload.messages,
+          system: effectiveSystem,
+          maxTokens: payload.max_tokens || 1024,
+          temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
+          webPlugin: opUseWeb ? { enabled: true, allowedDomains: buildAllowedDomains(payload.extraDomains) } : null,
+        });
+        data = {
+          content: resp.content || [],
+          usage: resp.usage || {},
+          model: resp.model || opModel,
+          stop_reason: resp.stop_reason || null,
+        };
+      } catch (opErr) {
+        const status = (opErr?.status && Number.isFinite(opErr.status)) ? opErr.status : 502;
+        console.error(`[PROXY] operator ${OPERATOR_LLM.provider}/${opModel} ${status}: ${opErr?.message || "unknown"}`);
+        return res.status(status).json({ error: { message: opErr?.message || "LLM error", code: opErr?.code || "llm_error", provider: OPERATOR_LLM.provider } });
       }
     }
 
@@ -2431,32 +2341,22 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
     }
 
     // ── Log usage ──
+    // Use the model that actually answered (resolved by the BYOK tier-walk
+    // or the operator fallback), not the request's optional override.
+    const answeredModel = data?.model || payload.model || null;
     if (studentId) {
       try {
-        ragStmts.insertUsage.run(studentId, payload.model, data?.usage?.input_tokens || 0, data?.usage?.output_tokens || 0, "server");
+        ragStmts.insertUsage.run(studentId, answeredModel, data?.usage?.input_tokens || 0, data?.usage?.output_tokens || 0, byok ? "personal" : "server");
       } catch (usageErr) {
         console.warn("[PROXY] Usage logging failed:", usageErr.message);
       }
     }
 
-    // ── Rate limit info ──
-    // Only present on the operator-key fallback path (no BYOK on file).
-    // BYOK calls go through the adapter layer which doesn't surface
-    // per-provider rate-limit headers in a normalized way — we emit
-    // empty values rather than crash on the missing variable.
-    const rateLimitHeaders = byok ? null : (typeof anthropicRes !== "undefined" ? anthropicRes.headers : null);
-    const rateLimits = rateLimitHeaders ? {
-      requestsLimit: parseInt(rateLimitHeaders.get("anthropic-ratelimit-requests-limit") || "0", 10),
-      requestsRemaining: parseInt(rateLimitHeaders.get("anthropic-ratelimit-requests-remaining") || "0", 10),
-      tokensLimit: parseInt(rateLimitHeaders.get("anthropic-ratelimit-tokens-limit") || "0", 10),
-      tokensRemaining: parseInt(rateLimitHeaders.get("anthropic-ratelimit-tokens-remaining") || "0", 10),
-    } : { requestsLimit: 0, requestsRemaining: 0, tokensLimit: 0, tokensRemaining: 0 };
-
     res.json({
       ...data,
       _meta: {
-        keySource: "server",
-        rateLimits,
+        keySource: byok ? "byok" : "server",
+        provider: byok ? byok.provider : (OPERATOR_LLM ? OPERATOR_LLM.provider : null),
         topicType: classification.topicType,
         modelTier: classification.modelTier,
         inputScreened: inputScreen.redacted,
@@ -2464,7 +2364,7 @@ app.post("/api/anthropic", apiLimiter, async (req, res) => {
         ai_disclosure: {
           system: "College Counselor AI",
           advisory_only: true,
-          model: payload.model,
+          model: answeredModel,
         },
       },
     });
@@ -3208,40 +3108,27 @@ app.post("/api/colleges/values", studentLimiter, requireStudentAuth, async (req,
       return res.status(400).json({ error: "No personal API key on file. Set one at /api/students/apikey first." });
     }
 
-    // Provider-aware web routing: Anthropic-shape providers use the
-    // native web_search/web_fetch tools the caller passed in.
-    // OpenRouter routes through its `plugins:[{id:"web"}]`; all other
-    // providers get web stripped (they have no internet path), and the
-    // model is asked to do its best with the structured data alone.
+    // Web routing: OpenRouter models route through its `plugins:[{id:"web"}]`
+    // plugin; all other providers have no internet path and answer from the
+    // structured data alone. No provider executes custom function tools.
     const callLLM = async (args) => {
-      const provIsAnthropic = byok.provider === "anthropic";
-      const provIsOR = byok.provider === "openrouter";
-      const rawTools = Array.isArray(args.tools) ? args.tools : [];
-      const ANTHROPIC_ONLY_TOOL_RE = /^(web_search|web_fetch|text_editor|bash|computer|code_execution|str_replace_based_edit_tool)/;
-      const passThruTools = provIsAnthropic
-        ? rawTools
-        : rawTools.filter(t => !ANTHROPIC_ONLY_TOOL_RE.test(t?.type || ""));
-
-      // OpenRouter web plugin gating — skip for Anthropic passthroughs
-      // (those still use native tool blocks).
-      const orModelIsAnthropic = provIsOR && /^anthropic\//.test(args.model || byok.models.large || "");
-      const useORWebPlugin = provIsOR && args.wantsWeb && !orModelIsAnthropic;
+      const useORWebPlugin = byok.provider === "openrouter" && !!args.wantsWeb;
       const orAllowedDomains = buildAllowedDomains(args.extraDomains);
+      const model = args.model || byok.models.large || byok.models.medium;
 
       const result = await adapterCallLLM({
         provider: byok.provider,
         apiKey: byok.apiKey,
         baseUrl: byok.baseUrl,
-        model: args.model || byok.models.large || CURRENT_TARGETS.opus,
+        model,
         maxTokens: args.max_tokens,
         system: args.system,
         messages: args.messages,
-        tools: passThruTools.length ? passThruTools : undefined,
         webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
       });
       // Record usage for budget tracking
       try {
-        ragStmts.insertUsage.run(req.studentId, `${byok.provider}:${args.model || byok.models.large}`, result?.usage?.input_tokens || 0, result?.usage?.output_tokens || 0, "personal");
+        ragStmts.insertUsage.run(req.studentId, `${byok.provider}:${model}`, result?.usage?.input_tokens || 0, result?.usage?.output_tokens || 0, "personal");
       } catch { /* ignore */ }
       return result;
     };
@@ -3493,21 +3380,9 @@ app.put("/api/students/apikey", studentLimiter, requireStudentAuth, async (req, 
       console.log(`[BYOK] ${provider} key accepted as unverified (${verification.code}): ${verification.message || ""}`);
     }
 
-    // Subscription-tier detection is Anthropic-specific; other providers
-    // don't expose usage tiers via headers. We still capture it for Anthropic.
-    let subInfo = { tier: "unknown", reqLimit: 0, tokLimit: 0 };
-    if (provider === "anthropic") {
-      try {
-        const testRes = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-          body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
-        });
-        subInfo = detectSubscriptionTier(testRes.headers);
-      } catch {
-        // Non-fatal — tier info is advisory.
-      }
-    }
+    // Subscription-tier detection was Anthropic-specific; other providers
+    // don't expose usage tiers via headers. Tier info is advisory only.
+    const subInfo = { tier: "unknown", reqLimit: 0, tokLimit: 0 };
 
     // Store encrypted in PII vault (upsertApiKey now takes the full tuple).
     const encrypted = encryptValue(apiKey);
@@ -3535,37 +3410,6 @@ app.put("/api/students/apikey", studentLimiter, requireStudentAuth, async (req, 
       hashIP(req.ip),
     );
 
-    // ── DEV-ONLY: promote validated Anthropic BYOK to operator key ──
-    // When NODE_ENV=development AND the saved key passed live validation
-    // AND the provider is Anthropic, write it to process.env in memory.
-    // This unblocks operator-side paths (orchestrate proxy, daily Claude
-    // target refresh, audit-side LLM calls) for solo developers without
-    // requiring them to also edit .env. Safety guarantees:
-    //   • In-memory only — never persisted to .env on disk.
-    //   • Production (`NODE_ENV=production`) is a strict no-op — checked
-    //     below; no path leaks one student's key to other students.
-    //   • Gated on verification.valid === true so we don't promote a
-    //     key the validator threw on.
-    //   • Re-triggers the live target refresh so the operator's cached
-    //     model targets pick up the new key immediately.
-    if (
-      process.env.NODE_ENV === "development" &&
-      provider === "anthropic" &&
-      verification.valid === true &&
-      apiKey &&
-      apiKey !== process.env.ANTHROPIC_API_KEY
-    ) {
-      const oldHintSrc = process.env.ANTHROPIC_API_KEY || "";
-      const oldHint = oldHintSrc ? `${oldHintSrc.slice(0, 10)}…${oldHintSrc.slice(-4)}` : "(unset)";
-      process.env.ANTHROPIC_API_KEY = apiKey;
-      console.log(`[BYOK-DEV] Promoted student BYOK to operator key in memory (was: ${oldHint}, now: ${hint}). Production is unaffected — this only fires when NODE_ENV=development.`);
-      // Fire-and-forget refresh so the Claude-targets cache picks up
-      // the new key immediately. Errors are non-fatal.
-      refreshClaudeTargetsNow?.("byok_promoted")?.catch(err =>
-        console.warn("[BYOK-DEV] Post-promotion target refresh failed:", err.message)
-      );
-    }
-
     res.json({
       stored: true,
       hint,
@@ -3574,14 +3418,6 @@ app.put("/api/students/apikey", studentLimiter, requireStudentAuth, async (req, 
       defaults: tiers,
       subscription: { tier: subInfo.tier, requestLimit: subInfo.reqLimit, tokenLimit: subInfo.tokLimit },
       verified: verification.valid === true,
-      // True only if dev-mode promotion just fired. Frontend can surface
-      // this as an info banner so the dev knows their key is now also
-      // serving operator-side paths.
-      promotedToOperatorKey:
-        process.env.NODE_ENV === "development" &&
-        provider === "anthropic" &&
-        verification.valid === true &&
-        apiKey === process.env.ANTHROPIC_API_KEY,
     });
   } catch (err) {
     console.error("[BYOK] Store key error:", err.message);
@@ -3602,20 +3438,9 @@ app.delete("/api/students/apikey", studentLimiter, requireStudentAuth, (req, res
 
 app.get("/api/students/apikey", studentLimiter, requireStudentAuth, (req, res) => {
   try {
-    // Per-student migration: if this Anthropic student's stored model IDs
-    // were left behind by a model release, upgrade them silently before
-    // we return the row. The frontend then reflects the new defaults
-    // without prompting the user.
-    let autoMigrated = [];
-    try {
-      const m = migrateOneStudentClaudeModels(piiVault, req.studentId);
-      if (m.migrated) {
-        autoMigrated = m.changes;
-        console.log(`[CLAUDE-MIGRATE] On-access ${req.studentId.slice(0,8)}…: ${m.changes.map(c => `${c.tier} ${c.from}→${c.to}`).join(", ")}`);
-      }
-    } catch (mErr) {
-      console.warn("[CLAUDE-MIGRATE] On-access failed:", mErr.message);
-    }
+    // BYOK model IDs are owned by the student (and, for OpenRouter, refreshed
+    // propose-only via the "Update models" prompt) — nothing is auto-migrated.
+    const autoMigrated = [];
 
     const row = piiStmts.getApiKey?.get(req.studentId);
     if (!row) return res.json({ hasPersonalKey: false, keySource: "none" });
@@ -3629,7 +3454,7 @@ app.get("/api/students/apikey", studentLimiter, requireStudentAuth, (req, res) =
       keySource: "personal",
       hint: row.key_hint,
       setAt: row.updated_at,
-      provider: row.provider || "anthropic",
+      provider: row.provider || "openrouter",
       baseUrl: row.base_url || null,
       defaults: {
         small:  row.default_small_model  || null,
@@ -4834,7 +4659,6 @@ async function llmRankCandidates({ callLLM, byok, studentId, active, candidates,
     .map((c, i) => `${i + 1}. ${String(c?.name || "").trim()}${c?.description ? ` — ${String(c.description).trim()}` : ""}`)
     .join("\n");
   const extraDomains = [];
-  const tools = [makeWebSearchTool(extraDomains), makeWebFetchTool(extraDomains)];
   const prompt = `You are ranking candidate extracurricular IDEAS a student is weighing, by how much each would strengthen THIS student's application.
 
 STUDENT NARRATIVE (the story everything should reinforce):
@@ -4869,7 +4693,6 @@ Return ONLY a JSON array, exactly one object per candidate, no prose, no markdow
     max_tokens: 8192,
     system: "You are a precise, honest college admissions analyst. Rank candidate ECs by genuine fit to the student, grounded in real evidence. Output ONLY the requested JSON array.",
     messages: [{ role: "user", content: prompt }],
-    tools,
     wantsWeb: true,
     extraDomains,
   });
@@ -4903,7 +4726,6 @@ async function llmRankSpike({ callLLM, byok, studentId, active, vectors, targetS
     return `${i + 1}. ${v.ecName} [tier=${v.tierLabel || "?"}; major_spike=${(f.major_spike ?? 0).toFixed?.(2) ?? f.major_spike}; narrative_fit=${(f.narrative_fit ?? 0).toFixed?.(2) ?? f.narrative_fit}; prestige=${(f.prestige ?? 0).toFixed?.(2) ?? f.prestige}]`;
   }).join("\n");
   const extraDomains = [];
-  const tools = [makeWebSearchTool(extraDomains), makeWebFetchTool(extraDomains)];
   const prompt = `Decide which of this student's EXISTING activities should LEAD their application (the 2-3 that define their "spike"), and which are supporting.
 
 STUDENT NARRATIVE:
@@ -4928,7 +4750,6 @@ Return ONLY a JSON array, one object per activity, no prose:
     max_tokens: 8192,
     system: "You are a precise college admissions analyst selecting a student's leading activities. Output ONLY the requested JSON array.",
     messages: [{ role: "user", content: prompt }],
-    tools,
     wantsWeb: true,
     extraDomains,
   });
@@ -5014,14 +4835,19 @@ app.post("/api/ec/ideas/generate", studentLimiter, requireStudentAuth, async (re
     const schoolBlock = schoolPrioritiesPromptBlock(priorities);
 
     const summary = profileSummaryForPrompt(profile, active);
+    // Inject a random group of ten reference exemplars (Crimson set) as
+    // calibration — real strong-EC patterns the model can gauge depth against
+    // without copying. Reshuffled each call so suggestions stay varied.
+    const exemplarBlock = exemplarsPromptBlock(randomExemplarGroup(10));
     const prompt = `STUDENT PROFILE (their real data — the ONLY basis for your ideas):
-${summary}${schoolBlock}
+${summary}${schoolBlock}${exemplarBlock}
 
 TASK: Suggest ${count} extracurricular activity IDEAS this student could realistically pursue to strengthen their application${targetSchools.length ? " for the target schools above" : ""}. Ground EVERY idea in the profile above — connect each to a course, an existing activity, a test/AP strength, the intended major, or a stated goal.
 
 RULES:
 - Build on what the student already does (depth over breadth). Prefer deepening or extending existing activities and a coherent "spike" over scattered new clubs.${targetSchools.length ? "\n- Favor ideas that strengthen fit for what the target schools value above, but only where it fits the student's genuine direction." : ""}
 - Include at least one idea that builds community & character (service, mentorship, inclusivity, or authentic community impact) where it grows naturally out of something the student already cares about — never as résumé-padding.
+- Use the REFERENCE examples only to calibrate what "strong" looks like (depth, leadership, real impact). Do NOT copy them or assume the student has done them.
 - NEVER claim the student has won an award, held a title, or done something not in the profile.
 - Each idea must be something the student does themselves; frame as a suggestion to consider. These are activity ideas the student carries out and later writes about in their OWN words — never draft the essay or the story for them.
 

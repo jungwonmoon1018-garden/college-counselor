@@ -152,7 +152,7 @@ test("returns cached prestige on TTL hit without calling the adapter", async () 
     activityName: "AIME",
     levelHint: "national",
     stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
+    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
     options: {
       fetchImpl: async () => { throw new Error("should not fetch on cache hit"); },
     },
@@ -171,7 +171,7 @@ test("benchmark hit short-circuits web search and caches result", async () => {
     levelHint: "national",
     benchmarkHit: { level: "USAJMO qualifier", prestige_score: 0.80 },
     stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
+    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
     options: {
       fetchImpl: async () => { throw new Error("should not fetch on benchmark hit"); },
     },
@@ -185,7 +185,7 @@ test("benchmark hit short-circuits web search and caches result", async () => {
     activityName: "USAJMO qualifier",
     levelHint: "national",
     stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
+    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
     options: {
       fetchImpl: async () => { throw new Error("should not fetch on second call either"); },
     },
@@ -246,120 +246,31 @@ test("missing adapter returns source:unavailable without throwing", async () => 
   assert.equal(r.source, "unavailable");
 });
 
-// ─── Path 3b: successful Anthropic research ────────────────────────────
+// ─── Path 3: web-enriched research is DISABLED (Anthropic removed) ──────
+// The web-research path used Anthropic's native web_search tool, which has
+// been removed. Until it is re-plumbed onto OpenRouter's web plugin it
+// returns source:"unavailable" without touching the network — the
+// deterministic catalog/benchmark paths above still provide prestige signals.
 
-test("successful research parses JSON, caches, and forwards web_search tool", async () => {
+test("web research is disabled → returns source:unavailable even with an adapter, without hitting the network", async () => {
   const { stmts } = freshStmts();
-  const captured = {};
-  const fetchImpl = fakeAnthropicFetch(
-    {
-      score: 0.88,
-      rationale: "National official-source engineering challenge signal.",
-      sourcesCited: [
-        "https://usaco.org/current/current/index.php?page=details",
-        "https://www.soinc.org/2026-national-tournament",
-      ],
-    },
-    captured,
-  );
-
+  let fetchHit = false;
+  const fetchImpl = async () => { fetchHit = true; throw new Error("disabled web path must not call fetch"); };
   const r = await researchCompetitionPrestige({
     activityName: "Uncataloged Engineering Challenge",
     levelHint: "national",
     stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
+    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
     options: { fetchImpl },
   });
-  assert.equal(r.source, "research");
-  assert.equal(r.score, 0.88);
-  assert.equal(r.sourcesCited.length, 2);
-  assert.equal(r.provider, "anthropic");
-
-  // Request body must include the web_search tool with the reputable-domain allowlist.
-  assert.ok(Array.isArray(captured.body.tools));
-  const tool = captured.body.tools[0];
-  assert.equal(tool.type, "web_search_20250305");
-  assert.equal(tool.name, "web_search");
-  assert.ok(Array.isArray(tool.allowed_domains));
-  assert.ok(tool.allowed_domains.includes("maa.org"));
-  assert.ok(tool.allowed_domains.includes("usaco.org"));
-
-  // Cache the result — second call must hit cache.
-  const r2 = await researchCompetitionPrestige({
-    activityName: "Uncataloged Engineering Challenge",
-    levelHint: "national",
-    stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
-    options: {
-      fetchImpl: async () => { throw new Error("second call must hit cache"); },
-    },
-  });
-  assert.equal(r2.cached, true);
-  assert.equal(r2.score, 0.88);
-});
-
-// ─── Malformed JSON → research_failed ──────────────────────────────────
-
-test("malformed JSON response yields source:research_failed with score 0", async () => {
-  const { stmts } = freshStmts();
-  const fetchImpl = async () => ({
-    ok: true,
-    status: 200,
-    headers: new Map(),
-    json: async () => ({
-      id: "msg_1",
-      model: "claude-haiku-4-5-20251001",
-      content: [{ type: "text", text: "this is not json at all" }],
-      usage: { input_tokens: 1, output_tokens: 2 },
-      stop_reason: "end_turn",
-    }),
-  });
-
-  const r = await researchCompetitionPrestige({
-    activityName: "Made-Up Contest",
-    stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
-    options: { fetchImpl },
-  });
-  assert.equal(r.source, "research_failed");
+  assert.equal(r.source, "unavailable");
   assert.equal(r.score, 0);
+  assert.equal(fetchHit, false, "disabled web path must not hit the network");
 });
 
-// ─── Network failure → research_failed ─────────────────────────────────
+// ─── Cache TTL expiry — stale row ignored; disabled web path → unavailable ──
 
-test("research response with only non-official sources is rejected", async () => {
-  const { stmts } = freshStmts();
-  const fetchImpl = fakeAnthropicFetch({
-    score: 0.77,
-    rationale: "Looks selective but cites a weak source.",
-    sourcesCited: ["https://en.wikipedia.org/wiki/Example"],
-  });
-  const r = await researchCompetitionPrestige({
-    activityName: "Uncataloged Contest With Weak Sources",
-    stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
-    options: { fetchImpl },
-  });
-  assert.equal(r.source, "research_failed");
-  assert.equal(r.score, 0);
-});
-
-test("fetch throwing yields source:research_failed, cached for brief backoff", async () => {
-  const { stmts } = freshStmts();
-  const fetchImpl = async () => { throw new Error("boom"); };
-  const r = await researchCompetitionPrestige({
-    activityName: "Unstable Network Contest",
-    stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
-    options: { fetchImpl },
-  });
-  assert.equal(r.source, "research_failed");
-  assert.equal(r.score, 0);
-});
-
-// ─── Cache TTL expiry ──────────────────────────────────────────────────
-
-test("expired cache row is ignored and a fresh call runs", async () => {
+test("expired cache row is ignored; the disabled web path returns unavailable on the fresh call", async () => {
   const { db, stmts } = freshStmts();
   const key = computePrestigeCacheKey("Old Research", null);
   // Write a row with a created_at far older than PRESTIGE_TTL_DAYS.
@@ -370,26 +281,19 @@ test("expired cache row is ignored and a fresh call runs", async () => {
   `).run(
     key, "Old Research", null, 0.11,
     "stale", JSON.stringify([]),
-    "research", "anthropic", "claude-haiku-4-5-20251001",
+    "research", "openrouter", "z-ai/glm-5.1",
     JSON.stringify({ score: 0.11 }),
     stalePastIso,
   );
 
-  // On a new call, the stale row should be ignored — the fake fetch answers.
-  const fetchImpl = fakeAnthropicFetch({
-    score: 0.66,
-    rationale: "refreshed.",
-    sourcesCited: ["https://maa.org/"],
-  });
+  // The stale row is ignored; with web research disabled the fresh call is unavailable.
   const r = await researchCompetitionPrestige({
     activityName: "Old Research",
     stmts,
-    adapter: { provider: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
-    options: { fetchImpl },
+    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
+    options: {},
   });
-  assert.equal(r.source, "research");
-  assert.equal(r.score, 0.66);
-  assert.equal(r.cached, false);
+  assert.equal(r.source, "unavailable");
 });
 
 // ─── Invalid input ─────────────────────────────────────────────────────

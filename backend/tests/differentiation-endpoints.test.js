@@ -84,10 +84,13 @@ test("spike finder has an LLM + web-search re-rank", () => {
   assert.match(SERVER, /leadRationale/);
 });
 
-test("semantic rankers enable web search via credible-source tools", () => {
-  assert.match(SERVER, /makeWebSearchTool/);
-  assert.match(SERVER, /makeWebFetchTool/);
+test("semantic rankers enable web search via the OpenRouter web plugin", () => {
+  // Web access is now routed through OpenRouter's web plugin (no Anthropic
+  // native web_search tools). The rankers opt in with wantsWeb:true and the
+  // per-student closure converts that into the plugin + domain allowlist.
   assert.match(SERVER, /wantsWeb: true/);
+  assert.match(SERVER, /useORWebPlugin/);
+  assert.match(SERVER, /buildAllowedDomains/);
 });
 
 test("rank + spike fold in target-school priorities", () => {

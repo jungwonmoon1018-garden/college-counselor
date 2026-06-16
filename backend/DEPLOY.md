@@ -13,11 +13,11 @@ npm run dev              # auto-reload on changes
 ### 1. Environment Variables (Required)
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...      # Claude API key
 ENCRYPTION_KEY=<64-char-hex>      # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 JWT_SECRET=<64-char-hex>          # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 COUNSELOR_PASS=<strong-password>  # for /api/audit/dashboard
 NODE_ENV=production
+# OPENROUTER_API_KEY=sk-or-...    # OPTIONAL operator key (utility calls only); students BYOK
 ```
 
 ### 2. HTTPS with Caddy (Recommended)
@@ -64,7 +64,7 @@ ALLOWED_ORIGINS=https://counselor.yourdomain.com
 
 ## Security Checklist
 
-- [ ] `ANTHROPIC_API_KEY` set (never commit to git)
+- [ ] Operator LLM key (`OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_API_KEY`) — OPTIONAL; never commit to git
 - [ ] `JWT_SECRET` set (min 32 chars, unique per environment)
 - [ ] `ENCRYPTION_KEY` set (64-char hex)
 - [ ] `COUNSELOR_PASS` set (strong password)
@@ -82,7 +82,8 @@ Internet → Caddy (:443, HTTPS) → Node.js (:3001, HTTP)
                                     ↓
                               SQLite (data/counselor.db)
                                     ↓
-                        Anthropic API (api.anthropic.com)
+                  Student BYOK provider via adapter layer
+                  (OpenRouter by default; OpenAI / Google / etc.)
 ```
 
 ## Rate Limits
@@ -92,22 +93,22 @@ Internet → Caddy (:443, HTTPS) → Node.js (:3001, HTTP)
 | Per-IP (general) | 30 req/min |
 | Per-IP (audit) | 60 req/min |
 | Per-IP (notify) | 3 per 5 min |
-| Per-student (Claude API) | 30 calls/hour |
+| Per-student (LLM, BYOK) | 30 calls/hour |
 | Per-IP (Scorecard) | 40 req/min |
 
 ## LLM Providers
 
-The backend no longer hard-codes Anthropic. Any LLM provider the operator
-— or an individual student via BYOK — supplies can serve the prompt.
+The backend is provider-agnostic and **OpenRouter-only by default** — Anthropic
+has been removed. Each student supplies their own key (BYOK); an optional
+operator key serves only unauthenticated utility calls.
 
 ### Supported providers
 
 | Provider | Wire protocol | Default base URL |
 |---|---|---|
-| `anthropic`    | Anthropic /v1/messages | https://api.anthropic.com |
+| `openrouter`   | OpenAI-compatible | https://openrouter.ai/api/v1 |
 | `openai`       | OpenAI Chat Completions | https://api.openai.com |
 | `google`       | Gemini /generateContent | https://generativelanguage.googleapis.com |
-| `openrouter`   | OpenAI-compatible | https://openrouter.ai/api/v1 |
 | `deepseek`     | OpenAI-compatible | https://api.deepseek.com |
 | `together`     | OpenAI-compatible | https://api.together.xyz/v1 |
 | `zhipu`        | OpenAI-compatible | https://open.bigmodel.cn/api/paas/v4 |
@@ -118,28 +119,32 @@ The backend no longer hard-codes Anthropic. Any LLM provider the operator
 ### Reasoning tiers
 
 Every provider fills in a `small` / `medium` / `large` tier. Call
-`POST /api/llm` with `{"tier":"small"}` and you get Haiku on Anthropic,
-gpt-4o-mini on OpenAI, gemini-2.0-flash on Google, llama3.2:3b on Ollama,
-etc. Defaults live in `llm-adapters/tier-defaults.js` and can be overridden
-per-student via BYOK or globally via env vars below.
+`POST /api/chat` with `{"tier":"small"}` (or `POST /api/llm`) and you get the
+provider's small-tier model — e.g. a cheap Gemma/GLM model on OpenRouter,
+gpt-4o-mini on OpenAI, gemini-2.0-flash on Google, llama3.2:3b on Ollama.
+For OpenRouter the model dropdown is built from its live `/models` catalog
+(`GET /api/llm/openrouter/models`). Defaults live in
+`llm-adapters/tier-defaults.js` and can be overridden per-student via BYOK or
+globally via env vars below.
 
 Usage guidance:
 - **small**: OCR, extraction, classification, narrative-fit fallback.
 - **medium**: synthesis, coaching, college list building, trend analysis.
 - **large**: essay critique, cross-source conflict resolution.
 
-### Server fallback env vars
+### Operator (server) fallback env vars
 
-Set one of these so the server has a default key when no student BYOK
-is set. `/api/llm` auto-picks the provider per the priority list:
-request body → student BYOK → env fallback.
+OPTIONAL — set one of these so the server has a key for unauthenticated
+utility calls when no student BYOK is set. There is NO operator fallback for
+student chat. The provider is auto-detected from the key; OpenRouter is
+preferred.
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...        # Anthropic (historical default)
+OPENROUTER_API_KEY=sk-or-...        # OpenRouter (default/primary)
 OPENAI_API_KEY=sk-...               # OpenAI or OpenAI-compatible
-OPENAI_BASE_URL=                    # Optional: e.g. https://openrouter.ai/api/v1
+OPENAI_BASE_URL=                    # Optional: e.g. https://api.deepseek.com
 GOOGLE_API_KEY=AIza...              # Google Gemini
-LLM_SMALL_MODEL=                    # Optional tier override (e.g. gpt-4o-mini)
+LLM_SMALL_MODEL=                    # Optional tier override (e.g. google/gemma-4-26b-a4b-it)
 LLM_MEDIUM_MODEL=                   # Optional tier override
 LLM_LARGE_MODEL=                    # Optional tier override
 ```
@@ -158,10 +163,9 @@ OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 If your infrastructure filters outbound traffic, allow-list whichever
 hosts you use:
 
-- `api.anthropic.com`
+- `openrouter.ai` (default)
 - `api.openai.com`
 - `generativelanguage.googleapis.com`
-- `openrouter.ai`
 - `api.deepseek.com`
 - `api.together.xyz`
 - `open.bigmodel.cn`
@@ -177,18 +181,19 @@ hosts you use:
   "provider": "openrouter",
   "baseUrl": "https://openrouter.ai/api/v1",
   "defaultModels": {
-    "small":  "anthropic/claude-haiku-4.5",
-    "medium": "anthropic/claude-sonnet-4",
-    "large":  "anthropic/claude-opus-4"
+    "small":  "google/gemma-4-26b-a4b-it",
+    "medium": "google/gemma-4-31b-it",
+    "large":  "deepseek/deepseek-v4-pro"
   }
 }
 ```
 
-Omit `provider` / `baseUrl` and the backend auto-detects from the key
-prefix (`sk-ant-*` → anthropic, `sk-or-*` → openrouter, `sk-*` → openai,
-`AIza*` → google). The student's key is stored encrypted (AES-256-GCM)
-in `pii-vault.db` and used for future `/api/llm` calls on their behalf,
-including the internal narrative-fit scorer.
+For OpenRouter the model dropdown is populated from its live `/models`
+catalog. Omit `provider` / `baseUrl` and the backend auto-detects from the
+key prefix (`sk-or-*` → openrouter, `sk-*` → openai, `AIza*` → google). The
+student's key is stored encrypted (AES-256-GCM) in `pii-vault.db` and used
+for future `/api/chat` and `/api/llm` calls on their behalf, including the
+internal narrative-fit scorer.
 
 ## collegeapp-ai Skill Install
 
@@ -248,17 +253,17 @@ files per language and caches them.
 
 ### Narrative-fit LLM shim
 
-`narrative-fit-llm.js` makes direct Anthropic API calls (not through the
-public `/api/anthropic` proxy) to score hard-to-classify EC ↔ narrative
-alignments via Haiku. These calls:
+`narrative-fit-llm.js` scores hard-to-classify EC ↔ narrative alignments via
+the shared adapter layer (`callLLM`) at the small tier — the student's own
+BYOK provider (OpenRouter by default), falling back to the operator key if
+one is set. These calls:
 
-- Use the same `ANTHROPIC_API_KEY` as the rest of the app.
+- Use the student's BYOK small-tier model (or the operator key fallback).
 - Are cached in the `narrative_fit_cache` sqlite table (keyed by
   `sha256(narrative_hash + ":" + ec_text_hash)`), so repeated recomputes
   don't double-bill.
 - Bypass the student-facing audit log and rate limiter on purpose — they
   are internal scoring calls, not student-initiated inference.
 
-If you're routing traffic through a corporate proxy that blocks outbound
-HTTPS to `api.anthropic.com`, you'll need to allow-list that host on the
-server's egress firewall.
+If you route traffic through a corporate proxy, allow-list whichever provider
+host(s) you use (e.g. `openrouter.ai`) on the server's egress firewall.

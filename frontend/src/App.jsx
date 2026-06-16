@@ -542,7 +542,7 @@ const RAG_TOOLS = [
 ];
 
 const GATEKEEPER = {
-  id:"gatekeeper",label:"Gatekeeper",color:"#E24B4A",model:"claude-haiku-4-5-20251001",maxTokens:300,
+  id:"gatekeeper",label:"Gatekeeper",color:"#E24B4A",tier:"small",maxTokens:300,
   system:`You are a safety gatekeeper for a high school college counseling app. Users are ages 14-18.
 YOUR ONLY JOB: classify and route. You MUST NOT generate counseling advice, opinions, or substantive responses.
 CLASSIFY the student's message into exactly ONE category. Respond ONLY with valid JSON.
@@ -568,7 +568,7 @@ For safe_multi, list ALL relevant agents. For blocks (off_topic, essay_writing, 
 };
 
 const ACADEMICS_AGENT = {
-  id:"academics",label:"Academics",color:"#378ADD",model:"claude-sonnet-4-20250514",maxTokens:2000,
+  id:"academics",label:"Academics",color:"#378ADD",tier:"medium",maxTokens:2000,
   system:`You are the ACADEMICS specialist for students ages 14-18. Handle ONLY: GPA interpretation, AP/IB rigor analysis, SAT/ACT score context, study-note requests, course planning.
 
 When discussing AP courses, ALWAYS call get_ap_rigor to show the student how hard each course is relative to others. Use tier rankings and pass rates from CollegeBoard data to give context. Compare courses the student is considering.
@@ -610,7 +610,7 @@ IMPORTANT: ALWAYS call fetch_rag_context with focus="academics" as your FIRST to
 };
 
 const EC_AGENT = {
-  id:"ec",label:"Extracurriculars",color:"#BA7517",model:"claude-sonnet-4-20250514",maxTokens:2000,
+  id:"ec",label:"Extracurriculars",color:"#BA7517",tier:"medium",maxTokens:2000,
   system:`You are the EXTRACURRICULARS specialist for students ages 14-18. Handle ONLY: activities organization, EC recommendation ideas, EC strength analysis against intended major.
 
 ALWAYS call analyze_ec_strength when giving advice — this tool evaluates each of the student's activities against their intended major, showing which activities are "strong," "good," or "supplementary" for their goals. Use this data to give specific, actionable advice.
@@ -653,7 +653,7 @@ IMPORTANT: ALWAYS call fetch_rag_context with focus="extracurriculars" as your F
 };
 
 const COLLEGE_AGENT = {
-  id:"college",label:"College Fit",color:"#D4537E",model:"claude-sonnet-4-20250514",maxTokens:1500,
+  id:"college",label:"College Fit",color:"#D4537E",tier:"medium",maxTokens:1500,
   system:`You are the COLLEGE FIT specialist for students ages 14-18. Handle: structured college retrieval (IPEDS + web), fit comparison, reach/match/safety lists, and — when asked about a school's "values" — extraction of what the school explicitly says it cares about.
 
 NAMED-SCHOOL FOCUS — STRICTLY ENFORCED:
@@ -713,7 +713,7 @@ VOICE — IMPORTANT:
 };
 
 const STRATEGY_AGENT = {
-  id:"strategy",label:"Strategy",color:"#7F77DD",model:"claude-sonnet-4-20250514",maxTokens:1500,
+  id:"strategy",label:"Strategy",color:"#7F77DD",tier:"medium",maxTokens:1500,
   system:`You are the STRATEGY specialist for students ages 14-18. Handle ONLY: sequencing, timelines, gap prioritization, combining outputs from other agents into a coherent plan.
 
 NAMED-SCHOOL FOCUS — STRICTLY ENFORCED:
@@ -753,7 +753,7 @@ IMPORTANT: ALWAYS call fetch_rag_context with focus="strategy" as your FIRST too
 };
 
 const OUTPUT_VALIDATOR = {
-  id:"validator",label:"Validator",color:"#1D9E75",model:"claude-haiku-4-5-20251001",maxTokens:600,
+  id:"validator",label:"Validator",color:"#1D9E75",tier:"small",maxTokens:600,
   system:`You validate responses for a college counseling app (students ages 14-18). Respond JSON only.
 YOUR ROLE: Check and clean. You MUST NOT introduce new facts, advice, or content. Only flag or remove problematic content.
 Check ALL of the following — fail if ANY is present:
@@ -839,7 +839,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (proxyUrl) {
         try {
-          const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+          const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
           const searchRes = await fetch(`${base}/colleges/search`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(token ? { "Authorization": `Bearer ${token}` } : {}) },
@@ -948,7 +948,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { error: "RAG backend not configured", fallback: { profile: data.profile, activities: data.activities } };
       try {
-        const r = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/rag/context"), {
+        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/rag/context"), {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({ agentId: input.agentId || "holistic", queryFocus: input.focus || "holistic" })
@@ -964,7 +964,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return execTool("search_colleges", input, stateRef, setData); // fallback to local
       try {
-        const r = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/rag/college-match"), {
+        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/rag/college-match"), {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify(input)
@@ -980,7 +980,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { error: "RAG backend not configured", trends: {} };
       try {
-        const r = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/students/timeline"), {
+        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/timeline"), {
           headers: { "Authorization": `Bearer ${token}` }
         });
         if (!r.ok) return { error: `Timeline fetch failed: ${r.status}`, trends: {} };
@@ -994,7 +994,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { milestones: [] };
       try {
-        const r = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/students/milestones"), {
+        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/milestones"), {
           headers: { "Authorization": `Bearer ${token}` }
         });
         if (!r.ok) return { milestones: [] };
@@ -1116,12 +1116,12 @@ async function readChatFile(file, relativePath = "") {
         const base64 = btoa(binary);
         const token = (typeof window !== "undefined" && window.__CC_SESSION_TOKEN__) || "";
         // Derive the API base. window.__CC_PROXY_URL__ is typically
-        // "/api/anthropic" in dev (Vite proxy) or e.g. "https://api.host.com/anthropic"
-        // in prod. We want the parent of /anthropic — i.e. strip the
-        // /anthropic suffix and DON'T also strip /api, otherwise we
-        // double-prefix and hit "/api/api/files/extract-text" → 404.
-        const proxyUrl = (typeof window !== "undefined" && window.__CC_PROXY_URL__) || "/api/anthropic";
-        const apiBase = proxyUrl.replace(/\/anthropic\/?$/, "") || "/api";
+        // "/api/chat" in dev (Vite proxy) or e.g. "https://api.host.com/chat"
+        // in prod. We want the parent of /chat — i.e. strip the /chat suffix
+        // (legacy "/anthropic" is also accepted) and DON'T also strip /api,
+        // otherwise we double-prefix and hit "/api/api/files/extract-text".
+        const proxyUrl = (typeof window !== "undefined" && window.__CC_PROXY_URL__) || "/api/chat";
+        const apiBase = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"") || "/api";
         const url = `${apiBase}/files/extract-text`;
         const headers = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -1221,7 +1221,7 @@ function sanitizeInput(text) {
 
 // Client-side rate limit — burst guard ONLY.
 // Original design (Mar 2026) gated to 15/min + 3/10s when the app
-// proxied through the operator's Anthropic key and every chat turn
+// proxied through the operator's key and every chat turn
 // cost real money. Now that BYOK is mandatory and the default
 // OpenRouter tier mix (Gemma 4 26B A4B / 31B / DeepSeek V4 Pro)
 // keeps a typical turn at fractions of a cent, the per-minute cap
@@ -1238,55 +1238,31 @@ const rateLimiter = { timestamps: [], check() {
 }, reset() { this.timestamps = []; }};
 
 // ═══════════════════════════════════════════════════════════
-// RECOMMENDATION 1: BACKEND PROXY FOR API KEY PROTECTION
+// BACKEND CHAT PROXY (provider-neutral, BYOK-first)
 // ═══════════════════════════════════════════════════════════
-// In production, set window.__CC_PROXY_URL__ = "/api/anthropic" (your backend endpoint).
-// The proxy holds the API key server-side — the browser NEVER sees it.
-// Fallback: direct browser access (dev only) with loud warnings.
+// window.__CC_PROXY_URL__ is the chat endpoint (default "/api/chat"). The
+// backend holds each student's encrypted BYOK key server-side and routes to
+// their chosen provider (OpenRouter by default) — the browser NEVER sees a
+// provider key. There is no direct-browser key path.
 
-function getProxyConfig() {
-  const proxyUrl = window.__CC_PROXY_URL__ || null;
-  const directKey = window.__ANTHROPIC_API_KEY__ || window.ANTHROPIC_API_KEY || null;
-  if (proxyUrl) return { mode: "proxy", url: proxyUrl };
-  if (directKey) {
-    if (typeof window !== "undefined" && window.location?.protocol === "http:") {
-      console.error("[SECURITY] API key on insecure HTTP. Use HTTPS or a backend proxy.");
-    }
-    console.warn("[SECURITY] Direct browser API key detected. This is acceptable for local development ONLY. For production, set window.__CC_PROXY_URL__ to your backend proxy endpoint.");
-    return { mode: "direct", key: directKey };
-  }
-  return { mode: "none" };
+function getChatUrl() {
+  return window.__CC_PROXY_URL__ || "/api/chat";
 }
 
-async function requestAnthropic(payload, signal) {
-  const config = getProxyConfig();
-
-  if (config.mode === "none") {
-    throw new Error("No API configuration found. Set window.__CC_PROXY_URL__ (recommended) or window.__ANTHROPIC_API_KEY__ (dev only).");
-  }
-
-  const url = config.mode === "proxy"
-    ? config.url
-    : "https://api.anthropic.com/v1/messages";
-
+async function requestChat(payload, signal) {
+  const url = getChatUrl();
   const headers = { "Content-Type": "application/json" };
-  if (config.mode === "direct") {
-    headers["x-api-key"] = config.key;
-    headers["anthropic-version"] = "2023-06-01";
-    headers["anthropic-dangerous-direct-browser-access"] = "true";
-  }
-  // When using proxy, send the session token for per-student usage tracking
-  // If no token is available, the backend uses the server API key for utility operations
-  if (config.mode === "proxy" && window.__CC_SESSION_TOKEN__) {
+  // Send the session token for per-student BYOK routing + usage tracking.
+  if (window.__CC_SESSION_TOKEN__) {
     headers["Authorization"] = `Bearer ${window.__CC_SESSION_TOKEN__}`;
   }
 
   let r = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
 
   // Auto re-authenticate on 401 (backend may have restarted, clearing in-memory tokens)
-  if (r.status === 401 && config.mode === "proxy") {
-    console.warn("[requestAnthropic] 401 — attempting re-authentication…");
-    const refreshed = await _tryReAuth(config.url);
+  if (r.status === 401) {
+    console.warn("[requestChat] 401 — attempting re-authentication…");
+    const refreshed = await _tryReAuth(url);
     if (refreshed) {
       headers["Authorization"] = `Bearer ${window.__CC_SESSION_TOKEN__}`;
       r = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
@@ -1332,7 +1308,7 @@ async function _tryReAuth(proxyUrl) {
     // Send PLAINTEXT email — the backend re-hashes with its own salt
     // (the frontend's hashEmail uses a different salt, so sending the
     // frontend hash would 404).
-    const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+    const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
     let r = await fetch(`${base}/students/auth`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, isMinor: false })
@@ -1367,7 +1343,7 @@ async function screenUploadForSafety(fileData, signal) {
     id: "upload_screener",
     label: "Upload Safety",
     color: "#E24B4A",
-    model: "claude-haiku-4-5-20251001",
+    tier: "small",
     maxTokens: 200,
     system: `You are a content safety screener for a K-12 education app used by students ages 14-18.
 You review uploaded files (images, PDFs) BEFORE they are processed by the counseling system.
@@ -1390,8 +1366,8 @@ When in doubt, REJECT. Student safety is paramount.`,
   contentBlocks.push({ type: "text", text: "Is this file safe and appropriate for a K-12 educational app? Respond with JSON only." });
 
   try {
-    const d = await requestAnthropic({
-      model: UPLOAD_SCREENER.model,
+    const d = await requestChat({
+      tier: UPLOAD_SCREENER.tier,
       max_tokens: UPLOAD_SCREENER.maxTokens,
       system: UPLOAD_SCREENER.system,
       messages: [{ role: "user", content: contentBlocks }]
@@ -1453,7 +1429,7 @@ const auditLog = {
     // POST /api/audit { event } — the backend stores these securely
     const proxyUrl = window.__CC_PROXY_URL__;
     if (proxyUrl) {
-      fetch(proxyUrl.replace(/\/anthropic\/?$/, "/audit"), {
+      fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/audit"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(event)
@@ -1512,7 +1488,7 @@ const parentalNotify = {
         timestamp: new Date().toISOString()
       };
 
-      await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/notify-parent"), {
+      await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/notify-parent"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(notification)
@@ -1542,7 +1518,7 @@ function buildHistoryMsgs(history) {
     if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
     const c = m.role === "user" ? (m.modelContent || m.content || "") : (m.content || "");
     if (!c) continue;
-    // Anthropic accepts plain strings in history; tool_use / tool_result
+    // The backend accepts plain strings in history; tool_use / tool_result
     // blocks from the current turn are inserted live inside runAgent's
     // inner loop, so we never need to round-trip them here.
     out.push({ role: m.role, content: typeof c === "string" ? c : String(c) });
@@ -1636,8 +1612,8 @@ async function runAgent(agent, userContent, data, setData, signal, history = [])
   let iter=0;
   while(iter<8){
     iter++; if(signal?.aborted)throw new Error("Cancelled");
-    const d = await requestAnthropic({
-      model: agent.model,
+    const d = await requestChat({
+      tier: agent.tier,
       max_tokens: agent.maxTokens,
       system: agent.system,
       temperature,
@@ -1714,7 +1690,7 @@ function formatUserFacingError(error) {
   if (msg.includes("api 429") || msg.includes("rate limit")) return "The system is busy right now. Please try again in a minute.";
   if (msg.includes("api 413") || msg.includes("too large")) return "Your message was too long. Try a shorter question or smaller file.";
   if (msg.includes("failed to fetch") || msg.includes("network")) return "Check your internet connection and try again.";
-  if (msg.includes("missing anthropic api key")) return "Chat isn't configured yet. Add your API key before sending messages.";
+  if (/no api key|not configured|missing .*api key/i.test(msg)) return "Chat isn't configured yet. Add your API key before sending messages.";
   return "Something went wrong while answering that. Please try again.";
 }
 
@@ -1873,7 +1849,7 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
   if (proxyUrl && token && !pendingFileData && !msgHasFilePreface) {
     try {
       setStatus({active:"policy_router",phase:"Checking rules engine..."});
-      const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+      const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
       const orchRes = await fetch(`${base}/agents/orchestrate`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
@@ -2158,7 +2134,7 @@ SOURCES (required):
 - Never invent a source. If neither web results nor profile data were used, omit the section entirely.
 - Do NOT mention model names, providers, or the system's internals anywhere.`;
     const supervisorUserMsg = `Merge these specialist responses into ONE cohesive answer. Do NOT add any new information — only reorganize and deduplicate what the specialists wrote.\n\nStudent question: "${sanitizeInput(userMsg)}"\n\n${results.map(a=>`--- ${a.label} ---\n${a.result}`).join("\n\n")}`;
-    draft=await runAgent({id:"supervisor",label:"Supervisor",color:"#7F77DD",model:"claude-sonnet-4-20250514",system:supervisorSystem,tools:[],maxTokens:2000},supervisorUserMsg,data,setData,signal);}
+    draft=await runAgent({id:"supervisor",label:"Supervisor",color:"#7F77DD",tier:"medium",system:supervisorSystem,tools:[],maxTokens:2000},supervisorUserMsg,data,setData,signal);}
 
   // ── STEP 6: Output validation (Haiku — cheap T1 moderation) ──
   // Skip the validator when:
@@ -2200,8 +2176,8 @@ async function runAgentMultimodal(agent, contentBlocks, data, setData, signal, h
   let iter=0;
   while(iter<8){
     iter++; if(signal?.aborted)throw new Error("Cancelled");
-    const d = await requestAnthropic({
-      model: agent.model,
+    const d = await requestChat({
+      tier: agent.tier,
       max_tokens: agent.maxTokens,
       system: agent.system,
       tools: agent.tools.length ? agent.tools : undefined,
@@ -2487,16 +2463,15 @@ const S = { LOADING:0, CREATE:1, LOGIN:2, APIKEY:5, SURVEY:3, CHAT:4, SETUP:6 };
 
 // Per-provider deep-link to the page where the user creates an API key.
 // Opens in a new tab — the student creates a key in their own console,
-// then pastes it back. (Anthropic doesn't expose an OAuth flow that lets
+// then pastes it back. (No provider exposes an OAuth flow that lets
 // third-party apps mint keys on a user's behalf, so a paste is still
 // required — but the click + auto-detect makes it as close to one-click
 // as the platform allows.)
 const PROVIDER_CONSOLE_URLS = {
-  anthropic:     "https://console.anthropic.com/settings/keys",
+  openrouter:    "https://openrouter.ai/keys",
   openai:        "https://platform.openai.com/api-keys",
   openai_compat: "https://platform.openai.com/api-keys",
   google:        "https://aistudio.google.com/app/apikey",
-  openrouter:    "https://openrouter.ai/keys",
   deepseek:      "https://platform.deepseek.com/api_keys",
   together:      "https://api.together.ai/settings/api-keys",
   zhipu:         "https://open.bigmodel.cn/usercenter/apikeys",
@@ -2510,7 +2485,6 @@ const PROVIDER_CONSOLE_URLS = {
 // reconfigures itself.
 function detectProviderFromKey(key) {
   const s = String(key || "").trim();
-  if (s.startsWith("sk-ant-"))    return "anthropic";
   if (s.startsWith("sk-or-"))     return "openrouter";
   if (s.startsWith("sk-proj-"))   return "openai";
   if (s.startsWith("sk-"))        return "openai"; // generic openai-style
@@ -2678,7 +2652,7 @@ export default function App() {
   //   1. If no token, re-auth before the request.
   //   2. On 401, re-auth ONCE and retry.
   const authedFetch = useCallback(async (path, opts = {}) => {
-    const proxyUrl = window.__CC_PROXY_URL__ || "/api/anthropic";
+    const proxyUrl = window.__CC_PROXY_URL__ || "/api/chat";
     const doFetch = (tok) => fetch(path, {
       ...opts,
       headers: {
@@ -2921,12 +2895,16 @@ export default function App() {
   const [akLarge, setAkLarge] = useState("");
   const [akError, setAkError] = useState("");
   const [akSaving, setAkSaving] = useState(false);
+  // Live OpenRouter model catalog (from /api/llm/openrouter/models). Populates
+  // the model dropdowns with real, currently-served IDs so the student never
+  // picks a model that 404s. [{ id, name, free, pricing }]
+  const [orModels, setOrModels] = useState([]);
 
   // Fetch current key status + provider catalog. Returns updateInfo (or null)
   // when a recommended-model change is detected for the student's stored key.
   const refreshApiKeyState = useCallback(async () => {
     const token = window.__CC_SESSION_TOKEN__;
-    const proxyBase = (window.__CC_PROXY_URL__ || "/api/anthropic").replace(/\/anthropic\/?$/, "");
+    const proxyBase = (window.__CC_PROXY_URL__ || "/api/chat").replace(/\/(?:chat|anthropic)\/?$/,"");
     try {
       // The providers catalog is public (no auth) — always fetch it so the
       // form has fresh defaults even before the student has a session token
@@ -2951,7 +2929,7 @@ export default function App() {
       // students who already have a stored provider keep theirs.
       const currentProv = catalog.find(p => p.id === (status?.provider || "openrouter"))
                        || catalog.find(p => p.id === "openrouter")
-                       || catalog.find(p => p.id === "anthropic");
+                       || catalog[0];
       if (currentProv?.defaults) {
         setAkSmall(currentProv.defaults.small || "");
         setAkMedium(currentProv.defaults.medium || "");
@@ -3016,13 +2994,39 @@ export default function App() {
     if (prov.defaults?.large)  setAkLarge(prov.defaults.large);
   }, [providerCatalog, akProvider]);
 
+  // When OpenRouter is the selected provider, pull its LIVE model catalog so
+  // the per-tier dropdowns offer only models that currently exist (sorted
+  // free-first, then cheapest). Falls back to the static knownModels list if
+  // the catalog is empty/unreachable.
+  useEffect(() => {
+    if (akProvider !== "openrouter") { setOrModels([]); return; }
+    let cancelled = false;
+    const proxyBase = (window.__CC_PROXY_URL__ || "/api/chat").replace(/\/(?:chat|anthropic)\/?$/, "");
+    (async () => {
+      try {
+        const r = await fetch(`${proxyBase}/llm/openrouter/models`);
+        if (!r.ok) return;
+        const body = await r.json();
+        if (cancelled || !Array.isArray(body.models)) return;
+        const sorted = body.models.slice().sort((a, b) => {
+          if (a.free !== b.free) return a.free ? -1 : 1;
+          const ap = a.pricing?.inputPerMTok ?? Infinity;
+          const bp = b.pricing?.inputPerMTok ?? Infinity;
+          return ap - bp;
+        });
+        setOrModels(sorted);
+      } catch { /* keep the static fallback */ }
+    })();
+    return () => { cancelled = true; };
+  }, [akProvider]);
+
   // Save key + tier defaults via PUT /api/students/apikey, then proceed
   // to whatever screen was pending.
   const saveApiKey = useCallback(async () => {
     setAkError("");
     setAkSaving(true);
     try {
-      const proxyBase = (window.__CC_PROXY_URL__ || "/api/anthropic").replace(/\/anthropic\/?$/, "");
+      const proxyBase = (window.__CC_PROXY_URL__ || "/api/chat").replace(/\/(?:chat|anthropic)\/?$/,"");
       // Reusable re-auth: (re-)establish a session token from the saved
       // email. Handles BOTH a missing token AND a stale one (a token
       // present in the browser but no longer recognized by the backend
@@ -3554,7 +3558,7 @@ export default function App() {
       const token = window.__CC_SESSION_TOKEN__;
       if (!token) return;
       try {
-        const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+        const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
         const r = await fetch(`${base}/students/profile`, {
           headers: { "Authorization": `Bearer ${token}` }
         });
@@ -3635,7 +3639,7 @@ export default function App() {
     if (proxyUrl) {
       try {
         const emailH = await hashEmail(email);
-        const r = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/students/register"), {
+        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/register"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           // isMinor: false reflects the parental-consent attestation given
           // via the required age-attest checkbox at signup.
@@ -3657,7 +3661,7 @@ export default function App() {
         if (d.token) {
           window.__CC_SESSION_TOKEN__ = d.token;
           // Grant consents to backend
-          const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+          const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
           const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${d.token}` };
           await Promise.allSettled([
             fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
@@ -3744,7 +3748,7 @@ export default function App() {
         // frontend-salted hash made every login miss the lookup and
         // fall through to register — which is how duplicate empty
         // accounts piled up.
-        const r = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/students/auth"), {
+        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/auth"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, emailHash: emailH })
         });
@@ -3752,7 +3756,7 @@ export default function App() {
         if (d.token) window.__CC_SESSION_TOKEN__ = d.token;
         else {
           // Not registered yet — register now
-          const r2 = await fetch(proxyUrl.replace(/\/anthropic\/?$/, "/students/register"), {
+          const r2 = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/register"), {
             method: "POST", headers: { "Content-Type": "application/json" },
             // isMinor: false — same rationale as handleCreate above.
             body: JSON.stringify({ email, emailHash: emailH, grade: acct.grade, schoolDomain: getEmailDomain(email), isMinor: false })
@@ -3763,7 +3767,7 @@ export default function App() {
         // Re-grant consents on every login (backend is idempotent) —
         // covers upgraded backends that added new required consent types.
         if (window.__CC_SESSION_TOKEN__) {
-          const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+          const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
           const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
           await Promise.allSettled([
             fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
@@ -3783,7 +3787,7 @@ export default function App() {
     let backendHasProfile = false;
     if (window.__CC_SESSION_TOKEN__ && proxyUrl) {
       try {
-        const base = proxyUrl.replace(/\/anthropic\/?$/, "");
+        const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
         const pr = await fetch(`${base}/students/profile`, { headers: { Authorization: `Bearer ${window.__CC_SESSION_TOKEN__}` } });
         if (pr.ok) {
           const pb = await pr.json();
@@ -4263,9 +4267,8 @@ export default function App() {
                 setAkLarge(meta?.defaults?.large || "");
                 setAkBaseUrl("");
               }} style={{...inputStyle, cursor:"pointer"}}>
-                {/* OpenRouter is the recommended default — show it as the
-                    fallback option while the live catalog loads so the
-                    dropdown never momentarily reads "Anthropic". */}
+                {/* OpenRouter is the default — show it as the fallback option
+                    while the provider catalog loads. */}
                 {providerCatalog.length === 0 && <option value="openrouter">OpenRouter</option>}
                 {providerCatalog.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
               </select>
@@ -4317,7 +4320,7 @@ export default function App() {
               </div>
               <div style={{fontSize:10,color:"#6a6a7a"}}>
                 {PROVIDER_CONSOLE_URLS[akProvider]
-                  ? `Click → sign in to your ${provLabel} account → create or copy a key → paste it back here. (Anthropic doesn't currently support one-click key issuance from third-party apps, so a paste is still required.) Encrypted at rest (AES-256-GCM).`
+                  ? `Click → sign in to your ${provLabel} account → create or copy a key → paste it back here. (Providers don't support one-click key issuance to third-party apps, so a paste is still required.) Encrypted at rest (AES-256-GCM).`
                   : "Encrypted at rest (AES-256-GCM in PII vault). Never transmitted to the browser after save."}
               </div>
             </div>
@@ -4329,16 +4332,12 @@ export default function App() {
               </div>
             )}
 
-            {/* Models are auto-selected from the provider's latest recommended
-                IDs (Anthropic refreshes daily from /v1/models). The values are
-                read-only here — students don't pick them. The submit handler
-                still sends them so the backend records what was used. */}
-            {/* Per-tier model selectors. Defaults come from /api/llm/providers
-                (refreshed daily from the live Anthropic Models API for
-                Claude; static lists for other providers). The student can
-                override any tier — the choice is sent to the backend and
-                used for every chat turn until they change it. A custom
-                model ID can be entered directly via the bottom input. */}
+            {/* Per-tier model selectors. For OpenRouter the options come from
+                its LIVE /models catalog (sorted free-first, then cheapest), so
+                the list only ever shows currently-served IDs. Other providers
+                use their static knownModels list. The student can override any
+                tier; the choice is sent to the backend and used for every chat
+                turn until they change it. */}
             <div>
               <label style={labelStyle}>Models</label>
               <div style={{display:"flex",gap:8}}>
@@ -4346,15 +4345,15 @@ export default function App() {
                   const label = tier === "small" ? "Small" : tier === "medium" ? "Medium" : "Large";
                   const value = tier === "small" ? akSmall : tier === "medium" ? akMedium : akLarge;
                   const setter = tier === "small" ? setAkSmall : tier === "medium" ? setAkMedium : setAkLarge;
-                  // Provider catalog ships a flat `knownModels` array per
-                  // provider — the same candidate pool applies to all three
-                  // tiers, so the student can put any known model in any
-                  // slot. Some providers (LM Studio, openai_compat) ship an
-                  // empty list; for those we fall back to a free-text input
-                  // so the student can type any local model name.
-                  const known = Array.isArray(provMeta?.knownModels)
-                    ? provMeta.knownModels
-                    : (provMeta?.knownModels?.[tier] || []);
+                  // OpenRouter: prefer the live catalog (real IDs, ordered
+                  // free→cheap). Other providers: the static knownModels pool.
+                  // The same pool applies to all three tiers. Empty list (LM
+                  // Studio, openai_compat) → free-text input below.
+                  const known = (akProvider === "openrouter" && orModels.length)
+                    ? orModels.map(m => m.id)
+                    : (Array.isArray(provMeta?.knownModels)
+                        ? provMeta.knownModels
+                        : (provMeta?.knownModels?.[tier] || []));
                   // Make sure the currently-selected value is always
                   // present in the dropdown options (covers custom IDs
                   // the student typed previously or models the catalog
@@ -5128,7 +5127,7 @@ export default function App() {
             <button onClick={()=>openProfileEditor(0)} style={{padding:"7px 10px",borderRadius:8,border:"1px solid rgba(55,138,221,0.18)",background:"rgba(55,138,221,0.08)",color:"#63b3ed",fontSize:11,cursor:"pointer"}}>Edit profile</button>
             {/* Direct route to the API-key screen — bypasses gateToScreen's
                 "only if missing/stale" check so the student can swap
-                providers (Anthropic → OpenRouter → Google, etc.) or rotate
+                providers (OpenRouter → OpenAI → Google, etc.) or rotate
                 keys whenever they want. */}
             <button
               onClick={() => {

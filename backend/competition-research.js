@@ -631,15 +631,22 @@ export async function researchCompetitionPrestige({
     return result;
   }
 
-  // 4. Web research via Anthropic web_search. Non-Anthropic providers skip.
-  if (!adapter || adapter.provider !== "anthropic" || !adapter.apiKey) {
-    return {
-      score: 0,
-      source: "unavailable",
-      rationale: "Prestige research requires an Anthropic key (web_search tool).",
-      sourcesCited: [],
-      cached: false,
-    };
+  // 4. Web-enriched research. This previously used Anthropic's native
+  // web_search tool, which has been removed. Until it is re-plumbed onto
+  // OpenRouter's web plugin (tracked follow-up), this path is disabled and
+  // returns "unavailable" — the deterministic official-catalog and benchmark
+  // paths above still provide prestige signals. (Code below is retained for
+  // the eventual re-plumb but is currently unreachable.)
+  return {
+    score: 0,
+    source: "unavailable",
+    rationale: "Web-based prestige research is temporarily unavailable.",
+    sourcesCited: [],
+    cached: false,
+  };
+  // eslint-disable-next-line no-unreachable
+  if (!adapter || !adapter.apiKey) {
+    return { score: 0, source: "unavailable", rationale: "No research adapter.", sourcesCited: [], cached: false };
   }
 
   const timeoutMs = Number(options.timeoutMs || DEFAULT_TIMEOUT_MS);

@@ -37,4 +37,4 @@ See [`docs/SESSION-SUMMARY.md`](./docs/SESSION-SUMMARY.md) for an architecture
 and API orientation aimed at building macOS, Windows, and Android clients
 against this backend.
 
-Also, add the encryption key and IEDPS API key in the .env.example file. Do not touch the ANTHROPIC_API_KEY.
+Also, set the encryption key and the IPEDS (College Scorecard) API key in your `.env`. An operator LLM key is optional — students bring their own (BYOK); OpenRouter is the default provider. If you do set an operator key for server-side utility calls, use `OPENROUTER_API_KEY` (or `OPENAI_API_KEY` / `GOOGLE_API_KEY`).

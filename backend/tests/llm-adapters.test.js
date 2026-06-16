@@ -15,21 +15,6 @@ import {
 
 // ─── Helpers: build fake fetch impls for each provider ─────────────────
 
-function fakeAnthropicResponse(text = "hi from claude", usage = { input_tokens: 10, output_tokens: 5 }) {
-  return {
-    ok: true,
-    status: 200,
-    headers: new Map(),
-    json: async () => ({
-      id: "msg_1",
-      model: "claude-haiku-4-5-20251001",
-      content: [{ type: "text", text }],
-      usage,
-      stop_reason: "end_turn",
-    }),
-  };
-}
-
 function fakeOpenAIResponse(text = "hi from gpt", usage = { prompt_tokens: 8, completion_tokens: 3 }, model = "gpt-4o-mini") {
   return {
     ok: true,
@@ -69,8 +54,12 @@ function fakeErrorResponse(status, message) {
 
 // ─── detectProvider ────────────────────────────────────────────────────
 
-test("detectProvider: sk-ant-* → anthropic", () => {
-  assert.equal(detectProvider({ apiKey: "sk-ant-api03-abc" }), PROVIDERS.ANTHROPIC);
+test("anthropic is removed — sk-ant-* falls through to the generic sk- → openai heuristic", () => {
+  // Anthropic was removed as a provider. There is no ANTHROPIC id, and an
+  // sk-ant- key now matches the generic sk- prefix (it simply fails
+  // validation downstream rather than routing anywhere Anthropic-specific).
+  assert.equal(PROVIDERS.ANTHROPIC, undefined);
+  assert.equal(detectProvider({ apiKey: "sk-ant-api03-abc" }), PROVIDERS.OPENAI);
 });
 
 test("detectProvider: sk-proj-* and sk-* → openai", () => {
@@ -144,39 +133,6 @@ test("isReasonableModelId rejects whitespace, control chars, oversize, non-strin
   assert.equal(isReasonableModelId(undefined), false);
   assert.equal(isReasonableModelId(123), false);
   assert.equal(isReasonableModelId({}), false);
-});
-
-// ─── callLLM round-trip — Anthropic wire ───────────────────────────────
-
-test("callLLM (anthropic) round-trips content + usage", async () => {
-  let capturedUrl;
-  let capturedHeaders;
-  let capturedBody;
-  const fetchImpl = async (url, opts) => {
-    capturedUrl = url;
-    capturedHeaders = opts.headers;
-    capturedBody = JSON.parse(opts.body);
-    return fakeAnthropicResponse();
-  };
-  const r = await callLLM({
-    provider: "anthropic",
-    apiKey: "sk-ant-test",
-    model: "claude-haiku-4-5-20251001",
-    system: "be brief",
-    messages: [{ role: "user", content: "hi" }],
-    maxTokens: 16,
-    fetchImpl,
-  });
-  assert.equal(capturedUrl, "https://api.anthropic.com/v1/messages");
-  assert.equal(capturedHeaders["x-api-key"], "sk-ant-test");
-  assert.equal(capturedBody.model, "claude-haiku-4-5-20251001");
-  // System prompt is wrapped in a cache_control block for prompt caching.
-  assert.deepEqual(capturedBody.system, [
-    { type: "text", text: "be brief", cache_control: { type: "ephemeral" } },
-  ]);
-  assert.equal(r.content[0].text, "hi from claude");
-  assert.equal(r.usage.input_tokens, 10);
-  assert.equal(r.usage.output_tokens, 5);
 });
 
 // ─── callLLM round-trip — OpenAI wire ──────────────────────────────────
@@ -262,9 +218,9 @@ test("callLLM (google) converts system → systemInstruction and parses candidat
 
 test("callLLM normalizes 401 → auth_rejected across providers", async () => {
   const providers = [
-    { id: "anthropic", apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" },
-    { id: "openai",    apiKey: "sk-x",     model: "gpt-4o-mini" },
-    { id: "google",    apiKey: "AIza-x",   model: "gemini-2.0-flash" },
+    { id: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
+    { id: "openai",     apiKey: "sk-x",    model: "gpt-4o-mini" },
+    { id: "google",     apiKey: "AIza-x",  model: "gemini-2.0-flash" },
   ];
   for (const p of providers) {
     const fetchImpl = async () => fakeErrorResponse(401, "unauthorized");
@@ -285,11 +241,11 @@ test("callLLM normalizes 401 → auth_rejected across providers", async () => {
 
 test("callLLM rejects bogus model id before hitting network", async () => {
   let hit = false;
-  const fetchImpl = async () => { hit = true; return fakeAnthropicResponse(); };
+  const fetchImpl = async () => { hit = true; return fakeOpenAIResponse(); };
   await assert.rejects(
     () => callLLM({
-      provider: "anthropic",
-      apiKey: "sk-ant-x",
+      provider: "openai",
+      apiKey: "sk-x",
       model: "bad model with spaces",
       messages: [{ role: "user", content: "hi" }],
       fetchImpl,
@@ -309,13 +265,13 @@ test("callLLM propagates AbortSignal to fetch", async () => {
   let receivedSignal;
   const fetchImpl = async (_url, opts) => {
     receivedSignal = opts.signal;
-    return fakeAnthropicResponse();
+    return fakeOpenAIResponse();
   };
   const controller = new AbortController();
   await callLLM({
-    provider: "anthropic",
-    apiKey: "sk-ant-x",
-    model: "claude-haiku-4-5-20251001",
+    provider: "openai",
+    apiKey: "sk-x",
+    model: "gpt-4o-mini",
     messages: [{ role: "user", content: "hi" }],
     signal: controller.signal,
     fetchImpl,
@@ -338,63 +294,9 @@ test("callLLM resolves tier name to TIER_DEFAULTS model", async () => {
   assert.equal(capturedBody.model, TIER_DEFAULTS.openai.small);
 });
 
-// ─── Tool-use forwarding (Anthropic web_search) ────────────────────────
+// ─── Tool-use handling (custom tools unsupported on the OpenAI/Google wire) ──
 
-test("callLLM forwards `tools` + `tool_choice` to Anthropic unchanged", async () => {
-  let capturedBody;
-  const fetchImpl = async (_url, opts) => {
-    capturedBody = JSON.parse(opts.body);
-    return {
-      ok: true,
-      status: 200,
-      headers: new Map(),
-      json: async () => ({
-        id: "msg_1",
-        model: "claude-haiku-4-5-20251001",
-        // Anthropic returns tool_use blocks when the model invokes a tool.
-        content: [
-          { type: "server_tool_use", id: "srv_1", name: "web_search", input: { query: "USAMO" } },
-          { type: "web_search_tool_result", tool_use_id: "srv_1", content: [] },
-          { type: "text", text: "{\"score\":0.9}" },
-        ],
-        usage: { input_tokens: 10, output_tokens: 20 },
-        stop_reason: "end_turn",
-      }),
-    };
-  };
-
-  const tools = [
-    {
-      type: "web_search_20250305",
-      name: "web_search",
-      max_uses: 3,
-      allowed_domains: ["maa.org", "en.wikipedia.org"],
-    },
-  ];
-  const r = await callLLM({
-    provider: "anthropic",
-    apiKey: "sk-ant-x",
-    model: "claude-haiku-4-5-20251001",
-    messages: [{ role: "user", content: "research USAMO" }],
-    tools,
-    toolChoice: { type: "auto" },
-    fetchImpl,
-  });
-
-  // Request body: tools forwarded with cache_control on the last entry
-  // (prompt-caching optimization — tool schemas are stable per session).
-  assert.equal(capturedBody.tools.length, 1);
-  assert.equal(capturedBody.tools[0].type, "web_search_20250305");
-  assert.equal(capturedBody.tools[0].name, "web_search");
-  assert.deepEqual(capturedBody.tools[0].allowed_domains, tools[0].allowed_domains);
-  assert.deepEqual(capturedBody.tools[0].cache_control, { type: "ephemeral" });
-  assert.deepEqual(capturedBody.tool_choice, { type: "auto" });
-  // Response: caller should see all content blocks (tool_use + text).
-  assert.equal(r.content.length, 3);
-  assert.equal(r.content[2].text, '{"score":0.9}');
-});
-
-test("callLLM rejects tools with tools_unsupported for non-Anthropic providers", async () => {
+test("callLLM rejects custom tools with tools_unsupported for OpenAI-wire providers", async () => {
   let hit = false;
   const fetchImpl = async () => { hit = true; return fakeOpenAIResponse(); };
   await assert.rejects(
@@ -459,14 +361,15 @@ test("callLLM (openrouter) accepts Anthropic-shape tools when webPlugin enabled 
 
 // ─── listProviders ─────────────────────────────────────────────────────
 
-test("listProviders returns stable registry with tier defaults", () => {
+test("listProviders returns stable registry with OpenRouter first and no Anthropic", () => {
   const ps = listProviders();
   assert.ok(ps.length >= 8);
-  const anthro = ps.find((p) => p.id === "anthropic");
-  assert.ok(anthro);
-  assert.equal(anthro.keyPrefix, "sk-ant-");
-  assert.ok(anthro.defaults);
-  assert.ok(anthro.defaults.small.startsWith("claude-"));
+  // Anthropic must be gone.
+  assert.equal(ps.find((p) => p.id === "anthropic"), undefined);
+  // OpenRouter is the default/primary provider and listed first.
+  assert.equal(ps[0].id, "openrouter");
+  const or = ps.find((p) => p.id === "openrouter");
+  assert.ok(or && or.defaults && or.defaults.small);
   const google = ps.find((p) => p.id === "google");
   assert.ok(google);
   assert.ok(google.defaults.small.startsWith("gemini-"));

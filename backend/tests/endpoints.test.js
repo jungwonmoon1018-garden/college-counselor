@@ -294,14 +294,14 @@ describe("POST /api/notify-parent", () => {
 // ═══════════════════════════════════════════════════════════
 // API PROXY VALIDATION
 // ═══════════════════════════════════════════════════════════
-describe("POST /api/anthropic (validation only)", () => {
+describe("POST /api/chat (validation only)", () => {
   it("rejects empty body", async () => {
-    const { status } = await req("POST", "/api/anthropic", {});
+    const { status } = await req("POST", "/api/chat", {});
     assert.equal(status, 400);
   });
 
   it("rejects invalid model shapes", async () => {
-    const { status } = await req("POST", "/api/anthropic", {
+    const { status } = await req("POST", "/api/chat", {
       model: "bad model id",
       messages: [{ role: "user", content: "test" }],
       max_tokens: 100,
@@ -310,8 +310,8 @@ describe("POST /api/anthropic (validation only)", () => {
   });
 
   it("rejects missing messages", async () => {
-    const { status } = await req("POST", "/api/anthropic", {
-      model: "claude-sonnet-4-20250514",
+    const { status } = await req("POST", "/api/chat", {
+      tier: "medium",
       max_tokens: 100,
     });
     assert.equal(status, 400);
@@ -319,8 +319,8 @@ describe("POST /api/anthropic (validation only)", () => {
 
   it("rejects too many messages", async () => {
     const messages = Array(51).fill({ role: "user", content: "x" });
-    const { status } = await req("POST", "/api/anthropic", {
-      model: "claude-sonnet-4-20250514",
+    const { status } = await req("POST", "/api/chat", {
+      tier: "medium",
       messages,
       max_tokens: 100,
     });
@@ -677,7 +677,7 @@ describe("POST /api/simulations", () => {
 describe("PII redaction pipeline", () => {
   it("applies deterministic, contextual, and guardian-style masking with token restoration", () => {
     const payload = {
-      model: "claude-sonnet-4-20250514",
+      model: "z-ai/glm-5.1",
       messages: [{
         role: "user",
         content: "John Doe from Lakeside High lives at 123 Main Street, Evanston, IL 60201. Family income is $180,000 and student ID is U-12345. Email me at john@example.com.",

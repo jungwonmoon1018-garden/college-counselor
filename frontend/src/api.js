@@ -19,11 +19,11 @@
 const HANGUL_RE = /^ko/i;
 
 export function getApiBase() {
-  // App.jsx convention: window.__CC_PROXY_URL__ ends in "/anthropic" so the
-  // existing proxy can route Anthropic completions. The other endpoints
-  // share the same prefix minus "/anthropic".
-  const proxyUrl = (typeof window !== "undefined" && window.__CC_PROXY_URL__) || "/api/anthropic";
-  return proxyUrl.replace(/\/anthropic\/?$/, "");
+  // App.jsx convention: window.__CC_PROXY_URL__ is the chat endpoint
+  // ("/api/chat" by default). The other endpoints share the same prefix
+  // minus "/chat". The legacy "/anthropic" suffix is still accepted.
+  const proxyUrl = (typeof window !== "undefined" && window.__CC_PROXY_URL__) || "/api/chat";
+  return proxyUrl.replace(/\/(?:chat|anthropic)\/?$/, "");
 }
 
 export function getSessionToken() {
