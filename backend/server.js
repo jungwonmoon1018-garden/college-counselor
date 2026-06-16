@@ -60,10 +60,12 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import dotenv from "dotenv";
-// Override empty-string OS env vars (e.g. ANTHROPIC_API_KEY="" inherited
-// from a parent shell) with values from .env so the live target refresh
-// and other config-driven features actually fire.
-dotenv.config({ override: true });
+// Override empty-string OS env vars (e.g. inherited "" from a parent shell)
+// with values from .env so the live refresh and other config-driven features
+// actually fire. Load the .env next to THIS file (not the process CWD) so the
+// server boots correctly regardless of where it's launched from — e.g. a
+// repo-root preview/launcher config, not only `cd backend && node server.js`.
+dotenv.config({ override: true, path: fileURLToPath(new URL(".env", import.meta.url)) });
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
@@ -237,7 +239,7 @@ function resolveOperatorLLM() {
   return null;
 }
 const OPERATOR_LLM = resolveOperatorLLM();
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173").split(",").map(s => s.trim());
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,http://localhost:5180").split(",").map(s => s.trim());
 const NODE_ENV = process.env.NODE_ENV || "development";
 // Treat an unfilled `.env.example` placeholder (REPLACE_WITH…) as unset, so a
 // freshly-copied .env doesn't make the server think a bogus key is live data.
@@ -1226,10 +1228,20 @@ app.use(helmet({
   strictTransportSecurity: NODE_ENV === "production" ? { maxAge: 31536000, includeSubDomains: true } : false,
 }));
 
+// Localhost (any port) in development. The Vite dev server and the preview
+// tooling bind to varying ports (5173, 5180, 3001, …), so a fixed allowlist
+// rejected real browser requests with "CORS: Origin not allowed" → which the
+// frontend surfaced as a misleading "Couldn't reach the server" on every POST
+// (same-origin GETs send no Origin header, so they slipped through and looked
+// fine — masking the bug).
+const LOCALHOST_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin && NODE_ENV !== "production") return cb(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    if (NODE_ENV !== "production" && typeof origin === "string" && LOCALHOST_ORIGIN_RE.test(origin)) {
+      return cb(null, true);
+    }
     cb(new Error("CORS: Origin not allowed"));
   },
   credentials: true,

@@ -201,6 +201,56 @@ async function clearSession() {
   try { await storageApi.delete("cc_active_session"); } catch {}
 }
 
+// ─── Authoritative server-session establishment ──────────────────────────
+// The single source of truth for "do we have a backend session?". Both the
+// create and login flows MUST gate on this before entering authenticated
+// screens — otherwise the API-key / survey / chat steps fail with
+// "Not authenticated" (the root cause of users getting stranded when the
+// backend was unreachable at sign-up/sign-in time).
+//
+// Sets window.__CC_SESSION_TOKEN__ on success. Returns one of:
+//   { offline: true }            — no backend configured (local-only mode)
+//   { ok: true, token, studentId }
+//   { existing: true }           — (create mode) account already exists server-side
+//   { ok: false, reason }        — backend configured but unreachable / failed
+async function establishServerSession({ proxyUrl, email, grade, mode }) {
+  if (!proxyUrl) return { offline: true };
+  const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/, "");
+  const post = async (path, body) => {
+    const r = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, d };
+  };
+  try {
+    const emailH = await hashEmail(email);
+    const regBody = { email, emailHash: emailH, grade, schoolDomain: getEmailDomain(email), isMinor: false };
+
+    if (mode === "create") {
+      // New-account signup: register directly. An existing email must NOT
+      // silently drop the user into someone else's data — surface it so the
+      // caller can route to login.
+      const { ok, status, d } = await post("/students/register", regBody);
+      if (d.existing === true || d.registered === false) return { existing: true };
+      if (ok && d.token) { window.__CC_SESSION_TOKEN__ = d.token; return { ok: true, token: d.token, studentId: d.studentId }; }
+      return { ok: false, reason: d.error || `server returned ${status}` };
+    }
+
+    // Login / generic: authenticate, falling back to register so a returning
+    // user whose server account is missing (fresh/restored backend) is healed.
+    let res = await post("/students/auth", { email, emailHash: emailH, isMinor: false });
+    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
+    res = await post("/students/register", regBody);
+    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
+    return { ok: false, reason: res.d.error || `server returned ${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: err?.message || "network error" };
+  }
+}
+
 // ═══════════════════════════════════════════════════════════
 // IPEDS DATA
 // ═══════════════════════════════════════════════════════════
@@ -3620,7 +3670,30 @@ export default function App() {
     const email = cEmail.toLowerCase().trim();
     if (accounts[email]) { setCError("An account with this email already exists. Go to login."); return; }
 
-    // Store a passphrase verification token so login can verify even before first data save
+    // ── Establish the server account FIRST (authoritative when a backend is
+    //    configured). We must NOT create local state or advance into the
+    //    API-key / survey steps unless the backend confirmed the account.
+    //    A silent backend failure here is exactly what used to strand users
+    //    on the API-key screen with no session ("Not authenticated").
+    const proxyUrl = window.__CC_PROXY_URL__;
+    const sess = await establishServerSession({ proxyUrl, email, grade: cGrade, mode: "create" });
+    // Existing email must not silently drop the user into someone else's
+    // data (their BYOK, profile, chat threads). Route to LOGIN instead.
+    if (sess.existing) {
+      setCError("An account with this email already exists. Sign in instead.");
+      setLEmail(email);
+      setScreen(S.LOGIN);
+      return;
+    }
+    // Backend configured but registration didn't complete — stop here with an
+    // actionable error rather than entering an unauthenticated state.
+    if (proxyUrl && !sess.ok && !sess.offline) {
+      setCError("Couldn't reach the server to finish creating your account. Make sure the backend is running, then try again.");
+      return;
+    }
+
+    // Server confirmed (or genuinely offline/local-only) → create local state.
+    // Store a passphrase verification token so login can verify even before first data save.
     const storageKey = storageKeyFor(email);
     const verifier = await encrypt({ _verifier: true }, cPass, email);
     await storageApi.set(storageKey, verifier);
@@ -3634,42 +3707,15 @@ export default function App() {
     setPassphrase(cPass);
     await saveSession({ email });
 
-    // Register with RAG backend (if configured)
-    const proxyUrl = window.__CC_PROXY_URL__;
-    if (proxyUrl) {
-      try {
-        const emailH = await hashEmail(email);
-        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/register"), {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          // isMinor: false reflects the parental-consent attestation given
-          // via the required age-attest checkbox at signup.
-          body: JSON.stringify({ email, emailHash: emailH, grade: cGrade, schoolDomain: getEmailDomain(email), isMinor: false })
-        });
-        const d = await r.json();
-        // The "register" endpoint is idempotent — it returns
-        // `existing: true` + a session token when the email is already
-        // in the backend's PII vault. For a *new account* signup that's
-        // not what the user asked for: they could silently land inside
-        // someone else's data (with that user's stored BYOK, profile,
-        // chat threads, etc.). Refuse and route to the LOGIN screen.
-        if (d.existing === true || d.registered === false) {
-          setCError("An account with this email already exists. Sign in instead.");
-          setLEmail(email);
-          setScreen(S.LOGIN);
-          return;
-        }
-        if (d.token) {
-          window.__CC_SESSION_TOKEN__ = d.token;
-          // Grant consents to backend
-          const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
-          const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${d.token}` };
-          await Promise.allSettled([
-            fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
-            fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
-            fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "cross_border_transfer", grantedBy: "student" }) }),
-          ]);
-        }
-      } catch (err) { console.warn("RAG registration failed (non-blocking):", err?.message); }
+    // Grant onboarding consents now that we hold a verified server session.
+    if (sess.ok && window.__CC_SESSION_TOKEN__) {
+      const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+      const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
+      await Promise.allSettled([
+        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
+        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
+        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "cross_border_transfer", grantedBy: "student" }) }),
+      ]);
     }
 
     // First-run only: if the backend still needs an encryption/IPEDS key
@@ -3733,49 +3779,33 @@ export default function App() {
     // Clear failed login counter on success
     setLoginAttempts(prev => { const next = { ...prev }; delete next[email]; return next; });
 
+    // ── Establish the backend session BEFORE entering the app. When a backend
+    //    is configured this is REQUIRED — otherwise the API-key / survey-sync /
+    //    chat steps fail with "Not authenticated". Auth, falling back to
+    //    register, heals a returning user whose server account is missing
+    //    (e.g. a fresh or restored backend).
+    const proxyUrl = window.__CC_PROXY_URL__;
+    const sess = await establishServerSession({ proxyUrl, email, grade: acct.grade, mode: "login" });
+    if (proxyUrl && !sess.ok && !sess.offline) {
+      setLError("Couldn't reach the server to sign you in. Make sure the backend is running, then try again.");
+      return;
+    }
+
     const u = { name: acct.name, email, grade: acct.grade };
     setUser(u);
     setPassphrase(lPass);
     await saveSession({ email });
 
-    // Authenticate with RAG backend (if configured)
-    const proxyUrl = window.__CC_PROXY_URL__;
-    if (proxyUrl) {
-      try {
-        const emailH = await hashEmail(email);
-        // Send PLAINTEXT email so the backend hashes it with its OWN
-        // salt and finds the existing account. Sending only the
-        // frontend-salted hash made every login miss the lookup and
-        // fall through to register — which is how duplicate empty
-        // accounts piled up.
-        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/auth"), {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, emailHash: emailH })
-        });
-        const d = await r.json();
-        if (d.token) window.__CC_SESSION_TOKEN__ = d.token;
-        else {
-          // Not registered yet — register now
-          const r2 = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/register"), {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            // isMinor: false — same rationale as handleCreate above.
-            body: JSON.stringify({ email, emailHash: emailH, grade: acct.grade, schoolDomain: getEmailDomain(email), isMinor: false })
-          });
-          const d2 = await r2.json();
-          if (d2.token) window.__CC_SESSION_TOKEN__ = d2.token;
-        }
-        // Re-grant consents on every login (backend is idempotent) —
-        // covers upgraded backends that added new required consent types.
-        if (window.__CC_SESSION_TOKEN__) {
-          const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
-          const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
-          await Promise.allSettled([
-            fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
-            fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
-            fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "cross_border_transfer", grantedBy: "student" }) }),
-          ]);
-        }
-      } catch (err) { console.warn("RAG auth failed (non-blocking):", err?.message); }
+    // Re-grant consents on every login (backend is idempotent) — covers
+    // upgraded backends that added new required consent types.
+    if (sess.ok && window.__CC_SESSION_TOKEN__) {
+      const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+      const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
+      await Promise.allSettled([
+        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
+        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
+        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "cross_border_transfer", grantedBy: "student" }) }),
+      ]);
     }
 
     // ─── Backend profile recovery ───
