@@ -137,8 +137,8 @@ export function getOnboardingConsentRequirements(isMinor = true, locale = "en-US
       required: true,
       label: locale === "ko" ? "국외 데이터 전송 동의" : "Cross-Border Data Transfer Consent",
       description: locale === "ko"
-        ? "데이터가 미국 소재 서버(Anthropic)로 전송될 수 있음을 이해하고 동의합니다."
-        : "I understand that data may be transferred to servers in the United States (Anthropic) for AI processing.",
+        ? "내 데이터가 내가 설정한 AI 제공업체(기본값 OpenRouter)가 운영하는 서버로 전송·처리될 수 있으며, 해당 서버가 미국 등 국외에 위치할 수 있음을 이해하고 동의합니다."
+        : "I understand that my data may be transferred to and processed on servers operated by my configured AI provider (OpenRouter by default), which may be located in the United States or other countries.",
     },
   ];
 

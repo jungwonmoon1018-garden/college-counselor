@@ -1,18 +1,18 @@
 // ═══════════════════════════════════════════════════════════════════════
-// CREDIBLE WEB SOURCES — allowlist for the web_search / web_fetch tool.
+// CREDIBLE WEB SOURCES — allowlist for the web-search path.
 // ═══════════════════════════════════════════════════════════════════════
 // Goal: when the counselor uses web search, restrict it to authoritative
 // sources only. Cuts out user-generated forums, college-ranking SEO spam,
 // essay-mill sites, and the rest of the high-noise stuff a student would
 // otherwise hit.
 //
-// Anthropic's web_search_20260209 takes `allowed_domains: [...]` — every
-// returned page must be on one of these domains. Subdomains are matched
-// (e.g. "harvard.edu" matches "college.harvard.edu").
+// `buildAllowedDomains([...])` produces the domain list handed to OpenRouter's
+// web plugin (as its `search_prompt` restriction) for every web-capable call.
+// Subdomains are matched (e.g. "harvard.edu" matches "college.harvard.edu").
 //
-// When the user asks about a specific college that isn't on this list,
-// the counselor can append its top-level domain to the allowlist for
-// that single request via `extendAllowedDomains(["bowdoin.edu"])`.
+// When the user asks about a specific college that isn't on this list, the
+// caller can append its top-level domain for that single request by passing
+// it in `extraDomains` (e.g. `buildAllowedDomains(["bowdoin.edu"])`).
 
 export const FEDERAL_AID_SOURCES = [
   // Federal financial-aid + statistics
@@ -201,27 +201,4 @@ export function buildAllowedDomains(extra = []) {
     }
   }
   return Array.from(set);
-}
-
-// Build the Anthropic web-search tool definition with our allowlist
-// applied. Returns null if web search isn't appropriate for this request
-// (currently always returns the tool; callers can skip it as needed).
-export function makeWebSearchTool(extraDomains = []) {
-  return {
-    type: "web_search_20260209",
-    name: "web_search",
-    allowed_domains: buildAllowedDomains(extraDomains),
-    max_uses: 5,
-  };
-}
-
-// Companion web-fetch tool — restricted to the same allowlist so the
-// model can pull a specific admissions page after locating it via search.
-export function makeWebFetchTool(extraDomains = []) {
-  return {
-    type: "web_fetch_20260209",
-    name: "web_fetch",
-    allowed_domains: buildAllowedDomains(extraDomains),
-    max_uses: 3,
-  };
 }

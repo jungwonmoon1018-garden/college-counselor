@@ -58,7 +58,7 @@ export const PRESTIGE_SOURCE_FRIENDLY = Object.freeze({
   },
   unavailable: {
     short: "Research unavailable",
-    summary: "Prestige lookup needs an Anthropic key — ask your counselor to enable it.",
+    summary: "Prestige lookup needs an OpenRouter key (it powers the web research) — ask your counselor to enable it.",
   },
   research_failed: {
     short: "Needs your context",

@@ -12,10 +12,8 @@
 //    is rule-based + LLM-explained, so it's auditable.
 //
 // This module is provider-neutral — it takes a `callLLM` function from
-// the caller so the same code runs over the student's BYOK key (Anthropic
+// the caller so the same code runs over the student's BYOK key (OpenRouter
 // / OpenAI / Google / etc.).
-
-import { makeWebSearchTool, makeWebFetchTool } from "./credible-sources.js";
 
 const VALUES_TTL_DAYS = 90;
 
@@ -99,10 +97,12 @@ Return ONLY a JSON object with this exact shape — no markdown, no preamble:
 ${hint ? `Additional hint from caller: ${hint}` : ""}
 `.trim();
 
-// callLLM: async ({ model, max_tokens, system, messages, tools, wantsWeb, extraDomains }) => { content, usage }
+// callLLM: async ({ model, max_tokens, system, messages, wantsWeb, extraDomains }) => { content, usage }
 //   — caller is responsible for routing this through the student's BYOK and
-//   translating `wantsWeb` into whichever web-access mechanism the
-//   provider supports (Anthropic native tools, OpenRouter `plugins:web`).
+//   translating `wantsWeb` into the provider's web-access mechanism. For the
+//   default provider (OpenRouter) that's the `plugins:[{id:"web"}]` plugin,
+//   restricted to `extraDomains`; providers without a web path answer from
+//   the structured data alone.
 export async function extractCollegeValues(ragStmts, callLLM, { studentId, collegeName, hintUrl, model }) {
   const slug = slugify(collegeName);
   if (!slug) throw new Error("collegeName required");
@@ -120,18 +120,15 @@ export async function extractCollegeValues(ragStmts, callLLM, { studentId, colle
     };
   }
 
-  // Live extraction. Tools are Anthropic-native (web_search_*, web_fetch_*)
-  // — the dispatcher in server.js filters them for non-Anthropic providers
-  // and substitutes OpenRouter's `plugins:[{id:"web"}]` when wantsWeb is
-  // set, so the LLM gets internet access either way.
+  // Live extraction. `wantsWeb` tells the caller's callLLM to give the model
+  // internet access — on OpenRouter that's the `plugins:[{id:"web"}]` plugin,
+  // restricted to `extraDomains` (the credible-sources allowlist).
   const extraDomains = [];
   if (hintUrl) extraDomains.push(hintUrl);
-  const tools = [makeWebSearchTool(extraDomains), makeWebFetchTool(extraDomains)];
 
   const llmResp = await callLLM({
     model,
     max_tokens: 2000,
-    tools,
     wantsWeb: true,
     extraDomains,
     messages: [{ role: "user", content: EXTRACT_PROMPT(collegeName, hintUrl) }],

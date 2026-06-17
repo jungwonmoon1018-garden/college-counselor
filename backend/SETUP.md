@@ -103,3 +103,25 @@ CLI). The key is validated as 20–64 alphanumeric characters before it's saved.
 api.data.gov's signup requires email verification and can't be driven
 programmatically without their signup credentials, so the UI links to the
 signup form rather than auto-registering.
+
+---
+
+## Keeping the `collegeapp-ai` skill in sync
+
+The Claude Code skill harness lives at `backend/skills/collegeapp-ai/` (the
+**source of truth**). Claude Code reads the *installed* copy at
+`~/.claude/skills/collegeapp-ai/`, which otherwise drifts by hand — it was
+stranded at v1.0.0 (no `register.js`, Anthropic-era tiers) while the repo moved
+to v1.2.0 (OpenRouter-native).
+
+```bash
+cd backend
+npm run skill:sync              # copy SKILL.md + scripts/ to the active install
+npm run skill:sync -- --dry-run # preview what would change, write nothing
+npm run skill:sync -- --check   # exit 2 if installed version != repo (deploy guard)
+```
+
+The target can be overridden with `--target /path/to/skills/collegeapp-ai` or
+the `COLLEGEAPP_SKILL_TARGET` env var. The script only overwrites the known
+file set (`SKILL.md` + `scripts/*`) — it never deletes the target tree. Run it
+after editing `SKILL.md`, and wire `--check` into CI to catch drift.

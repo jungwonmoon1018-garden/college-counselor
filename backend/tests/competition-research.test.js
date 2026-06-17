@@ -3,11 +3,10 @@
 // ═══════════════════════════════════════════════════════════════════════
 // The research module has three gated paths:
 //   1. TTL-cache hit   — returns immediately, no LLM, cached: true.
-//   2. Benchmark hit   — returns seeded prestige_score, no web_search,
-//                        source: "benchmark".
-//   3. Anthropic       — calls web_search_20250305 through callLLM, parses
-//                        the JSON response, caches 30d.
-// Non-Anthropic providers short-circuit with source: "unavailable" so the
+//   2. Benchmark/catalog hit — seeded/official prestige, no web call.
+//   3. OpenRouter      — calls callLLM with the web plugin enabled
+//                        (plugins:[{id:"web"}]), parses the JSON, caches 30d.
+// Non-OpenRouter providers short-circuit with source: "unavailable" so the
 // vectorizer never crashes when only an OpenAI/Google key is configured.
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -34,10 +33,10 @@ function freshStmts() {
   return { db, stmts: prepareRAGStatements(db) };
 }
 
-// Fake fetch returning an Anthropic-shaped response containing a JSON
-// payload in the text block. Also captures the outbound request body so
-// tests can assert on the web_search tool wiring.
-function fakeAnthropicFetch(jsonPayload, captured = {}) {
+// Fake fetch returning an OpenAI/OpenRouter-shaped chat-completion whose
+// message content is the JSON payload. Captures the outbound request body so
+// tests can assert the web-plugin wiring (plugins:[{id:"web"}], no tools).
+function fakeOpenRouterFetch(jsonPayload, captured = {}) {
   return async (_url, opts) => {
     captured.body = JSON.parse(opts.body);
     captured.url = _url;
@@ -46,11 +45,10 @@ function fakeAnthropicFetch(jsonPayload, captured = {}) {
       status: 200,
       headers: new Map(),
       json: async () => ({
-        id: "msg_1",
-        model: "claude-haiku-4-5-20251001",
-        content: [{ type: "text", text: JSON.stringify(jsonPayload) }],
-        usage: { input_tokens: 10, output_tokens: 20 },
-        stop_reason: "end_turn",
+        id: "chatcmpl-1",
+        model: "z-ai/glm-5.1",
+        choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(jsonPayload) }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 10, completion_tokens: 20 },
       }),
     };
   };
@@ -246,54 +244,72 @@ test("missing adapter returns source:unavailable without throwing", async () => 
   assert.equal(r.source, "unavailable");
 });
 
-// ─── Path 3: web-enriched research is DISABLED (Anthropic removed) ──────
-// The web-research path used Anthropic's native web_search tool, which has
-// been removed. Until it is re-plumbed onto OpenRouter's web plugin it
-// returns source:"unavailable" without touching the network — the
-// deterministic catalog/benchmark paths above still provide prestige signals.
+// ─── Path 3: OpenRouter web-plugin research ────────────────────────────
 
-test("web research is disabled → returns source:unavailable even with an adapter, without hitting the network", async () => {
+test("OpenRouter adapter runs web-plugin research, parses JSON, sends plugins (not tools), and caches", async () => {
   const { stmts } = freshStmts();
-  let fetchHit = false;
-  const fetchImpl = async () => { fetchHit = true; throw new Error("disabled web path must not call fetch"); };
+  const captured = {};
+  let usageLogged = null;
+  const fetchImpl = fakeOpenRouterFetch(
+    {
+      score: 0.83,
+      rationale: "National official-source engineering challenge signal.",
+      sourcesCited: ["https://usaco.org/index.php?page=contests", "https://www.soinc.org/"],
+    },
+    captured,
+  );
   const r = await researchCompetitionPrestige({
     activityName: "Uncataloged Engineering Challenge",
     levelHint: "national",
     stmts,
-    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
+    adapter: {
+      provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1",
+      recordUsage: (model, usage) => { usageLogged = { model, usage }; },
+    },
     options: { fetchImpl },
   });
-  assert.equal(r.source, "unavailable");
-  assert.equal(r.score, 0);
-  assert.equal(fetchHit, false, "disabled web path must not hit the network");
+  assert.equal(r.source, "research");
+  assert.equal(r.score, 0.83);
+  assert.ok(r.sourcesCited.length >= 1 && r.sourcesCited.every(isReputableSourceUrl));
+  // Web plugin wired, no Anthropic-native tools.
+  assert.ok(Array.isArray(captured.body.plugins), "plugins[] must be present");
+  assert.equal(captured.body.plugins[0].id, "web");
+  assert.equal(captured.body.tools, undefined, "must NOT send native tools");
+  // Usage sink fired for budget accounting.
+  assert.ok(usageLogged && usageLogged.usage, "recordUsage should fire");
+
+  // Second call hits the 30-day cache (no fetch).
+  const r2 = await researchCompetitionPrestige({
+    activityName: "Uncataloged Engineering Challenge",
+    levelHint: "national",
+    stmts,
+    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
+    options: { fetchImpl: async () => { throw new Error("second call must hit cache"); } },
+  });
+  assert.equal(r2.cached, true);
+  assert.equal(r2.score, 0.83);
 });
 
-// ─── Cache TTL expiry — stale row ignored; disabled web path → unavailable ──
-
-test("expired cache row is ignored; the disabled web path returns unavailable on the fresh call", async () => {
+test("expired cache row is ignored; a fresh OpenRouter call re-researches", async () => {
   const { db, stmts } = freshStmts();
   const key = computePrestigeCacheKey("Old Research", null);
-  // Write a row with a created_at far older than PRESTIGE_TTL_DAYS.
   const stalePastIso = new Date(Date.now() - (PRESTIGE_TTL_DAYS + 5) * 86_400_000).toISOString();
   db.prepare(`
     INSERT INTO ec_prestige_cache (cache_key, activity_name, level_hint, score, rationale, sources_json, source, provider, model, result_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    key, "Old Research", null, 0.11,
-    "stale", JSON.stringify([]),
-    "research", "openrouter", "z-ai/glm-5.1",
-    JSON.stringify({ score: 0.11 }),
-    stalePastIso,
+    key, "Old Research", null, 0.11, "stale", JSON.stringify([]),
+    "research", "openrouter", "z-ai/glm-5.1", JSON.stringify({ score: 0.11 }), stalePastIso,
   );
-
-  // The stale row is ignored; with web research disabled the fresh call is unavailable.
   const r = await researchCompetitionPrestige({
     activityName: "Old Research",
     stmts,
     adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
-    options: {},
+    options: { fetchImpl: fakeOpenRouterFetch({ score: 0.66, rationale: "refreshed.", sourcesCited: ["https://maa.org/"] }) },
   });
-  assert.equal(r.source, "unavailable");
+  assert.equal(r.source, "research");
+  assert.equal(r.score, 0.66);
+  assert.equal(r.cached, false);
 });
 
 // ─── Invalid input ─────────────────────────────────────────────────────

@@ -11,6 +11,7 @@
     "refresh:colleges": "node scripts/refresh-college-data.mjs",
     "cds:add-cycle": "node scripts/add-cds-cycle.mjs",
     "refresh:cds": "node scripts/refresh-cds.mjs",
+    "skill:sync": "node skills/collegeapp-ai/scripts/sync-skill.mjs",
     "setup": "node scripts/setup-secrets.mjs",
     "start": "node server.js",
     "start:sim": "node simulation-sidecar.js",

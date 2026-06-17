@@ -1,8 +1,15 @@
 ---
 name: collegeapp-ai
-description: US college application counselor grounded in a rules-first backend (FAFSA/FERPA/Korea PIPA compliant). Helps students build a coherent application story using evidence vectors (5-factor EC strength, directionality, AP mastery, narrative fit, competition prestige) retrieved from the college-counselor-backend. Provider-agnostic — runs on Anthropic, OpenAI, Google Gemini, OpenRouter, DeepSeek, Qwen/Together, Zhipu/GLM, or local Ollama/LM Studio.
-version: 1.1.0
+description: US college application counselor grounded in a rules-first backend (FAFSA/FERPA/Korea PIPA compliant). Helps students build a coherent application story using evidence vectors (5-factor EC strength, directionality, AP mastery, narrative fit, competition prestige) retrieved from the college-counselor-backend. OpenRouter-first BYOK — also runs on OpenAI, Google Gemini, DeepSeek, Qwen/Together, Zhipu/GLM, or local Ollama/LM Studio.
+version: 1.2.0
 ---
+
+<!-- v1.2.0: OpenRouter-only migration. Provider tiers are now generic (no
+     Anthropic/Claude model names); the live model list comes from
+     GET /api/llm/openrouter/models. Prestige web-research runs on OpenRouter's
+     web plugin (was Anthropic web_search). Added Providers & BYOK and Data
+     freshness sections. See the ".md network" cross-links at the bottom. -->
+
 
 # collegeapp-ai — College Application Counselor Skill
 
@@ -105,36 +112,30 @@ The backend is reached via `$COLLEGEAPP_BACKEND_URL` (default `http://localhost:
 
 ## Tiered reasoning recipe
 
-The backend exposes `POST /api/llm` with a `tier` parameter. Every provider fills in its own best fit for each tier — you don't pick a model id, you pick a reasoning level:
+The backend exposes `POST /api/llm` with a `tier` parameter. **You don't pick a model id — you pick a reasoning level.** The backend maps the tier to the student's BYOK model for that tier. The actual model behind each tier is whatever the student picked from OpenRouter's **live** catalog (`GET /api/llm/openrouter/models`); recommended defaults per provider come from `GET /api/llm/providers`. Do NOT hard-code or name specific models.
 
-- **SMALL** (`tier: "small"`) — Haiku / gpt-4o-mini / gemini-2.0-flash / llama3.2:3b.
-  - Parse uploaded attachment text that the student provides.
-  - Validate claimed awards against extracted text.
-  - Classify AP subjects from student input.
-  - Score narrative_fit for edge cases the keyword path can't resolve.
-  - Any step that's essentially "is this text a match for that pattern".
+- **SMALL** (`tier: "small"`) — fastest/cheapest. Routing, extraction, classification, OCR-validation, narrative_fit edge cases — "is this text a match for that pattern".
+- **MEDIUM** (`tier: "medium"`) — balanced. Reach/target/safety list synthesis from directionality + EC vectors, EC bullet revisions, trend analysis, evidence-cited coaching, and competition prestige research (OpenRouter web plugin — see below).
+- **LARGE** (`tier: "large"`) — deepest. Only when cross-source conflict appears (e.g. GPA percentile says "reach" but EC tier-1 count says "competitive"), full essay critique, or nuanced strategy ("drop AP Calc BC for a research internship?").
 
-- **MEDIUM** (`tier: "medium"`) — Sonnet / gpt-4o / gemini-2.5-pro / llama3.1:8b.
-  - Synthesize a reach / target / safety college list from directionality + EC vectors.
-  - Draft EC bullet revisions grounded in the vectors.
-  - Trend analysis across snapshot history.
-  - Coaching responses that cite specific evidence rows.
-  - Competition prestige research (Anthropic-only — uses web_search_20250305 with a domain allowlist).
+The backend's policy router will *also* decide the tier. You may override in the request body, but the router can refuse if the topic is regulated (FAFSA/FERPA) — those resolve deterministically with no model call.
 
-- **LARGE** (`tier: "large"`) — Opus / gpt-4.1 / gemini-2.5-pro / qwen2.5:32b.
-  - **Only** when cross-source conflict appears. Example: GPA percentile puts the student "reach" but EC tier-1 count puts them "competitive." The skill must reconcile.
-  - Essay critique on a full draft.
-  - Nuanced strategy questions ("should I drop AP Calc BC for a research internship?").
+## Providers & BYOK
 
-The backend's policy router will *also* decide the tier. You are welcome to override in the request body, but the router can refuse if the topic is regulated (FAFSA/FERPA) — those always resolve deterministically without a model call.
+The counselor runs on the **student's own key (BYOK)**; **OpenRouter is the default/primary provider** (OpenAI, Google, DeepSeek, Together, Zhipu, Ollama, and LM Studio also work). Key facts for the skill:
+
+- The student saves their key via `PUT /api/students/apikey` (frontend "API key" screen). The skill **never sees the key** — it's encrypted at rest server-side and only referenced by tier.
+- The BYOK model dropdown is built from OpenRouter's **live** `GET /api/llm/openrouter/models`, so it only offers currently-served models. Recommended defaults are **proposed, never auto-applied** — the student approves model updates.
+- `GET /api/students/apikey` returns `{ hasPersonalKey, chatReady, provider, defaults, budget }`. `chatReady` mirrors the exact gate `/api/chat` enforces (key on file **and** cross-border consent). If `hasPersonalKey === false`, the student must add a key before chat/coaching works.
+- Onboarding order is: **register → grant 3 consents → seed narrative → save BYOK key → chat**. Chat (`/api/chat`) is gated on the `cross_border_transfer` consent; a 403 means route the student to the consent flow (never reroute providers).
 
 ## Prestige research (5th EC factor)
 
 Prestige is researched lazily. On every EC vectorize call, the backend:
 
-1. Tries the seed table (`baseline_ec_competitive.prestige_score`) — cheap benchmark hit, `prestigeSource: "benchmark"`.
-2. On miss, calls Anthropic's native `web_search_20250305` with a reputable-domain allowlist (`maa.org`, `mitadmissions.mit.edu`, `societyforscience.org`, `concordreview.org`, IvyWise, CollegeVine, etc.). Result is cached 30 days, `prestigeSource: "research"`.
-3. If `ANTHROPIC_API_KEY` is missing and the student has no Anthropic BYOK, prestige drops to `0.0` with `prestigeSource: "unavailable"`. Tier labels still compute but skip the prestige floor check — flag this to the student so they understand why the EC looks weaker than it should.
+1. Tries the official competition catalog / seed table — cheap deterministic hit, `prestigeSource: "benchmark"` (or `"catalog"`). No web call.
+2. On miss, runs **OpenRouter's web plugin** (allowlisted official-organizer / `.edu` / `.gov` pages — `maa.org`, `usaco.org`, `societyforscience.org`, etc.). The plugin injects retrieved pages into the model's context before it answers; the result is cached 30 days, `prestigeSource: "research"`.
+3. Web research only fires when the student's BYOK provider is **OpenRouter**. With any other provider (or no key), prestige is `0.0` with `prestigeSource: "unavailable"`. Tier labels still compute from the deterministic paths — **flag this to the student** (they can switch to OpenRouter to enable web-researched prestige) so they understand why an EC looks weaker than it should.
 
 Useful read-only endpoints (counselor-auth):
 
@@ -142,12 +143,22 @@ Useful read-only endpoints (counselor-auth):
 - `POST /api/ec/prestige/recompute` → force a fresh web search (body `{studentId, ecId?}`).
 - `DELETE /api/ec/component-cache` → admin reset for any sub-factor cache (body `{factor}`).
 
+## Data freshness & web research
+
+The backend keeps its data current so you can trust it — and surfaces "data as of" provenance:
+
+- **LLM model catalog** — refreshed from OpenRouter's live `/models` at boot + every 24h. `GET /api/llm/openrouter/models` returns `{ reachable, lastFetched, count, models }`.
+- **College Scorecard** — live at request time when a key is configured; a weekly job re-pulls cached schools.
+- **Common Data Set** — re-ingested weekly (operator-registered official links only; never fabricated).
+- **Official pages** — optional daily diff monitoring.
+- `GET /api/methodology` is the single transparency surface: factor weights, thresholds, every data source + its `lastRefreshed` timestamp, and the live model-catalog status. Cite it when a student asks "how do you know this / how fresh is this?"
+
 ## Tool allowlist
 
 Prefer these Claude Code tools when operating this skill:
 
 - **Read** — open attachment files and scripts in the working directory.
-- **WebFetch** — only against `$COLLEGEAPP_BACKEND_URL`. Never hit `api.anthropic.com` / `api.openai.com` / `generativelanguage.googleapis.com` directly; go through `POST /api/llm` on the backend so audit / rate-limit / consent gates fire.
+- **WebFetch** — only against `$COLLEGEAPP_BACKEND_URL`. Never hit any provider API (OpenRouter, OpenAI, Google, etc.) directly; go through `POST /api/llm` on the backend so audit / rate-limit / consent / budget gates fire.
 - **Bash** — run the helper scripts in `scripts/` (register, fetch-context, upload-attachment). Avoid arbitrary shell work.
 
 ## Red lines
@@ -185,4 +196,22 @@ Recompute EC strength vectors (triggers prestige research + narrative-fit recomp
 curl -X POST "$COLLEGEAPP_BACKEND_URL/api/ec/strength/recompute" \
   -H "Authorization: Bearer $COLLEGEAPP_SESSION_TOKEN" \
   -H "Content-Type: application/json" -d '{}'
+```
+
+## The .md network (see also)
+
+This skill is the reasoning layer over a documented backend. When you need the *why* behind a number or a rule, read these (they are the source of truth, not this file):
+
+- **`../../docs/METHODOLOGY.md`** — EC factor weights, thresholds, data sources + freshness policy (mirrors `GET /api/methodology`).
+- **`../../docs/DATA_FLOW.md`** — how a request flows: screening → policy router → rules engine → model → 3-lane answer.
+- **`../../compliance/fafsa/FAFSA-ADVISORY-POSTURE.md`**, **`../../compliance/ferpa/FERPA-COMPLIANCE.md`**, **`../../compliance/korea-ai-basic-act/KOREA-AI-COMPLIANCE.md`** — the regulated-topic rules the backend enforces; your citations must trace to `rag.baselineContext.ruleCitations`.
+- **`../../DEPLOY.md`** → "LLM Providers" — the OpenRouter-first provider matrix and operator env.
+
+## Keeping this skill in sync
+
+This file under `backend/skills/collegeapp-ai/` is the **source of truth**. The installed copy at `~/.claude/skills/collegeapp-ai/` can drift. After editing here, run:
+
+```bash
+cd backend && npm run skill:sync          # copy SKILL.md + scripts/ to the active install
+cd backend && npm run skill:sync -- --check   # exit non-zero if versions differ (deploy guard)
 ```

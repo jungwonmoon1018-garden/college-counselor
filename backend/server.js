@@ -86,7 +86,7 @@ import { composeAnswer, composeDeterministicAnswer } from "./answer-composer.js"
 import { initReviewQueue, prepareReviewStatements, submitForReview, shouldTriggerReview, getQueueStats } from "./review-queue.js";
 import { initPIIVault, preparePIIStatements, storeStudentPII, retrieveStudentPII, deleteAllStudentPII, cleanExpiredDocuments, hashStudentIdForProvider, isBYOKAllowed, lookupStudentBYOK } from "./pii-vault.js";
 import { ensureBudgetColumn, getStudentBudget, setStudentBudget, getMonthlySpendUsd, checkBudget } from "./usage-budget.js";
-import { OPENROUTER_TARGETS, OPENROUTER_STATUS, OPENROUTER_CATALOG, refreshOpenRouterTargets, refreshOpenRouterCatalog } from "./openrouter-model-refresh.js";
+import { OPENROUTER_TARGETS, OPENROUTER_STATUS, OPENROUTER_CATALOG, refreshOpenRouterTargets, refreshOpenRouterCatalog, resolveOpenRouterTier } from "./openrouter-model-refresh.js";
 import { randomExemplarGroup, exemplarsPromptBlock } from "./crimson-ec-exemplars.js";
 import { buildMethodology } from "./methodology.js";
 import * as chatHistory from "./chat-history.js";
@@ -501,25 +501,56 @@ registerStandardJobs({
   retentionMode: RETENTION_MODE,
 });
 
-// Opt-in auto-refresh of Common Data Set records (the daily domain_monitor
-// already watches official pages; this re-ingests the newest registered CDS
-// cycle). OFF by default because it does network I/O across many schools —
-// enable with AUTO_REFRESH_CDS=1, tune cycle via CDS_REFRESH_CYCLE. Only
-// data from operator-registered authoritative CDS links is ingested; nothing
-// is fabricated. AP concept data is a curated catalog (no live source).
-if (process.env.AUTO_REFRESH_CDS === "1") {
+// ── Scheduled freshness jobs ──────────────────────────────────────────────
+// Auto-fetch web/college data so it doesn't silently go stale (which erodes
+// trust). All are conservative (weekly/daily, runOnStartup:false) and only
+// ingest from authoritative / operator-registered sources — nothing is
+// fabricated. Status is visible via the counselor job-status endpoint and
+// surfaced (last-run) on /api/methodology.
+
+// (a) Common Data Set re-ingest — DEFAULT ON (opt out with
+//     DISABLE_AUTO_REFRESH_CDS=1; tune cycle via CDS_REFRESH_CYCLE). Re-ingests
+//     the newest registered CDS cycle weekly so qualitative weights track each
+//     school's latest official Common Data Set.
+if (process.env.DISABLE_AUTO_REFRESH_CDS !== "1") {
   const CDS_CYCLE = process.env.CDS_REFRESH_CYCLE || "2024-25";
   registerJob("cds_refresh", async () => {
     const { ingestBulk, getRepositoryIndex } = await import("./cds-ingest-pipeline.js");
     const index = await getRepositoryIndex();
     const targets = index.map((e) => e.name).filter(Boolean);
     if (!targets.length) return;
-    console.log(`[CDS-REFRESH] Auto-refreshing ${targets.length} school(s) to cycle ${CDS_CYCLE}…`);
+    console.log(`[CDS-REFRESH] Re-ingesting ${targets.length} school(s) to cycle ${CDS_CYCLE}…`);
     const results = await ingestBulk(ragStmts, targets, { concurrency: 2, year: CDS_CYCLE });
     const ok = results.filter((r) => r.status === "ok" || r.status === "ok_with_overrides").length;
     console.log(`[CDS-REFRESH] Done: ${ok}/${results.length} ingested.`);
   }, 7 * 24 * 60 * 60 * 1000, { runOnStartup: false }); // weekly
-  console.log(`[BOOT] AUTO_REFRESH_CDS enabled — weekly CDS re-ingest for cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}.`);
+  console.log(`[BOOT] CDS auto-refresh ON (weekly, cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}). Disable with DISABLE_AUTO_REFRESH_CDS=1.`);
+}
+
+// (b) College Scorecard history refresh — only with a key. Re-pulls the
+//     federal stats for schools already in the cache so they don't age past
+//     the request-time 7-day TTL once a school stops being actively queried.
+//     fetchAndPersistCollegeHistory skips anything fetched <7 days ago.
+if (SCORECARD_API_KEY) {
+  registerJob("scorecard_refresh", async () => {
+    const rows = db.prepare("SELECT DISTINCT unit_id FROM scorecard_history").all();
+    const unitIds = rows.map((r) => r.unit_id).filter(Boolean);
+    if (!unitIds.length) return;
+    const r = await fetchAndPersistCollegeHistory(db, ragStmts, SCORECARD_API_KEY, unitIds);
+    if (r?.fetched) console.log(`[SCORECARD-REFRESH] ${r.fetched} refreshed, ${r.skipped || 0} skipped, ${r.errors || 0} errors.`);
+  }, 7 * 24 * 60 * 60 * 1000, { runOnStartup: false }); // weekly
+  console.log("[BOOT] Scorecard auto-refresh ON (weekly, cached schools).");
+}
+
+// (c) Official-page monitoring — opt in with ENABLE_DOMAIN_MONITOR=1 (the
+//     standard registration leaves it disabled). Daily diff of admissions /
+//     financial-aid / deadline pages.
+if (process.env.ENABLE_DOMAIN_MONITOR === "1" && monitorStmts) {
+  registerJob("domain_monitor", async () => {
+    const { runDailyMonitor } = await import("./domain-monitor.js");
+    return runDailyMonitor(monitorStmts, { batchSize: 200, delayMs: 1000 });
+  }, 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
+  console.log("[BOOT] ENABLE_DOMAIN_MONITOR=1 — daily official-page monitoring active.");
 }
 
 startAllJobs();
@@ -710,13 +741,30 @@ async function callSimulationSidecar(pathname, options = {}) {
 }
 
 // ─── Prestige adapter resolver ──────────────────────────────
-// Prestige web-research was built on Anthropic's native web_search tool, which
-// has been removed. competition-research.js short-circuits to source:
-// "unavailable" for any non-Anthropic adapter, so we return null here and the
-// vectorizer records "unavailable" instead of throwing. Re-enabling web-
-// enriched prestige on OpenRouter's web plugin is a tracked follow-up.
-function resolvePrestigeAdapter(_studentId) {
-  return null;
+// Prestige web-research runs on OpenRouter's web plugin (see
+// competition-research.js). It only fires when the student has an OpenRouter
+// BYOK key on file; any other provider / no key → competition-research returns
+// source:"unavailable" and the vectorizer falls back to deterministic signals.
+// The adapter carries a recordUsage sink so research spend counts toward the
+// student's monthly budget cap.
+function resolvePrestigeAdapter(studentId) {
+  if (!studentId) return null;
+  let byok;
+  try { byok = lookupStudentBYOK(piiStmts, piiVault, studentId); }
+  catch { return null; }
+  if (!byok || byok.provider !== "openrouter" || !byok.apiKey) return null;
+  const model = byok.models?.medium || byok.models?.large || resolveOpenRouterTier("medium");
+  return {
+    provider: "openrouter",
+    apiKey: byok.apiKey,
+    baseUrl: byok.baseUrl || "https://openrouter.ai/api/v1",
+    model,
+    recordUsage: (usedModel, usage) => {
+      try {
+        ragStmts.insertUsage.run(studentId, `openrouter:${usedModel || model}`, usage?.input_tokens || 0, usage?.output_tokens || 0, "personal");
+      } catch { /* non-fatal */ }
+    },
+  };
 }
 
 // ───────────────────────────────────────────────────────────
@@ -1332,8 +1380,11 @@ app.get("/api/methodology", apiLimiter, (_req, res) => {
     res.json(buildMethodology({
       providerMigration: { openrouter: OPENROUTER_STATUS },
       scorecardConfigured: !!SCORECARD_API_KEY,
+      cdsCycleLatest: process.env.CDS_REFRESH_CYCLE || "2024-25",
       baselineYear: 2024,
-      domainMonitorDaily: true,
+      domainMonitorDaily: process.env.ENABLE_DOMAIN_MONITOR === "1",
+      openRouterCatalog: { lastFetched: OPENROUTER_CATALOG.lastFetched, count: OPENROUTER_CATALOG.models.length, reachable: OPENROUTER_CATALOG.reachable },
+      jobs: getJobStatus(),
     }));
   } catch (err) {
     console.error("[methodology] error:", err.message);
@@ -3370,9 +3421,7 @@ app.put("/api/students/apikey", studentLimiter, requireStudentAuth, async (req, 
       // *positive* signal about the key.
       const reasonByCode = {
         auth_rejected:   `API key rejected by ${provider}. Double-check you pasted the full key.`,
-        credit_exhausted: provider === "anthropic"
-          ? "Your Anthropic organization has no usage credits. Top up at https://console.anthropic.com/settings/billing — or switch providers (OpenRouter pools credit across providers; Google Gemini has a free tier; Ollama / LM Studio run locally for free)."
-          : `${provider} reports your account is out of credits. Top up with that provider, or try a different one.`,
+        credit_exhausted: `${provider} reports your account is out of credits. Top up with that provider, or try a different one (OpenRouter pools credit across providers; Google Gemini has a free tier; Ollama / LM Studio run locally for free).`,
         rate_limited:    `${provider} is rate-limiting key validation right now. Try again in a minute.`,
         network_error:   `Couldn't reach ${provider} to validate the key. Check your network and retry.`,
         unknown_provider: `Could not detect the provider from this key.`,
@@ -3455,14 +3504,20 @@ app.get("/api/students/apikey", studentLimiter, requireStudentAuth, (req, res) =
     const autoMigrated = [];
 
     const row = piiStmts.getApiKey?.get(req.studentId);
-    if (!row) return res.json({ hasPersonalKey: false, keySource: "none" });
+    if (!row) return res.json({ hasPersonalKey: false, keySource: "none", chatReady: false });
 
     // Spend / budget snapshot
     const monthlyBudgetUsd = Number(row.monthly_budget_usd ?? 0);
     const monthSpendUsd = getMonthlySpendUsd(ragStmts, req.studentId);
 
+    // chatReady mirrors the exact gate POST /api/chat enforces: a BYOK key on
+    // file AND the Korea-PIPA cross-border consent granted. The onboarding flow
+    // uses it to confirm "you're connected" before entering chat.
+    const chatReady = !!hasActiveConsent(piiStmts, req.studentId, "cross_border_transfer")?.hasConsent;
+
     res.json({
       hasPersonalKey: true,
+      chatReady,
       keySource: "personal",
       hint: row.key_hint,
       setAt: row.updated_at,
