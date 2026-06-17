@@ -18,13 +18,20 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = path.resolve(__dirname, "../skills/collegeapp-ai");
 
-test("SKILL.md declares v1.1 and the required fields", () => {
+test("SKILL.md declares v1.2 and the required fields", () => {
   const md = fs.readFileSync(path.join(SKILL_DIR, "SKILL.md"), "utf8");
 
   // YAML frontmatter with the core metadata.
   assert.match(md, /^---/,                "YAML frontmatter missing");
   assert.match(md, /name:\s*collegeapp-ai/, "skill name missing");
-  assert.match(md, /version:\s*1\.1\.0/,   "skill version must be 1.1.0 (prestige factor + narrativeText opt-in)");
+  assert.match(md, /version:\s*1\.2\.0/,   "skill version must be 1.2.0 (OpenRouter-only migration: generic tiers, web-plugin prestige, BYOK + freshness sections)");
+
+  // OpenRouter migration markers — the v1.2.0 harness must NOT name Anthropic
+  // tiers and must point at the live OpenRouter model list + BYOK gate.
+  assert.doesNotMatch(md, /\b(Haiku|Sonnet|Opus)\b/, "v1.2.0 must not name Anthropic model tiers");
+  assert.doesNotMatch(md, /web_search_20250305/,     "v1.2.0 prestige must not reference the disabled Anthropic web-search tool");
+  assert.match(md, /\/api\/llm\/openrouter\/models/,  "SKILL.md must point to the live OpenRouter model list");
+  assert.match(md, /chatReady/,                       "SKILL.md must document the chatReady gate");
 
   // 5-factor EC strength vector must be documented.
   for (const factor of ["dedication", "achievement", "leadership", "prestige", "narrative_fit"]) {

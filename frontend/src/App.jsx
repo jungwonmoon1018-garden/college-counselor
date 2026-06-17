@@ -192,9 +192,27 @@ async function hashEmail(email) {
 
 async function saveSession(session) {
   try {
+    const prev = (await loadSession()) || {};
     const hashed = await hashEmail(session.email);
-    await storageApi.set("cc_active_session", JSON.stringify({ emailHash: hashed, emailHint: session.email.split("@")[0].slice(0, 2) + "***" }));
+    const blob = { ...prev, emailHash: hashed, emailHint: session.email.split("@")[0].slice(0, 2) + "***" };
+    if (session.token) { blob.token = session.token; blob.savedAt = Date.now(); }
+    await storageApi.set("cc_active_session", JSON.stringify(blob));
   } catch (err) { console.warn("Failed to save session:", err?.message); }
+}
+
+// Persist (or clear, when token is falsy) just the bearer session token in the
+// active-session blob, preserving the email hash/hint. The token is short-
+// lived and server-revocable (7-day TTL, stored hashed in the backend
+// session_tokens table); keeping a copy locally lets a page reload reuse the
+// session instead of stranding the student until a silent re-auth. Same trust
+// tier as the already-locally-stored encrypted vault. NEVER persist the passphrase.
+async function persistSessionToken(token) {
+  try {
+    const blob = (await loadSession()) || {};
+    if (token) { blob.token = token; blob.savedAt = Date.now(); }
+    else { delete blob.token; delete blob.savedAt; }
+    await storageApi.set("cc_active_session", JSON.stringify(blob));
+  } catch (err) { console.warn("Failed to persist session token:", err?.message); }
 }
 
 async function clearSession() {
@@ -235,16 +253,16 @@ async function establishServerSession({ proxyUrl, email, grade, mode }) {
       // caller can route to login.
       const { ok, status, d } = await post("/students/register", regBody);
       if (d.existing === true || d.registered === false) return { existing: true };
-      if (ok && d.token) { window.__CC_SESSION_TOKEN__ = d.token; return { ok: true, token: d.token, studentId: d.studentId }; }
+      if (ok && d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); return { ok: true, token: d.token, studentId: d.studentId }; }
       return { ok: false, reason: d.error || `server returned ${status}` };
     }
 
     // Login / generic: authenticate, falling back to register so a returning
     // user whose server account is missing (fresh/restored backend) is healed.
     let res = await post("/students/auth", { email, emailHash: emailH, isMinor: false });
-    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
+    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; await persistSessionToken(res.d.token); return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
     res = await post("/students/register", regBody);
-    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
+    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; await persistSessionToken(res.d.token); return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
     return { ok: false, reason: res.d.error || `server returned ${res.status}` };
   } catch (err) {
     return { ok: false, reason: err?.message || "network error" };
@@ -1329,8 +1347,17 @@ async function requestChat(payload, signal) {
   return r.json();
 }
 
+// Lightweight observability for the otherwise-silent token re-auth. The React
+// component registers a listener via setReauthListener; _tryReAuth reports
+// "attempting" / "ok" / "failed" so the UI can show a non-blocking toast (and
+// route to sign-in on terminal failure) instead of a confusing dead end.
+let _reauthListener = null;
+function setReauthListener(fn) { _reauthListener = fn; }
+function notifyReauth(status) { try { _reauthListener?.(status); } catch { /* ignore */ } }
+
 // Attempt to re-authenticate with the backend using saved session email
 async function _tryReAuth(proxyUrl) {
+  notifyReauth("attempting");
   try {
     // Recover the plaintext email for the active session. saveSession
     // stores only a hashed hint (never plaintext), so match that hash
@@ -1353,7 +1380,7 @@ async function _tryReAuth(proxyUrl) {
       const emails = Object.keys(accounts || {});
       if (emails.length === 1) email = emails[0];
     }
-    if (!email) return false;
+    if (!email) { notifyReauth("failed"); return false; }
 
     // Send PLAINTEXT email — the backend re-hashes with its own salt
     // (the frontend's hashEmail uses a different salt, so sending the
@@ -1364,7 +1391,7 @@ async function _tryReAuth(proxyUrl) {
       body: JSON.stringify({ email, isMinor: false })
     });
     let d = await r.json().catch(() => ({}));
-    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; console.info("[ReAuth] Session restored via auth"); return true; }
+    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); notifyReauth("ok"); console.info("[ReAuth] Session restored via auth"); return true; }
 
     // Fallback: register (idempotent — backend returns existing if found).
     const acct = accounts[email] || {};
@@ -1373,10 +1400,12 @@ async function _tryReAuth(proxyUrl) {
       body: JSON.stringify({ email, grade: acct.grade, schoolDomain: getEmailDomain(email), isMinor: false })
     });
     d = await r.json().catch(() => ({}));
-    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; console.info("[ReAuth] Session restored via register"); return true; }
+    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); notifyReauth("ok"); console.info("[ReAuth] Session restored via register"); return true; }
+    notifyReauth("failed");
     return false;
   } catch (err) {
     console.warn("[ReAuth] Failed:", err?.message);
+    notifyReauth("failed");
     return false;
   }
 }
@@ -3097,7 +3126,7 @@ export default function App() {
             });
             d = await r.json().catch(() => ({}));
           }
-          if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; return d.token; }
+          if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); return d.token; }
         } catch (reauthErr) {
           console.warn("[BYOK] Re-auth failed:", reauthErr?.message);
         }
@@ -3159,9 +3188,9 @@ export default function App() {
       }
       // Dev-mode: if the backend promoted this BYOK to the operator key,
       // log so the dev knows operator-side paths (orchestrate proxy, the
-      // daily Claude-target refresh) are now using their key too.
+      // daily OpenRouter model-catalog refresh) are now using their key too.
       if (body.promotedToOperatorKey) {
-        console.info("[BYOK] Key promoted to operator slot (NODE_ENV=development). The operator's previously-set ANTHROPIC_API_KEY has been overridden in memory until the backend restarts.");
+        console.info("[BYOK] Key promoted to operator slot (NODE_ENV=development). The operator's previously-set provider API key has been overridden in memory until the backend restarts.");
       }
       // Refresh and continue
       await refreshApiKeyState();
@@ -3502,12 +3531,31 @@ export default function App() {
   }, []);
   const clearChatFiles = useCallback(() => setChatFiles([]), []);
 
+  // Observable session health: re-auth + background-sync status for non-blocking toasts.
+  const [reauthStatus, setReauthStatus] = useState("idle"); // idle | attempting | ok | failed
+  const [syncStatus, setSyncStatus] = useState("idle");     // idle | ok | failed
+
+  // Register the module-level re-auth notifier so the silent token-recovery
+  // path becomes visible to the student instead of a confusing dead end.
+  useEffect(() => {
+    setReauthListener((status) => {
+      setReauthStatus(status);
+      if (status === "ok") setTimeout(() => setReauthStatus("idle"), 2500);
+    });
+    return () => setReauthListener(null);
+  }, []);
+
   // ─── AUTO-LOGIN: check for saved session on mount ───
   useEffect(() => {
     (async () => {
       const accts = await loadAccounts();
       setAccounts(accts);
       const session = await loadSession();
+      // Rehydrate the bearer token from storage so a page reload doesn't start
+      // with an empty window.__CC_SESSION_TOKEN__. It's validated lazily on the
+      // first authed call (authedFetch heals a stale token via _tryReAuth); the
+      // user still re-enters their passphrase below to unlock the local vault.
+      if (session?.token) window.__CC_SESSION_TOKEN__ = session.token;
       if (session?.emailHash) {
         // Match hashed email against known accounts
         for (const email of Object.keys(accts)) {
@@ -3550,7 +3598,9 @@ export default function App() {
               trigger: "auto_sync"
             })
           });
-        } catch (err) { console.warn("RAG sync failed (non-blocking):", err?.message); }
+          setSyncStatus("ok");
+          setTimeout(() => setSyncStatus((s) => (s === "ok" ? "idle" : s)), 2000);
+        } catch (err) { console.warn("RAG sync failed (non-blocking):", err?.message); setSyncStatus("failed"); }
       }
     }, 1000);
     return () => clearTimeout(t);
@@ -3879,7 +3929,7 @@ export default function App() {
   }, []);
 
   // ─── COMPLETE SURVEY → build profile → go to chat ───
-  const handleSurveyComplete = useCallback(() => {
+  const handleSurveyComplete = useCallback(async () => {
     // Flatten per-year courses into one array with year tags
     const allCourses = [];
     for (const [year, courses] of Object.entries(sCourses)) {
@@ -3914,6 +3964,36 @@ export default function App() {
     else if (sNoTestsYet) sum.push("Test scores: not taken yet");
     if (activities.length) sum.push(`${activities.length} activities`);
 
+    // ── Link onboarding to the AI counselor ──
+    // Persist the profile to the backend FIRST (blocking) so the counselor
+    // actually has the student's data, and confirm the AI session is ready,
+    // BEFORE entering chat. A failed sync keeps the student on the survey with
+    // a retry message instead of dropping them into a chat the backend knows
+    // nothing about. (Skipped entirely in offline/local-only mode.)
+    const proxyUrl = window.__CC_PROXY_URL__;
+    if (proxyUrl) {
+      try {
+        await authedFetch("/api/students/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile, activities, goals: sGoals, majorInterest: sMajorInterest, trigger: "survey_complete" }),
+        });
+      } catch {
+        setSurveyError("Couldn't save your profile to your counselor — check your connection and try again.");
+        return; // stay on the survey; do NOT enter a chat the backend can't back
+      }
+      // Confirm the AI session is actually usable (BYOK key on file). If not,
+      // route to the API-key step first and come back to chat afterwards.
+      try {
+        const { status } = await refreshApiKeyState();
+        if (status && status.hasPersonalKey === false) {
+          setPendingAfterApiKey(S.CHAT);
+          setScreen(S.APIKEY);
+          return;
+        }
+      } catch { /* non-fatal — proceed to chat */ }
+    }
+
     // FIX P2: Only reset messages on FIRST setup. If editing from chat, append an update
     // summary instead of wiping the entire conversation history.
     const isEditFromChat = messages.length > 1; // If there's an existing conversation, this is an edit
@@ -3921,7 +4001,7 @@ export default function App() {
       role: "assistant",
       content: isEditFromChat
         ? `Profile updated! Here's what changed:\n\n${sum.length ? sum.join("\n") : "No changes detected."}\n${sMajorInterest ? `\nInterested in: ${sMajorInterest}` : ""}${sGoals.length ? `\nGoals: ${sGoals.join(", ")}` : ""}\n\nWhat would you like to work on next?`
-        : `Your profile is set up! Here's what I have:\n\n${sum.length ? sum.join("\n") : "No data entered yet — that's okay, we can add things as we go."}\n${sMajorInterest ? `\nInterested in: ${sMajorInterest}` : ""}${sGoals.length ? `\nGoals: ${sGoals.join(", ")}` : ""}\n\nBefore we dive in — tell me a bit about yourself. What drives you? What's a challenge you've worked through, or something you're genuinely proud of? This helps me understand you beyond the numbers.\n\nYou can also upload report cards or score reports with 📎.`
+        : `✓ Connected to your AI counselor — your profile is saved and synced.\n\nHere's what I have:\n\n${sum.length ? sum.join("\n") : "No data entered yet — that's okay, we can add things as we go."}\n${sMajorInterest ? `\nInterested in: ${sMajorInterest}` : ""}${sGoals.length ? `\nGoals: ${sGoals.join(", ")}` : ""}\n\nBefore we dive in — tell me a bit about yourself. What drives you? What's a challenge you've worked through, or something you're genuinely proud of? This helps me understand you beyond the numbers.\n\nYou can also upload report cards or score reports with 📎.`
     };
 
     if (isEditFromChat) {
@@ -3941,7 +4021,7 @@ export default function App() {
     }
 
     setScreen(S.CHAT);
-  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, sParentEmail, sParentNotify, user, accounts, messages]);
+  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, sParentEmail, sParentNotify, user, accounts, messages, authedFetch, refreshApiKeyState]);
 
   // ─── SEND MESSAGE ───
   const send = useCallback(async () => {
@@ -4991,6 +5071,20 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   return (
     <div style={{ display:"flex",height:"100vh",fontFamily:FONT,background:BG,color:"#e8e6e3" }}>
+      {/* Non-blocking session-health toast (re-auth / background-sync status) */}
+      {(reauthStatus === "attempting" || reauthStatus === "failed" || syncStatus === "failed") && (
+        <div style={{
+          position:"fixed", top:12, left:"50%", transform:"translateX(-50%)", zIndex:9999,
+          padding:"8px 14px", borderRadius:10, fontSize:12, fontWeight:600, boxShadow:"0 4px 16px rgba(0,0,0,0.3)",
+          background: reauthStatus==="failed" ? "rgba(245,101,101,0.15)" : syncStatus==="failed" ? "rgba(246,173,85,0.15)" : "rgba(99,179,237,0.15)",
+          border:`1px solid ${reauthStatus==="failed" ? "rgba(245,101,101,0.4)" : syncStatus==="failed" ? "rgba(246,173,85,0.4)" : "rgba(99,179,237,0.4)"}`,
+          color: reauthStatus==="failed" ? "#fc8181" : syncStatus==="failed" ? "#f6ad55" : "#63b3ed",
+        }}>
+          {reauthStatus === "attempting" ? "Reconnecting to your counselor…"
+            : reauthStatus === "failed" ? "Session expired — sign out and sign in again."
+            : "Last change didn't sync — will retry."}
+        </div>
+      )}
       {/* Sidebar */}
       <div className={`cc-sidebar-overlay ${sidebarOpen ? "is-open" : "is-closed"}`} style={{ width:sidebarOpen?280:0,overflow:"hidden",transition:"width 0.25s ease",borderRight:sidebarOpen?"1px solid rgba(255,255,255,0.05)":"none",background:"rgba(255,255,255,0.015)",flexShrink:0 }}>
         <div style={{ padding:18,overflowY:"auto",height:"100%",width:280,boxSizing:"border-box" }}>
@@ -5171,6 +5265,17 @@ export default function App() {
             >
               API key
             </button>
+            {/* Transparency: weights, thresholds, and live "data as of"
+                freshness (models + college data). Opens the methodology page. */}
+            <a
+              href="/methodology.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="See the weights, data sources, and how fresh each source is"
+              style={{padding:"7px 10px",borderRadius:8,border:"1px solid rgba(167,139,250,0.20)",background:"rgba(167,139,250,0.08)",color:"#a78bfa",fontSize:11,cursor:"pointer",textDecoration:"none"}}
+            >
+              How scoring works
+            </a>
           </div>
           {editingField === "gpa" ? (
             <div style={{ background:"rgba(55,138,221,0.08)",borderRadius:10,padding:12,marginBottom:12,border:"1px solid rgba(55,138,221,0.3)" }}>

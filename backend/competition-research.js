@@ -11,11 +11,13 @@
 //      activity_id + level match a benchmarked row, we short-circuit with
 //      the seeded prestige_score; no web search fires.
 //   3. Official competition catalog (organizer / primary-source pages).
-//   4. Anthropic web_search_20250305 tool bounded to official organizer,
-//      .edu host, and government pages only.
+//   4. OpenRouter web-plugin research, bounded to an allowlist of official
+//      organizer, .edu host, and government pages (the plugin injects the
+//      retrieved pages into the model's context before it answers).
 //
-// Non-Anthropic providers can't run web_search; prestige silently defaults
-// to 0 with source:"unavailable" so tier labels still compute.
+// Web research only fires when the student's BYOK provider is OpenRouter.
+// Otherwise prestige silently defaults to 0 with source:"unavailable" so tier
+// labels still compute from the deterministic catalog/benchmark paths.
 // ═══════════════════════════════════════════════════════════════════════
 
 import crypto from "node:crypto";
@@ -277,9 +279,10 @@ const EXTRA_OFFICIAL_DOMAINS = [
   "artandwriting.org",
 ];
 
-// Reputable-source allowlist enforced at the Anthropic web_search tool
-// boundary. Only official organizers, official competition infrastructure,
-// government pages, and official school-hosted competition pages belong here.
+// Reputable-source allowlist passed to OpenRouter's web plugin as the
+// search-domain restriction. Only official organizers, official competition
+// infrastructure, government pages, and official school-hosted competition
+// pages belong here.
 export const REPUTABLE_DOMAINS = Object.freeze(
   [...new Set([
     ...EXTRA_OFFICIAL_DOMAINS,
@@ -456,9 +459,10 @@ function isExpired(createdAt, ttlDays = PRESTIGE_TTL_DAYS) {
 }
 
 /**
- * Extract a tool-use / text response into the expected {score, rationale,
- * sourcesCited} JSON payload. Walks the Anthropic content array (which may
- * contain server_tool_use / web_search_tool_result / text blocks).
+ * Extract the model response into the expected {score, rationale,
+ * sourcesCited} JSON payload. Walks the adapter's normalized content array
+ * for text blocks (the OpenRouter web plugin injects its search results into
+ * the prompt, so the answer comes back as ordinary text, not tool-use blocks).
  */
 function extractJsonFromResponse(resp) {
   if (!resp || !Array.isArray(resp.content)) return null;
@@ -520,8 +524,9 @@ function round2(n) {
  * @param {object} params.stmts          — RAG stmts (needs getPrestigeCache
  *   + upsertPrestigeCache).
  * @param {object} [params.adapter]      — {provider, apiKey, baseUrl, model}
- *   resolved by caller (typically buildDefaultLLMClient). If provider is not
- *   "anthropic", the research path short-circuits to "unavailable".
+ *   resolved by caller (typically buildDefaultLLMClient). Web research uses
+ *   OpenRouter's web plugin, so if provider is not "openrouter" (or no key),
+ *   the research path short-circuits to "unavailable".
  * @param {object} [params.options]      — { fetchImpl, timeoutMs, now }
  * @returns {Promise<{score:number, source:string, rationale?:string,
  *   sourcesCited?:string[], provider?:string, model?:string, cached:boolean}>}
@@ -631,22 +636,19 @@ export async function researchCompetitionPrestige({
     return result;
   }
 
-  // 4. Web-enriched research. This previously used Anthropic's native
-  // web_search tool, which has been removed. Until it is re-plumbed onto
-  // OpenRouter's web plugin (tracked follow-up), this path is disabled and
-  // returns "unavailable" — the deterministic official-catalog and benchmark
-  // paths above still provide prestige signals. (Code below is retained for
-  // the eventual re-plumb but is currently unreachable.)
-  return {
-    score: 0,
-    source: "unavailable",
-    rationale: "Web-based prestige research is temporarily unavailable.",
-    sourcesCited: [],
-    cached: false,
-  };
-  // eslint-disable-next-line no-unreachable
-  if (!adapter || !adapter.apiKey) {
-    return { score: 0, source: "unavailable", rationale: "No research adapter.", sourcesCited: [], cached: false };
+  // 4. Web-enriched research via OpenRouter's web plugin. It only fires when
+  // the student's BYOK provider is OpenRouter — the plugin retrieves pages
+  // from the allowlisted official/.edu/.gov sources and injects them into the
+  // model's context before it answers. Any other provider / no key →
+  // deterministic signals only, so prestige is reported "unavailable".
+  if (!adapter || adapter.provider !== "openrouter" || !adapter.apiKey) {
+    return {
+      score: 0,
+      source: "unavailable",
+      rationale: "Web prestige research needs an OpenRouter API key; deterministic signals only.",
+      sourcesCited: [],
+      cached: false,
+    };
   }
 
   const timeoutMs = Number(options.timeoutMs || DEFAULT_TIMEOUT_MS);
@@ -655,7 +657,7 @@ export async function researchCompetitionPrestige({
 
   const userText = [
     `Research the competitive prestige of "${activityName}"${levelHint ? ` at the ${levelHint} level` : ""} for U.S. college admissions.`,
-    "Use web_search to consult official organizer, government, or official school-hosted sources only. Then output only:",
+    "Relevant pages from official organizer, government, and school-hosted sources have been retrieved into your context. Cite ONLY those URLs. Then output only:",
     '{ "score": 0.0-1.0, "rationale": "...", "sourcesCited": ["https://...", "..."] }',
   ].join("\n");
 
@@ -670,24 +672,19 @@ export async function researchCompetitionPrestige({
       messages: [{ role: "user", content: userText }],
       maxTokens: MAX_TOKENS,
       temperature: 0,
-      tools: [
-        {
-          type: "web_search_20250305",
-          name: "web_search",
-          max_uses: 3,
-          allowed_domains: REPUTABLE_DOMAINS,
-        },
-      ],
+      webPlugin: { enabled: true, allowedDomains: REPUTABLE_DOMAINS },
       signal: controller.signal,
       fetchImpl: options.fetchImpl,
     });
+    // Optional budget accounting — the resolved adapter may carry a usage sink.
+    adapter.recordUsage?.(adapter.model, response?.usage);
   } catch (err) {
     clearTimeout(timer);
     const failScore = 0;
     const failResult = {
       score: failScore,
       source: "research_failed",
-      rationale: `web_search failed: ${err?.code || err?.message || "unknown"}`,
+      rationale: `web research failed: ${err?.code || err?.message || "unknown"}`,
       sourcesCited: [],
       provider: adapter.provider,
       model: adapter.model,

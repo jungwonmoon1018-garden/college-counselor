@@ -28,27 +28,19 @@ export const TIER_DEFAULTS = Object.freeze({
     medium: "gemini-2.5-pro",
     large: "gemini-2.5-pro",
   }),
-  // OpenRouter — recommended provider for new accounts.
-  // All three tiers default to GLM-5.1. Free-model availability on
-  // OpenRouter is unstable (providers rotate their free quotas
-  // weekly — `:free` model IDs we pick today may 404 tomorrow).
-  // Pointing every tier at a single paid model the user explicitly
-  // confirmed (GLM-5.1) means chat works the moment they save the
-  // BYOK. Students who want to save cost on routing/synthesis can
-  // pick currently-live free models from the dropdown — see the
-  // up-to-date list at https://openrouter.ai/models?max_price=0
-  // Cost-conscious defaults for students:
-  //   small  — Gemma 4 26B A4B (MoE w/ ~4B active params, $0.06/MTok
-  //            input — fast & cheap for routing/classification).
-  //   medium — Gemma 4 31B-it ($0.12/MTok input — synthesis & coaching).
-  //   large  — DeepSeek V4 Pro ($0.435/MTok input, $0.87/MTok output —
-  //            frontier reasoning at ~5× lower cost than Anthropic/OpenAI
-  //            flagships). Only fires when medium reports low confidence,
-  //            so per-session large spend stays bounded. Falls back to
-  //            medium tier if V4 Pro is unavailable (tier-walk chain).
-  // Combined with prompt caching (cache_control: ephemeral on system +
-  // chat history), repeat-turn cost stays in the sub-cent range even
-  // for long conversations.
+  // OpenRouter — the default/primary provider for new accounts.
+  // These are the STATIC SEED + last-resort fallback. At runtime the
+  // recommended tier models are validated against (and, when retired,
+  // replaced from) OpenRouter's LIVE /models catalog — see
+  // OPENROUTER_TARGETS + resolveOpenRouterTier() in
+  // openrouter-model-refresh.js. So callers should resolve through that,
+  // not read these directly, to guarantee a currently-served id.
+  // Cost-conscious student defaults (all verified present in the live
+  // catalog at time of writing):
+  //   small  — Gemma 4 26B A4B (MoE, ~4B active params; fast/cheap routing).
+  //   medium — Gemma 4 31B-it (synthesis & coaching).
+  //   large  — DeepSeek V4 Pro (frontier reasoning at low cost); only fires
+  //            when medium reports low confidence, so large spend stays bounded.
   openrouter: Object.freeze({
     small:  "google/gemma-4-26b-a4b-it",
     medium: "google/gemma-4-31b-it",
@@ -108,12 +100,12 @@ export const PROVIDER_META = Object.freeze([
     // when the live catalog can't be reached. `:free` models are zero
     // per-token cost (rate-limited); listed first for cost-conscious
     // students. Free availability rotates, so the live list is preferred.
+    // Static FALLBACK only (the live catalog drives the real dropdown).
+    // Every id below was verified present in OpenRouter's live /models
+    // catalog; prune here if any 404s rather than letting stale ids linger.
     knownModels: [
-      // ── Free tier (zero per-token cost) ──
+      // ── Free tier (zero per-token cost; rotates — live list preferred) ──
       "meta-llama/llama-3.3-70b-instruct:free",
-      "qwen/qwen-2.5-72b-instruct:free",
-      "deepseek/deepseek-r1:free",
-      "z-ai/glm-4.5-air:free",
       // ── Cheap & student-friendly (Gemma 4 family) ──
       "google/gemma-4-26b-a4b-it",
       "google/gemma-4-31b-it",
@@ -127,7 +119,6 @@ export const PROVIDER_META = Object.freeze([
       "openai/gpt-4o",
       "openai/gpt-4o-mini",
       "google/gemini-2.5-pro",
-      "google/gemini-2.0-flash",
       "deepseek/deepseek-chat",
       "meta-llama/llama-3.3-70b-instruct",
       "qwen/qwen-2.5-72b-instruct",

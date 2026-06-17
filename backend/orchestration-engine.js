@@ -49,15 +49,17 @@ const COLLEGE_ALIASES = {
 };
 
 // ─── Model configuration ───
-// These are the DEFAULT model ids when the operator runs the server with
-// only ANTHROPIC_API_KEY and no per-student BYOK overrides. Each tier's
-// actual model id is resolved at call time via llm-adapters/tier-defaults
-// so that OpenAI / Google / OpenRouter / Ollama users don't have to touch
-// this registry.
+// Last-resort DEFAULT model ids, used only when neither a per-student BYOK
+// override nor an env override is present. Sourced from the OpenRouter tier
+// table (the default provider after the OpenRouter-only migration) so this
+// registry stays a single source of truth with llm-adapters/tier-defaults and
+// never ships a hard-coded model id that the live catalog no longer serves.
+// The MODEL_TIERS.{HAIKU,SONNET,OPUS} keys are legacy tier *labels* (= small/
+// medium/large), not provider model ids — see policy-router.js.
 const DEFAULT_MODELS = {
-  [MODEL_TIERS.HAIKU]: "claude-haiku-4-5-20251001",
-  [MODEL_TIERS.SONNET]: "claude-sonnet-4-20250514",
-  [MODEL_TIERS.OPUS]: "claude-opus-4-6",
+  [MODEL_TIERS.HAIKU]:  TIER_DEFAULTS.openrouter.small,
+  [MODEL_TIERS.SONNET]: TIER_DEFAULTS.openrouter.medium,
+  [MODEL_TIERS.OPUS]:   TIER_DEFAULTS.openrouter.large,
 };
 
 // ─── Load grounding corpora ───
@@ -301,10 +303,12 @@ function resolveCollegeReferences(query) {
 // ─── Resolve model configuration from env ───
 // Optionally accepts a `provider` arg so callers from the generalized
 // /api/llm path can get provider-appropriate defaults (gpt-4o-mini for
-// OpenAI, gemini-2.0-flash for Google, etc.). When no provider is supplied
-// we fall back to the legacy Anthropic behavior.
-function resolveModelConfig(config, provider = "anthropic") {
-  const tiers = TIER_DEFAULTS[provider] || TIER_DEFAULTS.anthropic;
+// OpenAI, gemini-2.0-flash for Google, etc.). The default provider is
+// OpenRouter after the OpenRouter-only migration — an unknown provider also
+// falls back to the OpenRouter tier table rather than a now-removed Anthropic
+// one (which previously left `tiers` undefined and threw on `tiers.small`).
+function resolveModelConfig(config, provider = "openrouter") {
+  const tiers = TIER_DEFAULTS[provider] || TIER_DEFAULTS.openrouter;
   const smallEnv  = config.LLM_SMALL_MODEL  || config.ROUTER_MODEL;
   const mediumEnv = config.LLM_MEDIUM_MODEL || config.STRATEGIST_MODEL;
   const largeEnv  = config.LLM_LARGE_MODEL;
@@ -312,7 +316,10 @@ function resolveModelConfig(config, provider = "anthropic") {
     [MODEL_TIERS.HAIKU]:  smallEnv  || tiers.small  || DEFAULT_MODELS[MODEL_TIERS.HAIKU],
     [MODEL_TIERS.SONNET]: mediumEnv || tiers.medium || DEFAULT_MODELS[MODEL_TIERS.SONNET],
     [MODEL_TIERS.OPUS]:   largeEnv  || tiers.large  || DEFAULT_MODELS[MODEL_TIERS.OPUS],
-    fafsaCaching: provider === "anthropic",
+    // Anthropic prompt-caching (cache_control) was removed with the migration;
+    // no current provider in this path uses it, so FAFSA prompts are never
+    // flagged cache-eligible here.
+    fafsaCaching: false,
   };
 }
 

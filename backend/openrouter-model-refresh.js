@@ -32,9 +32,9 @@ export const OPENROUTER_TARGETS = {
 // default is retired. The refresh picks the first id that is actually live.
 // Free/low-cost first so new users aren't surprised by spend.
 const TIER_FALLBACKS = {
-  small: ["google/gemma-4-26b-a4b-it", "google/gemma-2-9b-it:free", "meta-llama/llama-3.2-3b-instruct:free", "qwen/qwen-2.5-7b-instruct"],
+  small: ["google/gemma-4-26b-a4b-it", "meta-llama/llama-3.3-70b-instruct:free", "openai/gpt-4o-mini"],
   medium: ["google/gemma-4-31b-it", "meta-llama/llama-3.3-70b-instruct", "qwen/qwen-2.5-72b-instruct", "deepseek/deepseek-chat"],
-  large: ["deepseek/deepseek-v4-pro", "deepseek/deepseek-r1", "deepseek/deepseek-chat", "anthropic/claude-sonnet-4"],
+  large: ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash", "z-ai/glm-5.1", "deepseek/deepseek-chat"],
 };
 
 export const OPENROUTER_STATUS = {
@@ -44,6 +44,22 @@ export const OPENROUTER_STATUS = {
   proposals: [],          // [{ tier, from, to, reason }] — for human approval
   note: "Recommended OpenRouter models are proposed, never auto-applied. Approve changes in your API-key settings.",
 };
+
+// Resolve a recommended OpenRouter model id for a tier, GUARANTEEING (when the
+// live catalog is loaded) that the returned id is currently served. Callers
+// that need a default OpenRouter model should use this rather than reading the
+// static TIER_DEFAULTS, so a retired id never leaks through. Order:
+//   1. the live-refreshed recommended target, if present in the catalog;
+//   2. the first TIER_FALLBACKS[tier] id present in the catalog;
+//   3. the static seed/target, when the catalog is empty/unreachable.
+export function resolveOpenRouterTier(tier) {
+  const seed = OPENROUTER_TARGETS[tier] || TIER_DEFAULTS.openrouter?.[tier] || null;
+  const byId = OPENROUTER_CATALOG.byId;
+  if (!byId || byId.size === 0) return seed;        // catalog not loaded → trust the seed
+  if (seed && byId.has(seed)) return seed;
+  const fallback = (TIER_FALLBACKS[tier] || []).find((id) => byId.has(id));
+  return fallback || seed;
+}
 
 // ─── Live model catalog cache ────────────────────────────────────────────
 // Populated from OpenRouter's /api/v1/models. Drives two things:

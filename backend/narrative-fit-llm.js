@@ -14,6 +14,14 @@
 
 import crypto from "node:crypto";
 import { callLLM, detectProvider, resolveTierDefault } from "./llm-adapters/index.js";
+import { resolveOpenRouterTier } from "./openrouter-model-refresh.js";
+
+// Provider-aware "small" model resolver. For OpenRouter we resolve against the
+// LIVE catalog (resolveOpenRouterTier) so a retired default never leaks; other
+// providers use their static tier default.
+function smallModelFor(provider) {
+  return provider === "openrouter" ? resolveOpenRouterTier("small") : resolveTierDefault(provider, "small");
+}
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TOKENS = 80;
@@ -85,7 +93,7 @@ export function hashText(text) {
 function resolveAdapterConfig(options = {}) {
   // 1. Full explicit config.
   if (options.provider && options.apiKey) {
-    const model = options.model || resolveTierDefault(options.provider, "small") || null;
+    const model = options.model || smallModelFor(options.provider) || null;
     return { provider: options.provider, apiKey: options.apiKey, baseUrl: options.baseUrl || null, model };
   }
 
@@ -93,7 +101,7 @@ function resolveAdapterConfig(options = {}) {
   if (options.apiKey) {
     const provider = options.provider || detectProvider({ apiKey: options.apiKey, baseUrl: options.baseUrl });
     if (provider) {
-      const model = options.model || resolveTierDefault(provider, "small");
+      const model = options.model || smallModelFor(provider);
       return { provider, apiKey: options.apiKey, baseUrl: options.baseUrl || null, model };
     }
   }
@@ -105,7 +113,7 @@ function resolveAdapterConfig(options = {}) {
       if (byok && byok.apiKey) {
         const provider = byok.provider || detectProvider({ apiKey: byok.apiKey, baseUrl: byok.baseUrl });
         if (provider) {
-          const model = byok.model || resolveTierDefault(provider, "small");
+          const model = byok.model || smallModelFor(provider);
           return { provider, apiKey: byok.apiKey, baseUrl: byok.baseUrl || null, model };
         }
       }
@@ -120,7 +128,7 @@ function resolveAdapterConfig(options = {}) {
       provider: "openrouter",
       apiKey: process.env.OPENROUTER_API_KEY,
       baseUrl: "https://openrouter.ai/api/v1",
-      model: process.env.LLM_SMALL_MODEL || resolveTierDefault("openrouter", "small"),
+      model: process.env.LLM_SMALL_MODEL || resolveOpenRouterTier("small"),
     };
   }
   if (process.env.OPENAI_API_KEY) {

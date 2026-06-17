@@ -18,7 +18,6 @@ import { fileURLToPath } from "node:url";
 
 import { persistAndValidate, loadValidatedRecord, loadAllValidatedRecords, loadLatestValidation } from "./cds-validator.js";
 import { normalizeSchoolName } from "./cds-search.js";
-import { makeWebSearchTool, makeWebFetchTool } from "./credible-sources.js";
 
 // Defensive JSON extraction from an LLM text response (strip ```json fences,
 // else grab the first {...}/[...] block). Local copy so this module has no
@@ -181,7 +180,6 @@ const C7_WEB_LABELS = new Set(["very_important", "important", "considered", "not
 export async function extractCdsViaWeb({ callLLM, byok, schoolName }) {
   if (!callLLM || !byok || !schoolName) return null;
   const extraDomains = [];
-  const tools = [makeWebSearchTool(extraDomains), makeWebFetchTool(extraDomains)];
   const prompt = `Find and READ the official Common Data Set (CDS) for "${schoolName}" — the most recent year available. Search the school's own institutional-research / CDS page and read the actual document.
 
 Extract ONLY values you can verify from the real CDS (use null for anything you cannot confirm — do NOT guess or use marketing pages):
@@ -207,7 +205,6 @@ Return ONLY a JSON object, no prose:
     max_tokens: 8192,
     system: "You are a meticulous data extractor. Read the school's ACTUAL Common Data Set from official sources and report only verified numbers. Never fabricate. Output ONLY the requested JSON object.",
     messages: [{ role: "user", content: prompt }],
-    tools,
     wantsWeb: true,
     extraDomains,
   });
@@ -261,7 +258,6 @@ export function parseWebCdsRecord(text, schoolName) {
 export async function extractAdmitRateViaWeb({ callLLM, byok, schoolName }) {
   if (!callLLM || !byok || !schoolName) return null;
   const extraDomains = [];
-  const tools = [makeWebSearchTool(extraDomains), makeWebFetchTool(extraDomains)];
   const prompt = `What is the most recent OVERALL undergraduate admission (acceptance) rate for "${schoolName}"? Use the latest completed admissions cycle / entering class. Prefer the school's own newsroom, admissions, or institutional-research pages, or a reputable source citing them.
 
 Return ONLY a JSON object, no prose. Use null if you genuinely cannot verify it — do NOT guess:
@@ -275,7 +271,6 @@ Return ONLY a JSON object, no prose. Use null if you genuinely cannot verify it 
     max_tokens: 1500,
     system: "You report a single verified statistic from authoritative sources. Never fabricate a number. Output ONLY the requested JSON object.",
     messages: [{ role: "user", content: prompt }],
-    tools,
     wantsWeb: true,
     extraDomains,
   });

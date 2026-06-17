@@ -90,7 +90,7 @@ export default function MethodologyPanel() {
               <div style={h2}>Data sources &amp; freshness</div>
               {Object.entries(m.dataSources).filter(([, v]) => v && typeof v === "object").map(([k, v]) => (
                 <div key={k} style={{ fontSize: 13, color: C.sub, lineHeight: 1.7 }}>
-                  <strong style={{ color: C.text }}>{k}</strong>: {v.source}{v.freshness ? ` — ${v.freshness}` : ""}{v.refresh ? ` — ${v.refresh}` : ""}{v.year ? ` (${v.year})` : ""}{v.latestCycleIngested ? ` — latest cycle: ${v.latestCycleIngested}` : ""}
+                  <strong style={{ color: C.text }}>{k}</strong>: {v.source}{v.freshness ? ` — ${v.freshness}` : ""}{v.refresh ? ` — ${v.refresh}` : ""}{v.year ? ` (${v.year})` : ""}{v.latestCycleIngested ? ` — latest cycle: ${v.latestCycleIngested}` : ""}{v.lastRefreshed ? ` — last auto-refresh ${new Date(v.lastRefreshed).toLocaleDateString()}` : ""}
                 </div>
               ))}
               <div style={{ color: C.orange, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>{m.dataSources.internationalCaveat}</div>
@@ -98,25 +98,21 @@ export default function MethodologyPanel() {
 
             {/* Model transparency */}
             <div style={box}>
-              <div style={h2}>Model transparency &amp; migration</div>
+              <div style={h2}>Model transparency &amp; freshness</div>
               <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.6, marginBottom: 8 }}>{m.modelTransparency.whyItMatters}</div>
               <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.7 }}>
-                <strong style={{ color: C.text }}>Anthropic</strong>: {m.modelTransparency.anthropic.policy}
-                {m.modelTransparency.anthropic.currentTargets && (
+                <strong style={{ color: C.text }}>Provider</strong>: {m.modelTransparency.provider?.policy}
+                {m.modelTransparency.provider?.catalog && (
                   <div style={{ color: C.muted, fontSize: 12 }}>
-                    Current: {Object.entries(m.modelTransparency.anthropic.currentTargets).map(([k, v]) => `${k}=${v}`).join(", ")}
-                    {m.modelTransparency.anthropic.lastRefresh ? ` · refreshed ${new Date(m.modelTransparency.anthropic.lastRefresh).toLocaleString()}` : ""}
+                    OpenRouter live catalog: {m.modelTransparency.provider.catalog.reachable
+                      ? `${m.modelTransparency.provider.catalog.count} models`
+                      : "unreachable (using fallback list)"}
+                    {m.modelTransparency.provider.catalog.lastFetched ? ` · fetched ${new Date(m.modelTransparency.provider.catalog.lastFetched).toLocaleString()}` : ""}
                   </div>
                 )}
-              </div>
-              <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.7, marginTop: 8 }}>
-                <strong style={{ color: C.text }}>OpenRouter &amp; other BYOK providers</strong>: {m.modelTransparency.otherProviders.policy}
-                {m.modelTransparency.otherProviders.status?.openrouter && (
-                  <div style={{ color: C.muted, fontSize: 12 }}>
-                    OpenRouter: {m.modelTransparency.otherProviders.status.openrouter.reachable ? `${m.modelTransparency.otherProviders.status.openrouter.availableCount} models available` : "unreachable"}
-                    {Array.isArray(m.modelTransparency.otherProviders.status.openrouter.proposals) && m.modelTransparency.otherProviders.status.openrouter.proposals.length > 0
-                      ? ` · ${m.modelTransparency.otherProviders.status.openrouter.proposals.length} update(s) awaiting your approval`
-                      : " · no pending changes"}
+                {m.modelTransparency.provider?.status?.openrouter && Array.isArray(m.modelTransparency.provider.status.openrouter.proposals) && m.modelTransparency.provider.status.openrouter.proposals.length > 0 && (
+                  <div style={{ color: C.orange, fontSize: 12 }}>
+                    {m.modelTransparency.provider.status.openrouter.proposals.length} recommended-model update(s) awaiting your approval
                   </div>
                 )}
               </div>

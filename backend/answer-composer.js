@@ -17,6 +17,15 @@
 import crypto from "node:crypto";
 import { TOPIC_TYPES } from "./policy-router.js";
 
+// Map internal tier labels (legacy haiku/sonnet/opus + the small/medium/large
+// aliases) to provider-neutral words for the user-facing AI disclosure. The
+// actual model id is the student's own BYOK choice, so the disclosure names a
+// reasoning tier, not a vendor model.
+const TIER_DISCLOSURE_LABELS = {
+  haiku: "small", sonnet: "medium", opus: "large",
+  small: "small", medium: "medium", large: "large",
+};
+
 // ─── Build AI disclosure block ───
 function buildAIDisclosure(modelUsed, locale = "en-US") {
   const disclosures = {
@@ -38,7 +47,7 @@ function buildAIDisclosure(modelUsed, locale = "en-US") {
     session_disclosure: strings.session,
     advisory_disclosure: strings.advisory,
     model_disclosure: modelUsed && modelUsed !== "none"
-      ? `Model: Claude ${modelUsed.charAt(0).toUpperCase() + modelUsed.slice(1)} via Anthropic API`
+      ? `AI reasoning tier: ${TIER_DISCLOSURE_LABELS[modelUsed] || modelUsed} — served through your own provider API key.`
       : "No AI model was used for this response.",
     generated_by: modelUsed && modelUsed !== "none" ? "ai" : "rules_engine",
   };

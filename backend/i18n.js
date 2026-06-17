@@ -149,7 +149,7 @@ export const STRINGS = {
     // ─── AI Disclosure ───
     "ai.disclosure.banner": "This service uses AI (artificial intelligence) to provide guidance. AI-generated content is clearly labeled.",
     "ai.disclosure.session": "This response was generated with AI assistance. Verified facts are sourced from official publications.",
-    "ai.disclosure.model": "AI Model: Claude via Anthropic API",
+    "ai.disclosure.model": "AI model: your own provider key (OpenRouter by default; OpenAI, Google, and others supported).",
     "ai.disclosure.advisory": "This tool provides informational guidance only. It is not a substitute for professional college counseling, financial advice, or official determinations.",
     "ai.disclosure.fafsa": "This is NOT an official FAFSA tool and does not replace StudentAid.gov.",
 
@@ -192,7 +192,7 @@ export const STRINGS = {
     "friendly.prestige.override.short": "Counselor set",
     "friendly.prestige.override.summary": "Your counselor set this score manually based on personal knowledge.",
     "friendly.prestige.unavailable.short": "Research unavailable",
-    "friendly.prestige.unavailable.summary": "Prestige lookup needs an Anthropic key \u2014 ask your counselor to enable it.",
+    "friendly.prestige.unavailable.summary": "Prestige lookup needs an OpenRouter key (it powers the web research) \u2014 ask your counselor to enable it.",
     "friendly.prestige.research_failed.short": "Needs your context",
     "friendly.prestige.research_failed.summary": "We couldn't find public sources for this one yet \u2014 a counselor can add detail.",
 
@@ -426,7 +426,7 @@ export const STRINGS = {
     // AI Disclosure (Korea AI Basic Act compliance)
     "ai.disclosure.banner": "\uc774 \uc11c\ube44\uc2a4\ub294 AI(\uc778\uacf5\uc9c0\ub2a5)\ub97c \uc0ac\uc6a9\ud558\uc5ec \uc548\ub0b4\ub97c \uc81c\uacf5\ud569\ub2c8\ub2e4. AI \uc0dd\uc131 \ucf58\ud150\uce20\ub294 \uba85\ud655\ud558\uac8c \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
     "ai.disclosure.session": "\uc774 \uc751\ub2f5\uc740 AI \uc9c0\uc6d0\uc73c\ub85c \uc0dd\uc131\ub418\uc5c8\uc2b5\ub2c8\ub2e4. \ud655\uc778\ub41c \uc0ac\uc2e4\uc740 \uacf5\uc2dd \ucd9c\ud310\ubb3c\uc5d0\uc11c \uac00\uc838\uc654\uc2b5\ub2c8\ub2e4.",
-    "ai.disclosure.model": "AI \ubaa8\ub378: Anthropic API\ub97c \ud1b5\ud55c Claude",
+    "ai.disclosure.model": "AI \ubaa8\ub378: \ud68c\uc6d0\ub2d8 \ubcf8\uc778\uc758 \uc81c\uacf5\uc5c5\uccb4 API \ud0a4 (\uae30\ubcf8\uac12 OpenRouter, OpenAI\u00b7Google \ub4f1 \uc9c0\uc6d0).",
     "ai.disclosure.advisory": "\uc774 \ub3c4\uad6c\ub294 \uc815\ubcf4 \uc548\ub0b4\ub9cc \uc81c\uacf5\ud569\ub2c8\ub2e4. \uc804\ubb38 \ub300\ud559 \uc0c1\ub2f4, \uc7ac\uc815 \uc870\uc5b8 \ub610\ub294 \uacf5\uc2dd \uacb0\uc815\uc744 \ub300\uccb4\ud558\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
     "ai.disclosure.fafsa": "\uc774\uac83\uc740 \uacf5\uc2dd FAFSA \ub3c4\uad6c\uac00 \uc544\ub2c8\uba70 StudentAid.gov\ub97c \ub300\uccb4\ud558\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
 
@@ -469,7 +469,7 @@ export const STRINGS = {
     "friendly.prestige.override.short": "\uc0c1\ub2f4 \uc120\uc0dd\ub2d8\uc774 \uc124\uc815",
     "friendly.prestige.override.summary": "\uc0c1\ub2f4 \uc120\uc0dd\ub2d8\uc774 \ubcf8\uc778\uc758 \uc804\ubb38 \uc9c0\uc2dd\uc73c\ub85c \uc810\uc218\ub97c \uc9c1\uc811 \uc124\uc815\ud558\uc168\uc5b4\uc694.",
     "friendly.prestige.unavailable.short": "\uc870\uc0ac \ubd88\uac00",
-    "friendly.prestige.unavailable.summary": "\uba85\uc131 \uc810\uc218 \uc870\uc0ac\uc5d0\ub294 Anthropic API \ud0a4\uac00 \ud544\uc694\ud569\ub2c8\ub2e4 \u2014 \uc0c1\ub2f4 \uc120\uc0dd\ub2d8\uaed8 \ud65c\uc131\ud654\ub97c \uc694\uccad\ud558\uc138\uc694.",
+    "friendly.prestige.unavailable.summary": "\uba85\uc131 \uc810\uc218 \uc870\uc0ac\uc5d0\ub294 OpenRouter API \ud0a4\uac00 \ud544\uc694\ud569\ub2c8\ub2e4 (\uc6f9 \uc870\uc0ac\ub97c \uc9c0\uc6d0) \u2014 \uc0c1\ub2f4 \uc120\uc0dd\ub2d8\uaed8 \ud65c\uc131\ud654\ub97c \uc694\uccad\ud558\uc138\uc694.",
     "friendly.prestige.research_failed.short": "\ub9e5\ub77d \ubcf4\uac15 \ud544\uc694",
     "friendly.prestige.research_failed.summary": "\uc544\uc9c1 \uacf5\uac1c \ucd9c\ucc98\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4 \u2014 \uc0c1\ub2f4 \uc120\uc0dd\ub2d8\uc774 \uc138\ubd80 \ub9e5\ub77d\uc744 \ucd94\uac00\ud574\ub4dc\ub9b4 \uc218 \uc788\uc5b4\uc694.",
 

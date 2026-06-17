@@ -64,6 +64,8 @@ export function buildMethodology(status = {}) {
     cdsCycleLatest = null,       // e.g. "2024-25"
     baselineYear = 2024,
     domainMonitorDaily = true,
+    openRouterCatalog = null,    // { lastFetched, count, reachable } — live model freshness
+    jobs = null,                 // getJobStatus() — per-source last-run timestamps
   } = status;
 
   const weights = EC_FACTORS.map((f) => ({
@@ -99,15 +101,18 @@ export function buildMethodology(status = {}) {
       admissionsStats: {
         source: "U.S. Dept. of Education College Scorecard API",
         freshness: scorecardConfigured ? "live (fetched at request time)" : "offline fallback (API key not configured)",
+        lastRefreshed: jobs?.scorecard_refresh?.lastRun || null,
       },
       commonDataSet: {
         source: "Institutional Common Data Set publications",
         latestCycleIngested: cdsCycleLatest || "see tools/cds-cache",
         refresh: "Operator-registered official CDS links, parsed + validated before ingest. Never scraped blindly or fabricated.",
+        lastRefreshed: jobs?.cds_refresh?.lastRun || null,
       },
       officialPages: {
         source: "University admissions / aid / deadline pages",
         refresh: domainMonitorDaily ? "Daily diff-based monitoring (domain-monitor), respects robots.txt" : "manual",
+        lastRefreshed: jobs?.domain_monitor?.lastRun || null,
       },
       apConcepts: {
         source: "Curated from released AP FRQ content (2023–2025)",
@@ -126,6 +131,7 @@ export function buildMethodology(status = {}) {
       provider: {
         policy: "The counselor runs on your own OpenRouter (or other OpenAI-compatible) key. The model dropdown is built from OpenRouter's live catalog, so it only ever offers models that currently exist. Newer recommended defaults are detected and PROPOSED — migration happens only with your explicit approval, never silently.",
         status: providerMigration,
+        catalog: openRouterCatalog,  // { lastFetched, count, reachable } — live model-list freshness
       },
     },
     yourControls: {
