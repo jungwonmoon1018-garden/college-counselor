@@ -101,6 +101,7 @@ import { registerStandardJobs, registerJob, startAllJobs, stopAllJobs, getJobSta
 import { initVectorStore, prepareVectorStatements, keywordSearch, getVectorStoreStats } from "./vector-store.js";
 import { validateEvidenceSources } from "./source-registry.js";
 import { initRAGTables, seedBaselines, prepareRAGStatements, syncStudentData, assembleRAGContext, getDirectStructuredStudentData, getStudentTrends, enhancedCollegeMatch, fetchAndPersistCollegeHistory, buildCollegeHistoryContext, extractGoalUnitIds } from "./rag-engine.js";
+import { runSeasonalResearch, getLatestSeasonalRun, ensureSeasonalTables } from "./seasonal-research.js";
 import {
   scoreAcademicStrength,
   buildNextStepPlan,
@@ -520,6 +521,22 @@ if (process.env.AUTO_REFRESH_CDS === "1") {
     console.log(`[CDS-REFRESH] Done: ${ok}/${results.length} ingested.`);
   }, 7 * 24 * 60 * 60 * 1000, { runOnStartup: false }); // weekly
   console.log(`[BOOT] AUTO_REFRESH_CDS enabled — weekly CDS re-ingest for cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}.`);
+}
+
+// Seasonal credible-source admissions + AP research — opt-in, and only when an
+// OpenRouter OPERATOR key is configured (a scheduled job has no student
+// session). Every scraped stat is adversarially verified against its source;
+// AP concept changes are proposed, never auto-applied. Inert by design
+// otherwise — buildOperatorCallLLM yields a null callLLM and runSeasonalResearch
+// no-ops with a clear reason.
+if (process.env.ENABLE_SEASONAL_RESEARCH === "1" && OPERATOR_LLM?.provider === "openrouter") {
+  const days = Number(process.env.SEASONAL_RESEARCH_INTERVAL_DAYS || 90);
+  ensureSeasonalTables(db);
+  registerJob("seasonal_research", async () => {
+    const { callLLM } = buildOperatorCallLLM();
+    return runSeasonalResearch(db, ragStmts, callLLM, { trigger: "scheduled", topN: Number(process.env.SEASONAL_TOP_N || 25) });
+  }, days * 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
+  console.log(`[BOOT] ENABLE_SEASONAL_RESEARCH=1 — seasonal admissions+AP research every ${days}d (credible sources only, verified).`);
 }
 
 startAllJobs();
@@ -1357,7 +1374,7 @@ app.get("/api/llm/openrouter/models", apiLimiter, (req, res) => {
 // migration status. Read-only, no auth — the whole point is openness.
 app.get("/api/methodology", apiLimiter, (_req, res) => {
   try {
-    res.json(buildMethodology({
+    const m = buildMethodology({
       providerMigration: { openrouter: OPENROUTER_STATUS },
       scorecardConfigured: !!SCORECARD_API_KEY,
       cdsCycleLatest: process.env.CDS_REFRESH_CYCLE || "2024-25",
@@ -1365,7 +1382,14 @@ app.get("/api/methodology", apiLimiter, (_req, res) => {
       domainMonitorDaily: process.env.ENABLE_DOMAIN_MONITOR === "1",
       openRouterCatalog: { lastFetched: OPENROUTER_CATALOG.lastFetched, count: OPENROUTER_CATALOG.models.length, reachable: OPENROUTER_CATALOG.reachable },
       jobs: getJobStatus(),
-    }));
+    });
+    // Seasonal credible-source research provenance (when the feature is enabled).
+    m.seasonalResearch = {
+      enabled: process.env.ENABLE_SEASONAL_RESEARCH === "1" && OPERATOR_LLM?.provider === "openrouter",
+      lastRun: getLatestSeasonalRun(db),
+      note: "Last-season admissions + AP data refreshed from official sources only (Common Data Set, collegescorecard.ed.gov, collegeboard.org); every figure is verified against its source before use.",
+    };
+    res.json(m);
   } catch (err) {
     console.error("[methodology] error:", err.message);
     res.status(500).json({ error: "Failed to build methodology" });
@@ -2640,6 +2664,33 @@ app.get("/api/cds/validation/:slug", studentLimiter, requireStudentAuth, async (
 });
 
 // ─── Counselor-auth admin endpoints ──────────────────────────────────
+// Manual trigger for seasonal credible-source research. Body:
+//   { colleges?: string[], topN?: number, subjects?: [{subject_id,name}], skipAP?: bool }
+// Runs synchronously (keep the set small — default topN 5 — to stay within the
+// request timeout; full sweeps belong on the scheduled job). Needs an
+// OpenRouter operator key.
+app.post("/api/admin/seasonal-research/run", requireCounselorAuth, async (req, res) => {
+  try {
+    const { callLLM } = buildOperatorCallLLM();
+    if (!callLLM || OPERATOR_LLM?.provider !== "openrouter") {
+      return res.status(503).json({ error: "Seasonal research needs an OpenRouter operator key (set OPENROUTER_API_KEY).", code: "no_operator_openrouter" });
+    }
+    const body = req.body || {};
+    const result = await runSeasonalResearch(db, ragStmts, callLLM, {
+      trigger: "manual",
+      colleges: Array.isArray(body.colleges) ? body.colleges : [],
+      topN: Number.isFinite(+body.topN) ? +body.topN : 5,
+      subjects: Array.isArray(body.subjects) && body.subjects.length ? body.subjects : undefined,
+      skipAP: body.skipAP === true,
+      delayMs: 500,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("[seasonal] run error:", err.message);
+    res.status(500).json({ error: "Seasonal research run failed", detail: err?.message });
+  }
+});
+
 app.post("/api/cds/ingest", requireCounselorAuth, async (req, res) => {
   try {
     const { ingestOne, ingestBulk } = await import("./cds-ingest-pipeline.js");
