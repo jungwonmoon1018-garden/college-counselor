@@ -20,6 +20,8 @@
 import { randomUUID } from "node:crypto";
 import { slugifySchoolName, extractCdsViaWeb, extractAdmitRateViaWeb } from "./cds-store.js";
 import { persistAndValidate } from "./cds-validator.js";
+import { extractHost } from "./credible-sources.js";
+import { hydrateBaselineWebsites } from "./rag-engine.js";
 
 // Default AP subjects to refresh when the caller doesn't specify a set.
 const DEFAULT_AP_SUBJECTS = Object.freeze([
@@ -53,33 +55,40 @@ function textOf(resp) {
   return (resp?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
 }
 
-// Per-college search restriction. We don't reliably know each college's own
-// .edu host (baseline_colleges has no domain column), but the credible-sources
-// allowlist already covers the major selective schools' .edu domains, and CDS
-// + Scorecard hosts work for any school. (A future refinement can pass a
-// resolved .edu host per college.)
+// Cross-college credible hosts that apply to every search (CDS + federal data).
+// Each college ALSO gets its own official .edu host appended at search time,
+// resolved from baseline_colleges.website (populated from Scorecard's
+// school.school_url) — see fetchSeasonalAdmissions / resolveSeasonalColleges.
 const SEASONAL_EXTRA_DOMAINS = Object.freeze([
   "commondataset.org",
   "collegescorecard.ed.gov",
   "nces.ed.gov",
 ]);
 
+// Build the per-college search domain list: the shared credible hosts plus the
+// college's own official site host (e.g. "www.stanford.edu") when known.
+// buildAllowedDomains downstream still validates each host is institutional.
+function domainsForCollege(college) {
+  const host = extractHost(college?.website);
+  return host ? [...SEASONAL_EXTRA_DOMAINS, host] : [...SEASONAL_EXTRA_DOMAINS];
+}
+
 // ─── College set: students' targets ∪ operator top-N (most selective) ───
 // Deduped by slug. `explicitColleges` (from the manual trigger) wins first.
 export function resolveSeasonalColleges(db, { topN = 25, explicitColleges = [] } = {}) {
-  const set = new Map(); // slug -> { name, slug, unitId, source }
-  const add = (name, unitId, source) => {
+  const set = new Map(); // slug -> { name, slug, unitId, website, source }
+  const add = (name, unitId, source, website = null) => {
     const clean = typeof name === "string" ? name.trim() : "";
     if (!clean) return;
     const slug = slugifySchoolName(clean);
     if (!slug || set.has(slug)) return;
-    set.set(slug, { name: clean, slug, unitId: unitId || null, source });
+    set.set(slug, { name: clean, slug, unitId: unitId || null, website: website || null, source });
   };
 
-  // 1. Explicit list (manual trigger).
+  // 1. Explicit list (manual trigger). Honor a caller-supplied website.
   for (const c of explicitColleges || []) {
     if (typeof c === "string") add(c, null, "explicit");
-    else if (c && typeof c === "object") add(c.name, c.unitId || c.unit_id, "explicit");
+    else if (c && typeof c === "object") add(c.name, c.unitId || c.unit_id, "explicit", c.website || c.url);
   }
 
   // 2. Students' target / goal schools — best-effort across the latest
@@ -105,11 +114,25 @@ export function resolveSeasonalColleges(db, { topN = 25, explicitColleges = [] }
   if (topN > 0) {
     try {
       const rows = db.prepare(
-        "SELECT name, unit_id FROM baseline_colleges WHERE acceptance_rate IS NOT NULL AND name IS NOT NULL ORDER BY acceptance_rate ASC LIMIT ?",
+        "SELECT name, unit_id, website FROM baseline_colleges WHERE acceptance_rate IS NOT NULL AND name IS NOT NULL ORDER BY acceptance_rate ASC LIMIT ?",
       ).all(topN);
-      for (const r of rows) add(r.name, r.unit_id, "topN");
+      for (const r of rows) add(r.name, r.unit_id, "topN", r.website);
     } catch { /* baseline optional */ }
   }
+
+  // 4. Backfill the official website for any college that still lacks one, by
+  //    matching baseline_colleges on unit_id then name. Lets the searcher scope
+  //    to each college's own .edu host. Tolerant of an un-migrated DB.
+  try {
+    const byUnit = db.prepare("SELECT website FROM baseline_colleges WHERE unit_id = ?");
+    const byName = db.prepare("SELECT website FROM baseline_colleges WHERE name = ? COLLATE NOCASE");
+    for (const c of set.values()) {
+      if (c.website) continue;
+      let row = c.unitId ? byUnit.get(c.unitId) : null;
+      if (!row || !row.website) row = byName.get(c.name);
+      if (row && row.website) c.website = row.website;
+    }
+  } catch { /* website is optional — fall back to shared credible hosts */ }
 
   return Array.from(set.values());
 }
@@ -145,14 +168,16 @@ export async function fetchSeasonalAdmissions(ragStmts, callLLM, colleges, opts 
   for (const college of colleges) {
     let rec = null;
     let source = null;
+    // Shared credible hosts + this college's own official .edu (when known).
+    const collegeDomains = domainsForCollege(college);
     // Prefer the full CDS read; fall back to the lightweight admit-rate read.
     try {
-      const cds = await extractCdsViaWeb({ callLLM, byok, schoolName: college.name, extraDomains: SEASONAL_EXTRA_DOMAINS });
+      const cds = await extractCdsViaWeb({ callLLM, byok, schoolName: college.name, extraDomains: collegeDomains });
       if (cds) { rec = cds; source = "cds_web"; }
     } catch (err) { /* fall through to admit-rate */ }
     if (!rec) {
       try {
-        const ar = await extractAdmitRateViaWeb({ callLLM, byok, schoolName: college.name, extraDomains: SEASONAL_EXTRA_DOMAINS });
+        const ar = await extractAdmitRateViaWeb({ callLLM, byok, schoolName: college.name, extraDomains: collegeDomains });
         if (ar) { rec = admitRateToRecord(college, ar); source = "admit_rate_web"; }
       } catch (err) { /* no data */ }
     }
@@ -330,11 +355,31 @@ export async function refreshAPConceptsFromPDFs(db, callLLM, subjects = DEFAULT_
   return { ok: true, results };
 }
 
-// ─── Adversarial verification ───────────────────────────────────────────
-// Independent re-check of a scraped admissions record against its cited
-// source. Returns "verified" | "discrepancy" | "unverified"; logs each field.
-// Nothing is trusted unless the source confirms it.
-export async function verifySeasonalRecord(db, callLLM, runId, record) {
+// ─── Adversarial verification (multi-lens quorum) ────────────────────────
+// A single re-check can be fooled the same way the original scrape was. So we
+// cross-examine each scraped admissions claim through THREE independent lenses,
+// each restricted to a DIFFERENT credible source family:
+//   A. the institution's Common Data Set (commondataset.org + its own .edu)
+//   B. the federal College Scorecard / NCES IPEDS data
+//   C. the originally cited source page itself (re-read)
+// Each lens votes confirm / contradict / unconfirmed. Quorum:
+//   • verified     — ≥2 lenses confirm-and-match AND none contradict
+//   • discrepancy  — ANY credible lens contradicts (a value differs)
+//   • unverified   — otherwise (not enough independent confirmation)
+// Per-lens votes are logged to seasonal_verifications. A "discrepancy" verdict
+// QUARANTINES the freshly-scraped value: the web-sourced cds_records row is
+// removed so contradicted data can never reach a student's context.
+function buildVerificationLenses(record) {
+  const sourceHost = extractHost(record.sourceUrl);
+  const eduFromSource = sourceHost && sourceHost.endsWith(".edu") ? [sourceHost] : [];
+  return [
+    { key: "common_data_set", label: "the institution's Common Data Set", domains: ["commondataset.org", ...eduFromSource] },
+    { key: "college_scorecard", label: "the federal College Scorecard and NCES IPEDS data", domains: ["collegescorecard.ed.gov", "nces.ed.gov"] },
+    { key: "cited_source", label: "the originally cited source page", domains: sourceHost ? [sourceHost] : ["commondataset.org"] },
+  ];
+}
+
+export async function verifySeasonalRecord(db, callLLM, runId, record, opts = {}) {
   if (!callLLM || !record) return { status: "unverified", reason: "no_llm_or_record" };
   const slug = record.slug || slugifySchoolName(record.school || "");
   const admitPct = record.overallAdmitRate != null ? Math.round(record.overallAdmitRate * 1000) / 10 : null;
@@ -345,31 +390,71 @@ export async function verifySeasonalRecord(db, callLLM, runId, record) {
   ].filter(Boolean).join("; ");
   if (!claim) return { status: "unverified", reason: "nothing_to_verify" };
 
-  let verdict = "unverified", notes = "";
-  try {
-    const resp = await callLLM({
-      max_tokens: 700, temperature: 0, wantsWeb: true, extraDomains: ["commondataset.org", "collegescorecard.ed.gov", "nces.ed.gov"],
-      system: "You independently verify admissions statistics against official sources. Be skeptical; only confirm what an official/credible source actually states. Output ONLY JSON.",
-      messages: [{ role: "user", content:
-        `Independently verify for "${record.school}" (cited source: ${record.sourceUrl || "none"}): ${claim}. ` +
-        `Check official sources. Return ONLY JSON: {"confirmed":<true|false>,"matches":<true|false>,"notes":"<short>","sourceUrl":"<url|null>"}` }],
-    });
-    const j = parseJsonLoose(textOf(resp));
-    if (j) {
-      notes = String(j.notes || "").slice(0, 300);
-      if (j.confirmed === true && j.matches !== false) verdict = "verified";
-      else if (j.confirmed === true && j.matches === false) verdict = "discrepancy";
-      else verdict = "unverified";
-    }
-  } catch (err) { notes = `verify error: ${err?.message || "unknown"}`; verdict = "unverified"; }
+  const logVote = (field, status, notes, sourceUrl) => {
+    try {
+      db.prepare(
+        `INSERT INTO seasonal_verifications (run_id, slug, school, field, scraped_value, source_url, status, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(runId, slug, record.school || "", field, claim.slice(0, 300), sourceUrl || null, status, (notes || "").slice(0, 300));
+    } catch { /* non-fatal */ }
+  };
 
-  try {
-    db.prepare(
-      `INSERT INTO seasonal_verifications (run_id, slug, school, field, scraped_value, source_url, status, notes)
-       VALUES (?, ?, ?, 'admissions', ?, ?, ?, ?)`,
-    ).run(runId, slug, record.school || "", claim.slice(0, 300), record.sourceUrl || null, verdict, notes);
-  } catch { /* non-fatal */ }
-  return { status: verdict, notes };
+  const lenses = buildVerificationLenses(record);
+  const votes = [];
+  for (const lens of lenses) {
+    let vote = "unconfirmed", notes = "", lensSource = lens.domains[0] || null;
+    try {
+      const resp = await callLLM({
+        max_tokens: 600, temperature: 0, wantsWeb: true, extraDomains: lens.domains,
+        system: `You independently verify admissions statistics using ${lens.label} ONLY. Be skeptical; confirm a number only if that source actually states it, and report a mismatch honestly. Output ONLY JSON.`,
+        messages: [{ role: "user", content:
+          `Using ${lens.label}, verify for "${record.school}" (originally cited: ${record.sourceUrl || "none"}): ${claim}. ` +
+          `Return ONLY JSON: {"confirmed":<true|false>,"matches":<true|false>,"notes":"<short>","sourceUrl":"<url|null>"}` }],
+      });
+      const j = parseJsonLoose(textOf(resp));
+      if (j) {
+        notes = String(j.notes || "");
+        lensSource = j.sourceUrl || lensSource;
+        if (j.confirmed === true && j.matches === false) vote = "contradict";
+        else if (j.confirmed === true && j.matches !== false) vote = "confirm";
+        else vote = "unconfirmed";
+      }
+    } catch (err) {
+      notes = `lens error: ${err?.message || "unknown"}`;
+      vote = "unconfirmed";
+    }
+    votes.push({ lens: lens.key, vote });
+    logVote(`admissions:${lens.key}`, vote, notes, lensSource);
+    if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+  }
+
+  const confirms = votes.filter((v) => v.vote === "confirm").length;
+  const contradicts = votes.filter((v) => v.vote === "contradict").length;
+  let status;
+  if (contradicts >= 1) status = "discrepancy";
+  else if (confirms >= 2) status = "verified";
+  else status = "unverified";
+
+  // Quarantine on contradiction: drop the freshly web-scraped row so a
+  // contradicted stat can never surface to a student. Scoped to web-sourced
+  // rows so curated/PDF records are never touched.
+  let quarantined = false;
+  if (status === "discrepancy") {
+    try {
+      const res = db.prepare(
+        `DELETE FROM cds_records WHERE slug = ? AND source_kind LIKE '%web%'`,
+      ).run(slug);
+      quarantined = res.changes > 0;
+    } catch { /* non-fatal */ }
+  }
+
+  logVote(
+    "admissions",
+    status,
+    `confirms=${confirms} contradicts=${contradicts}${quarantined ? " quarantined" : ""}`,
+    record.sourceUrl,
+  );
+  return { status, confirms, contradicts, votes, quarantined };
 }
 
 // ─── Orchestrator entrypoint ────────────────────────────────────────────
@@ -385,6 +470,10 @@ export async function runSeasonalResearch(db, ragStmts, callLLM, opts = {}) {
     return { ok: false, runId, reason: "no_operator_openrouter_key", startedAt };
   }
 
+  // Backfill official .edu sites from the Scorecard cache so each college's
+  // own host can scope its web search (best-effort; never fatal).
+  try { hydrateBaselineWebsites(db); } catch { /* optional */ }
+
   const colleges = resolveSeasonalColleges(db, { topN: opts.topN ?? 25, explicitColleges: opts.colleges || [] });
   const adm = await fetchSeasonalAdmissions(ragStmts, callLLM, colleges, { delayMs: opts.delayMs ?? 750 });
 
@@ -392,9 +481,10 @@ export async function runSeasonalResearch(db, ragStmts, callLLM, opts = {}) {
   let verified = 0, flagged = 0;
   for (const r of (adm.results || [])) {
     if (r.ok && r.record) {
-      const v = await verifySeasonalRecord(db, callLLM, runId, r.record);
+      const v = await verifySeasonalRecord(db, callLLM, runId, r.record, { delayMs: opts.delayMs ?? 750 });
       if (v.status === "verified") verified++; else flagged++;
       r.verification = v.status;
+      if (v.quarantined) r.quarantined = true;
       if (opts.delayMs) await new Promise((x) => setTimeout(x, opts.delayMs));
     }
   }

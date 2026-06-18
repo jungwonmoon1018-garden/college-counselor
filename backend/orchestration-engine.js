@@ -341,7 +341,7 @@ export { DEFAULT_MODELS, COLLEGE_ALIASES, resolveTierDefault, TIER_DEFAULTS };
 
 // ─── PII masking for model payloads ───
 export function redactPayloadForModel(payload, studentId) {
-  // Hash the student ID for Anthropic metadata
+  // Hash the student ID for the provider metadata field (never raw PII)
   const hashedId = studentId ? hashStudentIdForProvider(studentId) : null;
 
   const withMetadata = JSON.parse(JSON.stringify(payload || {}));
@@ -362,11 +362,11 @@ export function redactPayloadForModel(payload, studentId) {
   };
 }
 
-export function redactAnthropicPayload(payload, studentId = null) {
+export function redactProviderPayload(payload, studentId = null) {
   return redactPayloadForModel(payload, studentId);
 }
 
-export function restoreAnthropicResponse(response, tokenMap = {}) {
+export function restoreProviderResponse(response, tokenMap = {}) {
   const restored = JSON.parse(JSON.stringify(response || {}));
   let applied = false;
   if (Array.isArray(restored.content)) {
@@ -379,23 +379,6 @@ export function restoreAnthropicResponse(response, tokenMap = {}) {
     }
   }
   return { response: restored, restoration: { applied } };
-}
-
-// ─── Subscription tier detection from Anthropic headers ───
-export function detectSubscriptionTier(headers) {
-  const reqLimit = parseInt(headers.get("anthropic-ratelimit-requests-limit") || "0", 10);
-  const tokLimit = parseInt(headers.get("anthropic-ratelimit-tokens-limit") || "0", 10);
-
-  let tier = "unknown";
-  if (reqLimit <= 0 && tokLimit <= 0) tier = "unknown";
-  else if (reqLimit <= 5) tier = "free";
-  else if (reqLimit <= 50) tier = "build_1";
-  else if (reqLimit <= 1000) tier = "build_2";
-  else if (reqLimit <= 2000) tier = "build_3";
-  else if (reqLimit <= 4000) tier = "build_4";
-  else tier = "scale";
-
-  return { tier, reqLimit, tokLimit };
 }
 
 // ─── Corpus loading (preserved from original) ───

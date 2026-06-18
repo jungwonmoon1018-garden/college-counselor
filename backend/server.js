@@ -93,7 +93,7 @@ import * as chatHistory from "./chat-history.js";
 import { buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS } from "./credible-sources.js";
 import { extractCollegeValues, computeFit } from "./college-values.js";
 import { callLLM as adapterCallLLM, detectProvider, validateKey as adapterValidateKey, listProviders, isReasonableModelId as adapterIsReasonableModelId, resolveTierDefault, TIER_DEFAULTS, PROVIDERS } from "./llm-adapters/index.js";
-import { screenInput, screenOutput, restorePII } from "./content-moderation.js";
+import { screenInput, screenOutput, restorePII, redactProviderText } from "./content-moderation.js";
 import { grantConsent, hasActiveConsent, validateRequiredConsents, getOnboardingConsentRequirements } from "./consent.js";
 import { initDomainMonitor, prepareMonitorStatements } from "./domain-monitor.js";
 import { runRetentionCleanup, getRetentionReport } from "./retention.js";
@@ -2204,7 +2204,20 @@ app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
 
     // Every provider is tool-less now, so always strip the "ALWAYS call X
     // tool" directives and auto-inject the student's profile context.
-    const effectiveSystem = (regGate.systemPrefix ? regGate.systemPrefix + "\n\n" : "") + rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
+    const effectiveSystemRaw = (regGate.systemPrefix ? regGate.systemPrefix + "\n\n" : "") + rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
+
+    // ── L1: mask PII in the auto-injected system prompt before dispatch ──
+    // buildProfileContext() injects the student's real profile (school name,
+    // EC descriptions, etc.) straight into the system prompt — that text is
+    // built OUTSIDE the payload-redaction boundary above, so without this it
+    // would reach the provider unmasked. Run it through the same provider
+    // patterns and merge its restorable tokens into the restore map so any
+    // the model echoes back (the student's own school/name) are restored for
+    // them after output screening. Already-tokenized payload.system text is
+    // idempotent here (tokens don't re-match the PII patterns).
+    const sysRedaction = redactProviderText(effectiveSystemRaw);
+    const effectiveSystem = sysRedaction.text;
+    Object.assign(redacted.tokenMap, sysRedaction.tokenMap);
 
     let data;
 

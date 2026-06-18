@@ -164,7 +164,7 @@ export const DEFAULT_ALLOWED_DOMAINS = Object.freeze([
 
 // Extract a host token from a URL or domain string. "https://x.harvard.edu/foo"
 // → "x.harvard.edu". "harvard.edu" → "harvard.edu". Returns null on garbage.
-function extractHost(raw) {
+export function extractHost(raw) {
   if (!raw || typeof raw !== "string") return null;
   const s = raw.trim().toLowerCase();
   try {

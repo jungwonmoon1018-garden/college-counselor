@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { redactAnthropicPayload, restoreAnthropicResponse } from "../orchestration-engine.js";
+import { redactProviderPayload, restoreProviderResponse } from "../orchestration-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -694,7 +694,7 @@ describe("PII redaction pipeline", () => {
       }],
     };
 
-    const redacted = redactAnthropicPayload(payload);
+    const redacted = redactProviderPayload(payload);
     const text = redacted.payload.messages[0].content;
 
     assert.match(text, /\[STUDENT_NAME_01\]/);
@@ -708,7 +708,7 @@ describe("PII redaction pipeline", () => {
     assert.ok(redacted.masking.byLayer.guardian_slm >= 1);
     assert.ok(redacted.masking.restorableTokens >= 2);
 
-    const restored = restoreAnthropicResponse({
+    const restored = restoreProviderResponse({
       content: [{
         type: "text",
         text: "[STUDENT_NAME_01] should focus on leadership at [CURRENT_SCHOOL_01], but sensitive financial placeholders stay masked like [ANNUAL_INCOME_01].",
@@ -735,7 +735,7 @@ describe("PII redaction pipeline", () => {
       },
     };
 
-    const redacted = redactAnthropicPayload(payload);
+    const redacted = redactProviderPayload(payload);
     const profile = redacted.payload.metadata.fafsaProfile;
 
     assert.equal(profile.studentAidIndex, -1500);

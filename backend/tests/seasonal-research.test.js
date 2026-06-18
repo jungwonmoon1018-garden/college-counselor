@@ -72,18 +72,38 @@ test("fetchAPScoreDistributions persists verified % rows with a source url", asy
   assert.ok(rows.every((x) => x.source_url && x.exam_year === 2025), "rows carry source + year");
 });
 
-test("verifySeasonalRecord: confirmed+matches → verified; confirmed+mismatch → discrepancy", async () => {
+test("verifySeasonalRecord multi-lens quorum: all-confirm → verified; any-contradict → discrepancy", async () => {
   const db = freshDb();
   const rec = { school: "MIT", slug: "mit", overallAdmitRate: 0.04, enrolledSAT: { p25: 1520, p75: 1580 }, sourceUrl: "https://commondataset.org/mit" };
 
   const ok = await verifySeasonalRecord(db, llmText({ confirmed: true, matches: true, notes: "matches CDS", sourceUrl: "https://commondataset.org/mit" }), "run1", rec);
   assert.equal(ok.status, "verified");
+  assert.equal(ok.confirms, 3, "all three lenses confirmed");
 
-  const bad = await verifySeasonalRecord(db, llmText({ confirmed: true, matches: false, notes: "CDS says 0.05", sourceUrl: "https://commondataset.org/mit" }), "run1", rec);
+  const bad = await verifySeasonalRecord(db, llmText({ confirmed: true, matches: false, notes: "CDS says 0.05" }), "run1", rec);
   assert.equal(bad.status, "discrepancy");
+  assert.ok(bad.contradicts >= 1, "at least one lens contradicted");
 
-  const rows = db.prepare("SELECT status FROM seasonal_verifications WHERE slug='mit' ORDER BY id").all();
-  assert.deepEqual(rows.map((r) => r.status), ["verified", "discrepancy"]);
+  // One summary row ("admissions") per call, plus three per-lens rows each.
+  const summary = db.prepare("SELECT status FROM seasonal_verifications WHERE slug='mit' AND field='admissions' ORDER BY id").all();
+  assert.deepEqual(summary.map((r) => r.status), ["verified", "discrepancy"]);
+  const lensCount = db.prepare("SELECT COUNT(*) c FROM seasonal_verifications WHERE slug='mit' AND field LIKE 'admissions:%'").get().c;
+  assert.equal(lensCount, 6, "3 per-lens votes × 2 calls");
+});
+
+test("verifySeasonalRecord quorum: 2 confirm + 1 unconfirmed → verified (no contradiction)", async () => {
+  const db = freshDb();
+  const rec = { school: "Rice", slug: "rice", overallAdmitRate: 0.08, sourceUrl: "https://commondataset.org/rice" };
+  // Lens-aware fake: Scorecard lens can't find it (unconfirmed); the other two confirm.
+  const callLLM = async (args) => {
+    const u = args.messages?.[0]?.content || "";
+    if (/federal College Scorecard/i.test(u)) return { content: [{ type: "text", text: JSON.stringify({ confirmed: false, notes: "not found" }) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ confirmed: true, matches: true, notes: "ok" }) }] };
+  };
+  const v = await verifySeasonalRecord(db, callLLM, "run2", rec);
+  assert.equal(v.status, "verified");
+  assert.equal(v.confirms, 2);
+  assert.equal(v.contradicts, 0);
 });
 
 test("runSeasonalResearch with a fake LLM logs a run and returns a summary", async () => {
