@@ -177,9 +177,8 @@ export function isCdsRecordValidated(ragStmts, slug) {
 // testable without a live model.
 const C7_WEB_LABELS = new Set(["very_important", "important", "considered", "not_considered"]);
 
-export async function extractCdsViaWeb({ callLLM, byok, schoolName }) {
+export async function extractCdsViaWeb({ callLLM, byok, schoolName, extraDomains = [] }) {
   if (!callLLM || !byok || !schoolName) return null;
-  const extraDomains = [];
   const prompt = `Find and READ the official Common Data Set (CDS) for "${schoolName}" — the most recent year available. Search the school's own institutional-research / CDS page and read the actual document.
 
 Extract ONLY values you can verify from the real CDS (use null for anything you cannot confirm — do NOT guess or use marketing pages):
@@ -255,9 +254,8 @@ export function parseWebCdsRecord(text, schoolName) {
 // for a school. Much cheaper / more likely to succeed than a full CDS read —
 // it only needs one number. Returns { admitRatePercent, season, sourceUrl } or
 // null. Pure/injected for testing.
-export async function extractAdmitRateViaWeb({ callLLM, byok, schoolName }) {
+export async function extractAdmitRateViaWeb({ callLLM, byok, schoolName, extraDomains = [] }) {
   if (!callLLM || !byok || !schoolName) return null;
-  const extraDomains = [];
   const prompt = `What is the most recent OVERALL undergraduate admission (acceptance) rate for "${schoolName}"? Use the latest completed admissions cycle / entering class. Prefer the school's own newsroom, admissions, or institutional-research pages, or a reputable source citing them.
 
 Return ONLY a JSON object, no prose. Use null if you genuinely cannot verify it — do NOT guess:

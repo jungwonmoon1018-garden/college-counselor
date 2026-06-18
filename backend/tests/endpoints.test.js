@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { redactAnthropicPayload, restoreAnthropicResponse } from "../orchestration-engine.js";
+import { redactProviderPayload, restoreProviderResponse } from "../orchestration-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -295,8 +295,18 @@ describe("POST /api/notify-parent", () => {
 // API PROXY VALIDATION
 // ═══════════════════════════════════════════════════════════
 describe("POST /api/chat (validation only)", () => {
+  // /api/chat now requires student auth (S1). Validation tests carry a token
+  // so they reach the handler's validation; a separate test covers unauth.
+  let auth;
+  before(async () => { auth = { Authorization: `Bearer ${(await createStudentSession()).token}` }; });
+
+  it("rejects unauthenticated requests", async () => {
+    const { status } = await req("POST", "/api/chat", { tier: "medium", messages: [{ role: "user", content: "hi" }], max_tokens: 100 });
+    assert.equal(status, 401);
+  });
+
   it("rejects empty body", async () => {
-    const { status } = await req("POST", "/api/chat", {});
+    const { status } = await req("POST", "/api/chat", {}, auth);
     assert.equal(status, 400);
   });
 
@@ -305,7 +315,7 @@ describe("POST /api/chat (validation only)", () => {
       model: "bad model id",
       messages: [{ role: "user", content: "test" }],
       max_tokens: 100,
-    });
+    }, auth);
     assert.equal(status, 400);
   });
 
@@ -313,7 +323,7 @@ describe("POST /api/chat (validation only)", () => {
     const { status } = await req("POST", "/api/chat", {
       tier: "medium",
       max_tokens: 100,
-    });
+    }, auth);
     assert.equal(status, 400);
   });
 
@@ -323,7 +333,7 @@ describe("POST /api/chat (validation only)", () => {
       tier: "medium",
       messages,
       max_tokens: 100,
-    });
+    }, auth);
     assert.equal(status, 400);
   });
 });
@@ -684,7 +694,7 @@ describe("PII redaction pipeline", () => {
       }],
     };
 
-    const redacted = redactAnthropicPayload(payload);
+    const redacted = redactProviderPayload(payload);
     const text = redacted.payload.messages[0].content;
 
     assert.match(text, /\[STUDENT_NAME_01\]/);
@@ -698,7 +708,7 @@ describe("PII redaction pipeline", () => {
     assert.ok(redacted.masking.byLayer.guardian_slm >= 1);
     assert.ok(redacted.masking.restorableTokens >= 2);
 
-    const restored = restoreAnthropicResponse({
+    const restored = restoreProviderResponse({
       content: [{
         type: "text",
         text: "[STUDENT_NAME_01] should focus on leadership at [CURRENT_SCHOOL_01], but sensitive financial placeholders stay masked like [ANNUAL_INCOME_01].",
@@ -725,7 +735,7 @@ describe("PII redaction pipeline", () => {
       },
     };
 
-    const redacted = redactAnthropicPayload(payload);
+    const redacted = redactProviderPayload(payload);
     const profile = redacted.payload.metadata.fafsaProfile;
 
     assert.equal(profile.studentAidIndex, -1500);

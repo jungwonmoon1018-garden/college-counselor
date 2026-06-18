@@ -53,6 +53,17 @@ const INAPPROPRIATE_PATTERNS = [
   /\b(impersonat|pretend\s+to\s+be|pose\s+as)\b/i,
 ];
 
+// Essay ghost-writing — the skill's hard red line is "never ghost-write an
+// application essay" (brainstorming, outlines, and feedback on the student's
+// own draft are fine). The client prompts say this, but the server must not
+// trust the client, so we enforce it here too. We target requests that ask us
+// to PRODUCE the whole essay; coaching verbs (outline / brainstorm / revise /
+// edit / improve / feedback) don't match these and pass through normally.
+const GHOSTWRITING_PATTERNS = [
+  /\b(write|compose|draft|generate|create|produce|whip\s+up)\b[^.?!]{0,40}\b(my|the|a|an|whole|entire)\b[^.?!]{0,30}\b(\d+[-\s]?word\s+)?(college\s+|application\s+|admission[s]?\s+|supplemental\s+|common\s?app\s+|"why\s+\w+"\s+)?(essay|personal\s+statement|statement\s+of\s+purpose|admission[s]?\s+essay)\b/i,
+  /\b(essay|personal\s+statement|statement\s+of\s+purpose)\b[^.?!]{0,30}\b(write|writ(?:e|ten)|compose|draft)\b[^.?!]{0,15}\bfor\s+me\b/i,
+];
+
 const OFF_TOPIC_PATTERNS = [
   /\b(tell\s+me\s+a\s+joke|sing\s+a\s+song|write\s+a\s+poem)\b/i,
   /\b(what\s+is\s+the\s+meaning\s+of\s+life)\b/i,
@@ -118,6 +129,25 @@ export function screenInput(text, options = {}) {
     };
   }
 
+  // 2b. Essay ghost-writing (block, but with a warm redirect — not the
+  //     harsher academic-dishonesty message). Offers the coaching path the
+  //     skill does allow.
+  for (const pattern of GHOSTWRITING_PATTERNS) {
+    if (pattern.test(text)) {
+      const message = "I can't write your college essay for you — admissions essays have to be your own work, and a ghost-written one can get an application rescinded. What I can do is help you brainstorm ideas, shape an outline, or give honest feedback on a draft you've written yourself. Want to start by talking through what you'd like the essay to say?";
+      return {
+        category: CATEGORIES.INAPPROPRIATE,
+        results: [{ category: CATEGORIES.INAPPROPRIATE, type: "essay_ghostwriting", blocked: true, message }],
+        blocked: true,
+        message,
+        reason: message,
+        redactedText: text,
+        text,
+        redacted: false,
+      };
+    }
+  }
+
   // 3. Off-topic (soft block — redirect, don't hard block)
   for (const pattern of OFF_TOPIC_PATTERNS) {
     if (pattern.test(text)) {
@@ -176,10 +206,18 @@ export function screenOutput(text, options = {}) {
 
   const issues = [];
 
-  // Check for leaked PII in model output
-  for (const { pattern, type } of PII_PATTERNS) {
-    if (type === "ssn" && pattern.test(text)) {
-      issues.push({ type: "ssn_leak", message: "SSN detected in model output — redacting." });
+  // Check for leaked PII in model output. We redact the NON-restorable PII
+  // types (SSN, phone) — these should never legitimately appear in a
+  // counselor reply, so if one shows up it's a leak/hallucination. We do
+  // NOT redact the restorable types (email, financial) here: those are
+  // either deliberately round-tripped via restorePII (run right after this
+  // in server.js) or are legitimate counseling content (tuition/scholarship
+  // dollar figures, official admissions contacts). PII_PATTERNS regexes are
+  // /g, so match via .match() (resets lastIndex) rather than stateful .test().
+  for (const { pattern, type, restorable } of PII_PATTERNS) {
+    if (restorable) continue;
+    if (text.match(pattern)) {
+      issues.push({ type: `${type}_leak`, message: `${type} detected in model output — redacting.` });
       text = text.replace(pattern, "[REDACTED]");
     }
   }
@@ -275,6 +313,20 @@ function redactProviderString(value, state) {
     });
   }
   return out;
+}
+
+// Redact a single string (e.g. an auto-injected system prompt) through the
+// provider-redaction patterns. Returns the masked text plus a tokenMap so the
+// caller can restore restorable tokens (student name / school) if the model
+// echoes them back to the student. Used to mask the profile context that
+// /api/chat builds outside the payload-redaction boundary.
+export function redactProviderText(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return { text: value || "", tokenMap: {}, applied: false, byType: {} };
+  }
+  const state = makeProviderRedactionState();
+  const text = redactProviderString(value, state);
+  return { text, tokenMap: state.tokenMap, applied: state.applied, byType: state.countsByType };
 }
 
 function sanitizeDeep(value, state) {

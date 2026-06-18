@@ -121,6 +121,25 @@ export function runRetentionCleanup(db, piiVaultDb, mode = "consumer") {
     }
   }
 
+  // 7. Clean old conversation logs (chat history). chat_messages.content is
+  //    plaintext student-typed text, so honor the declared conversation_logs
+  //    retention. Skip when days is null (institutional mode keeps per agreement).
+  if (policy.conversation_logs?.days) {
+    try {
+      const d = policy.conversation_logs.days;
+      const msgResult = db.prepare(
+        `DELETE FROM chat_messages WHERE created_at < datetime('now', '-${d} days')`
+      ).run();
+      // Drop now-orphaned / stale threads (no remaining messages and inactive past the window).
+      const threadResult = db.prepare(
+        `DELETE FROM chat_threads WHERE updated_at < datetime('now', '-${d} days') AND id NOT IN (SELECT DISTINCT thread_id FROM chat_messages)`
+      ).run();
+      results.conversation_logs = { messagesDeleted: msgResult.changes, threadsDeleted: threadResult.changes };
+    } catch (e) {
+      results.conversation_logs = { error: e.message };
+    }
+  }
+
   return {
     mode,
     results,

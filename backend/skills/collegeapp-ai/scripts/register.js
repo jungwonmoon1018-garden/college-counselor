@@ -227,7 +227,9 @@ async function main() {
     process.exit(4);
   }
   const studentId = auth.json.studentId || auth.json.student_id;
-  const sessionToken = auth.json.sessionToken || auth.json.session_token;
+  // The backend returns the bearer as `token`; accept the older sessionToken
+  // aliases too so this works whichever field name the API uses.
+  const sessionToken = auth.json.sessionToken || auth.json.session_token || auth.json.token;
   if (!studentId || !sessionToken) {
     console.error(t("register.err.auth_missing_fields", locale, { body: JSON.stringify(auth.json) }));
     process.exit(4);

@@ -125,3 +125,38 @@ The target can be overridden with `--target /path/to/skills/collegeapp-ai` or
 the `COLLEGEAPP_SKILL_TARGET` env var. The script only overwrites the known
 file set (`SKILL.md` + `scripts/*`) — it never deletes the target tree. Run it
 after editing `SKILL.md`, and wire `--check` into CI to catch drift.
+
+---
+
+## Seasonal credible-source research (optional)
+
+Refreshes last-application-season admissions stats and AP score distributions,
+and proposes AP concept updates from the latest official exam PDFs — from
+**official sources only** (Common Data Set, `collegescorecard.ed.gov`,
+`collegeboard.org`; never forums/blogs). Every scraped figure is adversarially
+re-checked against its cited source before it's trusted; anything unconfirmed
+is quarantined, and AP concept changes are *proposed*, never auto-applied.
+
+It runs without a student session, so it needs an **OpenRouter operator key**
+and is off by default. In `.env`:
+
+```sh
+OPENROUTER_API_KEY=sk-or-...        # operator key (web research runs on this)
+ENABLE_SEASONAL_RESEARCH=1          # opt in
+SEASONAL_RESEARCH_INTERVAL_DAYS=90  # scheduled cadence (default 90; 365 = annual)
+SEASONAL_TOP_N=25                   # most-selective baseline colleges per run
+```
+
+With those set + a restart, a scheduled `seasonal_research` job appears in the
+`[BATCH]` boot log and in `GET /api/methodology` (`seasonalResearch`). A
+counselor can also run it on demand:
+
+```sh
+# Basic auth with COUNSELOR_USER / COUNSELOR_PASS:
+COUNSELOR_USER=... COUNSELOR_PASS=... \
+  node skills/collegeapp-ai/scripts/seasonal-run.js --colleges "MIT,Rice University"
+# or POST /api/admin/seasonal-research/run  (counselor Basic auth)
+```
+
+Without `OPENROUTER_API_KEY`, the feature is inert by design (it logs
+"unavailable" and never fabricates data).

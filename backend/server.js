@@ -78,7 +78,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // ── New architecture modules ──
-import { routeRequest, classifyTopic, TOPIC_TYPES, MODEL_TIERS } from "./policy-router.js";
+import { routeRequest, classifyTopic, enforceGates, TOPIC_TYPES, MODEL_TIERS } from "./policy-router.js";
 import { runFAFSAEligibilityCheck, calculateDeadlineStatus, runDocumentCompletenessCheck, computePercentile, computeAPRigorIndex, estimateNetPrice, evaluateComplianceGate, buildCrisisResponse } from "./rules-engine.js";
 import { initFactStore, prepareFactStatements, seedCollegeFacts, lookupFact, searchFacts, expireOldFacts, getFactStoreStats } from "./fact-store.js";
 import { initEvidenceGraph, prepareEvidenceStatements, getEvidenceProfile, buildStudentDimensionProfile, seedECBenchmarkEvidence, seedCollegeEvidence, seedCompetitiveActivityEvidence } from "./evidence-graph.js";
@@ -86,14 +86,14 @@ import { composeAnswer, composeDeterministicAnswer } from "./answer-composer.js"
 import { initReviewQueue, prepareReviewStatements, submitForReview, shouldTriggerReview, getQueueStats } from "./review-queue.js";
 import { initPIIVault, preparePIIStatements, storeStudentPII, retrieveStudentPII, deleteAllStudentPII, cleanExpiredDocuments, hashStudentIdForProvider, isBYOKAllowed, lookupStudentBYOK } from "./pii-vault.js";
 import { ensureBudgetColumn, getStudentBudget, setStudentBudget, getMonthlySpendUsd, checkBudget } from "./usage-budget.js";
-import { OPENROUTER_TARGETS, OPENROUTER_STATUS, OPENROUTER_CATALOG, refreshOpenRouterTargets, refreshOpenRouterCatalog, resolveOpenRouterTier } from "./openrouter-model-refresh.js";
+import { OPENROUTER_TARGETS, OPENROUTER_STATUS, OPENROUTER_CATALOG, refreshOpenRouterTargets, refreshOpenRouterCatalog } from "./openrouter-model-refresh.js";
 import { randomExemplarGroup, exemplarsPromptBlock } from "./crimson-ec-exemplars.js";
 import { buildMethodology } from "./methodology.js";
 import * as chatHistory from "./chat-history.js";
 import { buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS } from "./credible-sources.js";
 import { extractCollegeValues, computeFit } from "./college-values.js";
 import { callLLM as adapterCallLLM, detectProvider, validateKey as adapterValidateKey, listProviders, isReasonableModelId as adapterIsReasonableModelId, resolveTierDefault, TIER_DEFAULTS, PROVIDERS } from "./llm-adapters/index.js";
-import { screenInput, screenOutput, restorePII } from "./content-moderation.js";
+import { screenInput, screenOutput, restorePII, redactProviderText } from "./content-moderation.js";
 import { grantConsent, hasActiveConsent, validateRequiredConsents, getOnboardingConsentRequirements } from "./consent.js";
 import { initDomainMonitor, prepareMonitorStatements } from "./domain-monitor.js";
 import { runRetentionCleanup, getRetentionReport } from "./retention.js";
@@ -101,6 +101,7 @@ import { registerStandardJobs, registerJob, startAllJobs, stopAllJobs, getJobSta
 import { initVectorStore, prepareVectorStatements, keywordSearch, getVectorStoreStats } from "./vector-store.js";
 import { validateEvidenceSources } from "./source-registry.js";
 import { initRAGTables, seedBaselines, prepareRAGStatements, syncStudentData, assembleRAGContext, getDirectStructuredStudentData, getStudentTrends, enhancedCollegeMatch, fetchAndPersistCollegeHistory, buildCollegeHistoryContext, extractGoalUnitIds } from "./rag-engine.js";
+import { runSeasonalResearch, getLatestSeasonalRun, ensureSeasonalTables } from "./seasonal-research.js";
 import {
   scoreAcademicStrength,
   buildNextStepPlan,
@@ -211,7 +212,7 @@ import {
   getCourseSequence,
   diffCoursesAgainstSequence,
 } from "./course-sequence-catalog.js";
-import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel } from "./orchestration-engine.js";
+import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel, buildSystemPrompt } from "./orchestration-engine.js";
 import { t, resolveLocale, localizeFriendlyLabels } from "./i18n.js";
 import { readEnvLines, getValue, setValue, writeEnvAtomic, resolveFirstRunEncryptionKey, defaultPaths, HEX64, PLACEHOLDER } from "./env-file.js";
 
@@ -238,7 +239,10 @@ function resolveOperatorLLM() {
   if (gKey) return { provider: "google", apiKey: gKey, baseUrl: null };
   return null;
 }
-const OPERATOR_LLM = resolveOperatorLLM();
+// `let` (not const): the operator setup UI can write a key at runtime and
+// refresh this in-memory (see /api/setup/initialize), so manual seasonal runs
+// work without a restart. All readers see the reassigned value.
+let OPERATOR_LLM = resolveOperatorLLM();
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,http://localhost:5180").split(",").map(s => s.trim());
 const NODE_ENV = process.env.NODE_ENV || "development";
 // Treat an unfilled `.env.example` placeholder (REPLACE_WITH…) as unset, so a
@@ -501,56 +505,43 @@ registerStandardJobs({
   retentionMode: RETENTION_MODE,
 });
 
-// ── Scheduled freshness jobs ──────────────────────────────────────────────
-// Auto-fetch web/college data so it doesn't silently go stale (which erodes
-// trust). All are conservative (weekly/daily, runOnStartup:false) and only
-// ingest from authoritative / operator-registered sources — nothing is
-// fabricated. Status is visible via the counselor job-status endpoint and
-// surfaced (last-run) on /api/methodology.
-
-// (a) Common Data Set re-ingest — DEFAULT ON (opt out with
-//     DISABLE_AUTO_REFRESH_CDS=1; tune cycle via CDS_REFRESH_CYCLE). Re-ingests
-//     the newest registered CDS cycle weekly so qualitative weights track each
-//     school's latest official Common Data Set.
-if (process.env.DISABLE_AUTO_REFRESH_CDS !== "1") {
+// Opt-in auto-refresh of Common Data Set records (the daily domain_monitor
+// already watches official pages; this re-ingests the newest registered CDS
+// cycle). OFF by default because it does network I/O across many schools —
+// enable with AUTO_REFRESH_CDS=1, tune cycle via CDS_REFRESH_CYCLE. Only
+// data from operator-registered authoritative CDS links is ingested; nothing
+// is fabricated. AP concept data is a curated catalog (no live source).
+if (process.env.AUTO_REFRESH_CDS === "1") {
   const CDS_CYCLE = process.env.CDS_REFRESH_CYCLE || "2024-25";
   registerJob("cds_refresh", async () => {
     const { ingestBulk, getRepositoryIndex } = await import("./cds-ingest-pipeline.js");
     const index = await getRepositoryIndex();
     const targets = index.map((e) => e.name).filter(Boolean);
     if (!targets.length) return;
-    console.log(`[CDS-REFRESH] Re-ingesting ${targets.length} school(s) to cycle ${CDS_CYCLE}…`);
+    console.log(`[CDS-REFRESH] Auto-refreshing ${targets.length} school(s) to cycle ${CDS_CYCLE}…`);
     const results = await ingestBulk(ragStmts, targets, { concurrency: 2, year: CDS_CYCLE });
     const ok = results.filter((r) => r.status === "ok" || r.status === "ok_with_overrides").length;
     console.log(`[CDS-REFRESH] Done: ${ok}/${results.length} ingested.`);
   }, 7 * 24 * 60 * 60 * 1000, { runOnStartup: false }); // weekly
-  console.log(`[BOOT] CDS auto-refresh ON (weekly, cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}). Disable with DISABLE_AUTO_REFRESH_CDS=1.`);
+  console.log(`[BOOT] AUTO_REFRESH_CDS enabled — weekly CDS re-ingest for cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}.`);
 }
 
-// (b) College Scorecard history refresh — only with a key. Re-pulls the
-//     federal stats for schools already in the cache so they don't age past
-//     the request-time 7-day TTL once a school stops being actively queried.
-//     fetchAndPersistCollegeHistory skips anything fetched <7 days ago.
-if (SCORECARD_API_KEY) {
-  registerJob("scorecard_refresh", async () => {
-    const rows = db.prepare("SELECT DISTINCT unit_id FROM scorecard_history").all();
-    const unitIds = rows.map((r) => r.unit_id).filter(Boolean);
-    if (!unitIds.length) return;
-    const r = await fetchAndPersistCollegeHistory(db, ragStmts, SCORECARD_API_KEY, unitIds);
-    if (r?.fetched) console.log(`[SCORECARD-REFRESH] ${r.fetched} refreshed, ${r.skipped || 0} skipped, ${r.errors || 0} errors.`);
-  }, 7 * 24 * 60 * 60 * 1000, { runOnStartup: false }); // weekly
-  console.log("[BOOT] Scorecard auto-refresh ON (weekly, cached schools).");
-}
-
-// (c) Official-page monitoring — opt in with ENABLE_DOMAIN_MONITOR=1 (the
-//     standard registration leaves it disabled). Daily diff of admissions /
-//     financial-aid / deadline pages.
-if (process.env.ENABLE_DOMAIN_MONITOR === "1" && monitorStmts) {
-  registerJob("domain_monitor", async () => {
-    const { runDailyMonitor } = await import("./domain-monitor.js");
-    return runDailyMonitor(monitorStmts, { batchSize: 200, delayMs: 1000 });
-  }, 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
-  console.log("[BOOT] ENABLE_DOMAIN_MONITOR=1 — daily official-page monitoring active.");
+// Seasonal credible-source admissions + AP research — opt-in via the ENABLE
+// flag. Registered on the flag ALONE (not gated on the key at boot) so that an
+// operator key set later via the setup UI activates the next scheduled run
+// without a restart: the job body builds the operator callLLM at run time, and
+// runSeasonalResearch no-ops with a clear reason when no OpenRouter key exists.
+// Every scraped stat is adversarially verified against its source; AP concept
+// changes are proposed, never auto-applied.
+if (process.env.ENABLE_SEASONAL_RESEARCH === "1") {
+  const days = Number(process.env.SEASONAL_RESEARCH_INTERVAL_DAYS || 90);
+  ensureSeasonalTables(db);
+  registerJob("seasonal_research", async () => {
+    const { callLLM } = buildOperatorCallLLM();
+    return runSeasonalResearch(db, ragStmts, callLLM, { trigger: "scheduled", topN: Number(process.env.SEASONAL_TOP_N || 25) });
+  }, days * 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
+  const keyNote = OPERATOR_LLM?.provider === "openrouter" ? "operator OpenRouter key present" : "waiting for an operator OpenRouter key";
+  console.log(`[BOOT] ENABLE_SEASONAL_RESEARCH=1 — seasonal admissions+AP research every ${days}d (credible sources only, verified; ${keyNote}).`);
 }
 
 startAllJobs();
@@ -741,30 +732,13 @@ async function callSimulationSidecar(pathname, options = {}) {
 }
 
 // ─── Prestige adapter resolver ──────────────────────────────
-// Prestige web-research runs on OpenRouter's web plugin (see
-// competition-research.js). It only fires when the student has an OpenRouter
-// BYOK key on file; any other provider / no key → competition-research returns
-// source:"unavailable" and the vectorizer falls back to deterministic signals.
-// The adapter carries a recordUsage sink so research spend counts toward the
-// student's monthly budget cap.
-function resolvePrestigeAdapter(studentId) {
-  if (!studentId) return null;
-  let byok;
-  try { byok = lookupStudentBYOK(piiStmts, piiVault, studentId); }
-  catch { return null; }
-  if (!byok || byok.provider !== "openrouter" || !byok.apiKey) return null;
-  const model = byok.models?.medium || byok.models?.large || resolveOpenRouterTier("medium");
-  return {
-    provider: "openrouter",
-    apiKey: byok.apiKey,
-    baseUrl: byok.baseUrl || "https://openrouter.ai/api/v1",
-    model,
-    recordUsage: (usedModel, usage) => {
-      try {
-        ragStmts.insertUsage.run(studentId, `openrouter:${usedModel || model}`, usage?.input_tokens || 0, usage?.output_tokens || 0, "personal");
-      } catch { /* non-fatal */ }
-    },
-  };
+// Prestige web-research is currently disabled: this returns null, so
+// competition-research.js short-circuits to source:"unavailable" and the EC
+// vectorizer falls back to deterministic signals (catalog / benchmark). Re-
+// enabling web-enriched prestige on OpenRouter's web plugin is a tracked
+// follow-up.
+function resolvePrestigeAdapter(_studentId) {
+  return null;
 }
 
 // ───────────────────────────────────────────────────────────
@@ -801,6 +775,66 @@ function buildStudentCallLLM(studentId) {
     return result;
   };
   return { byok, callLLM };
+}
+
+// Operator-keyed callLLM for backend jobs that run WITHOUT a student session
+// (the seasonal research scraper). Mirrors buildStudentCallLLM but uses the
+// shared operator key (OPERATOR_LLM). Web access (wantsWeb) only fires on
+// OpenRouter — the seasonal scraper needs it, so it gates on OpenRouter being
+// the operator provider. Returns { callLLM: null } when no operator key is
+// configured, so callers can no-op gracefully instead of fabricating.
+function buildOperatorCallLLM() {
+  if (!OPERATOR_LLM) return { operator: null, callLLM: null };
+  const callLLM = async (args) => {
+    const provIsOR = OPERATOR_LLM.provider === "openrouter";
+    const useORWebPlugin = provIsOR && !!args.wantsWeb;
+    const model = args.model
+      || (provIsOR ? OPENROUTER_TARGETS.medium : resolveTierDefault(OPERATOR_LLM.provider, "medium"));
+    return adapterCallLLM({
+      provider: OPERATOR_LLM.provider,
+      apiKey: OPERATOR_LLM.apiKey,
+      baseUrl: OPERATOR_LLM.baseUrl,
+      model,
+      maxTokens: args.max_tokens,
+      system: args.system,
+      messages: args.messages,
+      temperature: typeof args.temperature === "number" ? args.temperature : undefined,
+      webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: buildAllowedDomains(args.extraDomains) } : null,
+    });
+  };
+  return { operator: OPERATOR_LLM, callLLM };
+}
+
+// ─── Regulated-topic gate for the chat paths (defense-in-depth) ──────────
+// The client sends specialist prompts, but the SERVER must not trust the
+// client for regulated topics. For regulated/high_stakes: gather evidence (the
+// same fact-store / evidence-graph the orchestrate path uses) and run
+// enforceGates — with no trusted source, return a "no verified answer"
+// response and DO NOT call the model; otherwise return a server-side regulated
+// system prompt to prepend. Returns {} for ordinary topics.
+function regulatedChatGate(classification, studentId, userText, locale) {
+  const tt = classification?.topicType;
+  if (tt !== TOPIC_TYPES.REGULATED && tt !== TOPIC_TYPES.HIGH_STAKES) return {};
+  let evidence = [];
+  try {
+    const facts = searchFacts(factStmts, userText || "", 10) || [];
+    const ev = studentId ? getEvidenceProfile(evidenceStmts, "student", studentId) : null;
+    evidence = [...facts, ...((ev && ev.items) || [])];
+  } catch { /* no evidence → the gate denies for regulated topics */ }
+  const gate = enforceGates(tt, classification.subIntent, evidence);
+  if (!gate.allowed) {
+    const msg = locale === "ko"
+      ? "확인된 공식 출처가 없어 이 규제 관련 질문에 정확히 답변할 수 없습니다. 공식 자료(예: FAFSA는 StudentAid.gov)를 확인하거나 학교 상담 선생님께 문의하세요."
+      : "I don't have a verified official source to answer this regulated question, so I can't give a specific answer. Please check the official source (e.g. StudentAid.gov for FAFSA, your school for FERPA) or your counselor.";
+    return {
+      block: true,
+      response: {
+        content: [{ type: "text", text: msg }],
+        _meta: { deterministic: true, topicType: tt, gates: gate.gates, modelTier: "NONE", noVerifiedSource: true },
+      },
+    };
+  }
+  return { systemPrefix: buildSystemPrompt(classification) };
 }
 
 // Parse the latest profile snapshot into a clean object for LLM prompts.
@@ -1377,7 +1411,7 @@ app.get("/api/llm/openrouter/models", apiLimiter, (req, res) => {
 // migration status. Read-only, no auth — the whole point is openness.
 app.get("/api/methodology", apiLimiter, (_req, res) => {
   try {
-    res.json(buildMethodology({
+    const m = buildMethodology({
       providerMigration: { openrouter: OPENROUTER_STATUS },
       scorecardConfigured: !!SCORECARD_API_KEY,
       cdsCycleLatest: process.env.CDS_REFRESH_CYCLE || "2024-25",
@@ -1385,7 +1419,14 @@ app.get("/api/methodology", apiLimiter, (_req, res) => {
       domainMonitorDaily: process.env.ENABLE_DOMAIN_MONITOR === "1",
       openRouterCatalog: { lastFetched: OPENROUTER_CATALOG.lastFetched, count: OPENROUTER_CATALOG.models.length, reachable: OPENROUTER_CATALOG.reachable },
       jobs: getJobStatus(),
-    }));
+    });
+    // Seasonal credible-source research provenance (when the feature is enabled).
+    m.seasonalResearch = {
+      enabled: process.env.ENABLE_SEASONAL_RESEARCH === "1" && OPERATOR_LLM?.provider === "openrouter",
+      lastRun: getLatestSeasonalRun(db),
+      note: "Last-season admissions + AP data refreshed from official sources only (Common Data Set, collegescorecard.ed.gov, collegeboard.org); every figure is verified against its source before use.",
+    };
+    res.json(m);
   } catch (err) {
     console.error("[methodology] error:", err.message);
     res.status(500).json({ error: "Failed to build methodology" });
@@ -1399,7 +1440,7 @@ app.get("/api/methodology", apiLimiter, (_req, res) => {
 //   anthropic_beta?  // Anthropic PDF passthrough
 // }
 // Flow mirrors /api/anthropic but routes through the adapter layer.
-app.post("/api/llm", apiLimiter, async (req, res) => {
+app.post("/api/llm", apiLimiter, requireStudentAuth, async (req, res) => {
   try {
     const payload = req.body;
     if (!payload || typeof payload !== "object") {
@@ -1454,13 +1495,18 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
     // ── Topic classification + crisis gate ──
     const classification = classifyTopic(userText);
     if (classification.topicType === TOPIC_TYPES.CRISIS) {
-      const crisisResponse = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisisResult = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisis = crisisResult.crisis_response || crisisResult; // builder nests message/resources under crisis_response
       stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", userText.slice(0, 100), hashIP(req.ip));
       return res.json({
-        content: [{ type: "text", text: crisisResponse.message }],
-        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisisResponse.resources },
+        content: [{ type: "text", text: crisis.message }],
+        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
       });
     }
+
+    // ── Regulated-topic gate (server-enforced, defense-in-depth) ──
+    const regGate = regulatedChatGate(classification, studentId, userText, req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+    if (regGate.block) return res.json(regGate.response);
 
     // ── Korea PIPA cross-border consent for student-identified sessions ──
     if (studentId) {
@@ -1538,6 +1584,12 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
     const useORWebPlugin = wantsWeb && provider === "openrouter";
     const orAllowedDomains = buildAllowedDomains(payload.extraDomains);
 
+    // ── Redact PII before anything leaves to the provider (mirror /api/chat) ──
+    // studentId is guaranteed by requireStudentAuth. The token map restores the
+    // model's reply in the output loop below so the student sees real values.
+    const redacted = redactPayloadForModel(payload, studentId);
+    const sendPayload = redacted.payload;
+
     // ── Call adapter ──
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
@@ -1548,8 +1600,8 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
         apiKey,
         baseUrl,
         model,
-        messages: payload.messages,
-        system: payload.system,
+        messages: sendPayload.messages,
+        system: regGate.systemPrefix ? `${regGate.systemPrefix}\n\n${sendPayload.system || ""}` : sendPayload.system,
         maxTokens,
         temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
         webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
@@ -1572,14 +1624,14 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
         if (block?.type === "text" && block.text) {
           const outputScreen = screenOutput(block.text);
           if (outputScreen.modified) block.text = outputScreen.text;
-          block.text = restorePII(block.text, resp._tokenMap);
+          block.text = restorePII(block.text, redacted.tokenMap);
         }
       }
     }
 
     // ── Review queue ──
     try {
-      if (shouldTriggerReview(classification, { content: resp.content })) {
+      if (shouldTriggerReview(classification, { content: resp.content }).shouldReview) {
         submitForReview(reviewStmts, {
           reviewType: "model_output",
           studentId: studentId || "anonymous",
@@ -1942,7 +1994,7 @@ app.get("/api/context/bundle", studentLimiter, requireStudentAuth, async (req, r
 // for that tier is used. `model` is accepted as an explicit override. Every
 // provider routes through the adapter layer; OpenRouter is the default.
 
-app.post("/api/chat", apiLimiter, async (req, res) => {
+app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
   try {
     let payload = req.body;
     if (!payload || typeof payload !== "object") return res.status(400).json({ error: "Invalid request body" });
@@ -1996,13 +2048,18 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
     // ── Step 3: Check if crisis ──
     if (classification.topicType === TOPIC_TYPES.CRISIS) {
-      const crisisResponse = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisisResult = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisis = crisisResult.crisis_response || crisisResult; // builder nests message/resources under crisis_response
       stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", userText.slice(0, 100), hashIP(req.ip));
       return res.json({
-        content: [{ type: "text", text: crisisResponse.message }],
-        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisisResponse.resources },
+        content: [{ type: "text", text: crisis.message }],
+        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
       });
     }
+
+    // ── Step 3b: Regulated-topic gate (server-enforced, defense-in-depth) ──
+    const regGate = regulatedChatGate(classification, studentId, userText, req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+    if (regGate.block) return res.json(regGate.response);
 
     // ── Step 3b: AP concept classification (rules-first, no model) ──
     // Update per-concept mastery components for any AP subject mentioned in
@@ -2147,7 +2204,20 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
     // Every provider is tool-less now, so always strip the "ALWAYS call X
     // tool" directives and auto-inject the student's profile context.
-    const effectiveSystem = rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
+    const effectiveSystemRaw = (regGate.systemPrefix ? regGate.systemPrefix + "\n\n" : "") + rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
+
+    // ── L1: mask PII in the auto-injected system prompt before dispatch ──
+    // buildProfileContext() injects the student's real profile (school name,
+    // EC descriptions, etc.) straight into the system prompt — that text is
+    // built OUTSIDE the payload-redaction boundary above, so without this it
+    // would reach the provider unmasked. Run it through the same provider
+    // patterns and merge its restorable tokens into the restore map so any
+    // the model echoes back (the student's own school/name) are restored for
+    // them after output screening. Already-tokenized payload.system text is
+    // idempotent here (tokens don't re-match the PII patterns).
+    const sysRedaction = redactProviderText(effectiveSystemRaw);
+    const effectiveSystem = sysRedaction.text;
+    Object.assign(redacted.tokenMap, sysRedaction.tokenMap);
 
     let data;
 
@@ -2390,7 +2460,7 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
     // ── Step 7: Check if review needed ──
     try {
-      if (shouldTriggerReview(classification, data)) {
+      if (shouldTriggerReview(classification, data).shouldReview) {
         submitForReview(reviewStmts, {
           reviewType: "model_output",
           studentId: studentId || "anonymous",
@@ -2445,7 +2515,7 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
 app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) => {
   try {
-    const { query, topK } = req.body;
+    const { query } = req.body;
     if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
     if (query.length > 4000) return res.status(400).json({ error: "query is too long" });
 
@@ -2458,27 +2528,30 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
     // Step 2: Policy routing
     const routing = routeRequest(query);
 
-    // Step 3: Check if deterministic
-    if (routing.canHandleDeterministically) {
+    // Step 3: Check if deterministic. routeRequest returns { classification,
+    // gateResult, modelTier, isDeterministic, action } — read the real fields
+    // (the prior code read nonexistent top-level routing.* and never fired).
+    const cls = routing.classification;
+    if (routing.isDeterministic) {
       let deterministicResult = null;
 
-      if (routing.subIntent === "fafsa_eligibility") {
+      if (cls.subIntent === "fafsa" || cls.subIntent === "eligibility") {
         deterministicResult = runFAFSAEligibilityCheck(req.body.studentData || {});
-      } else if (routing.subIntent === "deadline_status") {
+      } else if (cls.subIntent === "deadlines") {
         deterministicResult = calculateDeadlineStatus(req.body.deadlineDate);
-      } else if (routing.subIntent === "document_check") {
+      } else if (cls.subIntent === "documents" || cls.subIntent === "document_completeness") {
         deterministicResult = runDocumentCompletenessCheck(req.body.applicationType, req.body.submittedItems);
       }
 
       if (deterministicResult) {
         const answer = composeDeterministicAnswer({
-          classification: { topicType: routing.topicType, subIntent: routing.subIntent },
+          classification: cls,
           result: deterministicResult,
           locale: req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US",
         });
         return res.json({
           ...answer,
-          _meta: { deterministic: true, modelTier: "NONE", cost: "$0.00", topicType: routing.topicType },
+          _meta: { deterministic: true, modelTier: "NONE", cost: "$0.00", topicType: cls.topicType },
         });
       }
     }
@@ -2490,7 +2563,7 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
     // Step 5: Gather evidence + validate sources for regulated topics
     const evidence = getEvidenceProfile(evidenceStmts, "student", req.studentId);
     const facts = searchFacts(factStmts, query, 10);
-    if (routing.topicType === "regulated" || routing.topicType === "high_stakes") {
+    if (cls.topicType === "regulated" || cls.topicType === "high_stakes") {
       const sourceCheck = validateEvidenceSources([...facts, ...(evidence.items || [])], routing.topicType);
       if (!sourceCheck.allTrusted && sourceCheck.untrustedItems?.length > 0) {
         console.warn(`[ORCH] Untrusted sources filtered for ${routing.topicType}: ${sourceCheck.untrustedItems.length}`);
@@ -2501,9 +2574,9 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
     const orchestration = buildOrchestration({
       query: inputScreen.redacted ? inputScreen.redactedText : query,
       studentContext: context.studentContext,
-      ragStmts,
+      factStmts,
+      evidenceStmts,
       catalog: orchestrationCatalog,
-      topK: Math.min(Math.max(parseInt(topK || "3", 10) || 3, 1), 5),
     });
 
     res.json({
@@ -2511,9 +2584,9 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
       evidence: evidence.items?.slice(0, 10) || [],
       verifiedFacts: facts.slice(0, 5),
       _meta: {
-        topicType: routing.topicType,
+        topicType: cls.topicType,
         modelTier: routing.modelTier,
-        gates: routing.gates,
+        gates: cls.gates,
         deterministic: false,
       },
     });
@@ -2660,6 +2733,33 @@ app.get("/api/cds/validation/:slug", studentLimiter, requireStudentAuth, async (
 });
 
 // ─── Counselor-auth admin endpoints ──────────────────────────────────
+// Manual trigger for seasonal credible-source research. Body:
+//   { colleges?: string[], topN?: number, subjects?: [{subject_id,name}], skipAP?: bool }
+// Runs synchronously (keep the set small — default topN 5 — to stay within the
+// request timeout; full sweeps belong on the scheduled job). Needs an
+// OpenRouter operator key.
+app.post("/api/admin/seasonal-research/run", requireCounselorAuth, async (req, res) => {
+  try {
+    const { callLLM } = buildOperatorCallLLM();
+    if (!callLLM || OPERATOR_LLM?.provider !== "openrouter") {
+      return res.status(503).json({ error: "Seasonal research needs an OpenRouter operator key (set OPENROUTER_API_KEY).", code: "no_operator_openrouter" });
+    }
+    const body = req.body || {};
+    const result = await runSeasonalResearch(db, ragStmts, callLLM, {
+      trigger: "manual",
+      colleges: Array.isArray(body.colleges) ? body.colleges : [],
+      topN: Number.isFinite(+body.topN) ? +body.topN : 5,
+      subjects: Array.isArray(body.subjects) && body.subjects.length ? body.subjects : undefined,
+      skipAP: body.skipAP === true,
+      delayMs: 500,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("[seasonal] run error:", err.message);
+    res.status(500).json({ error: "Seasonal research run failed", detail: err?.message });
+  }
+});
+
 app.post("/api/cds/ingest", requireCounselorAuth, async (req, res) => {
   try {
     const { ingestOne, ingestBulk } = await import("./cds-ingest-pipeline.js");
@@ -6583,6 +6683,8 @@ app.get("/api/setup/status", (req, res) => {
     setupAvailable: SETUP_AVAILABLE,
     encryptionKeyConfigured: ENCRYPTION_KEY_FROM_ENV,   // true ⇒ already set via env; cannot generate
     scorecardConfigured: !!SCORECARD_API_KEY,
+    operatorLlmConfigured: !!OPERATOR_LLM,              // any operator LLM key on file
+    operatorIsOpenRouter: OPERATOR_LLM?.provider === "openrouter", // seasonal web research needs this
     nodeEnv: NODE_ENV,
     needsRestartToApply: true,
   });
@@ -6611,11 +6713,12 @@ app.post("/api/setup/initialize", async (req, res) => {
     if (!isLoopbackRequest(req)) return res.status(403).json({ error: "Setup is only available on the server host (localhost)." });
     if (!setupTokenValid(req)) return res.status(401).json({ error: "Invalid or missing setup token. Use the one-time token printed in the server console at boot." });
 
-    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey } = req.body || {};
+    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey, operatorOpenRouterKey } = req.body || {};
     const { envPath, examplePath, devKeyPath } = defaultPaths(__dirname);
     const lines = readEnvLines(envPath, examplePath);
     const wrote = [];
     let promotedDevKey = false;
+    let operatorLlmRefreshed = false;
 
     // ── ENCRYPTION_KEY — first-run generation only ──
     if (generateEncryptionKey === true) {
@@ -6656,11 +6759,36 @@ app.post("/api/setup/initialize", async (req, res) => {
       wrote.push("SCORECARD_API_KEY");
     }
 
+    // ── OPERATOR OpenRouter key (powers the seasonal research job, which has
+    //    no student session) — live-verified, then applied in-memory so manual
+    //    runs work WITHOUT a restart. The key never leaves the server. ──
+    let operatorKeyToApply = null;
+    if (typeof operatorOpenRouterKey === "string" && operatorOpenRouterKey.trim()) {
+      const k = operatorOpenRouterKey.trim();
+      if (!k.startsWith("sk-or-")) {
+        return res.status(400).json({ error: "That doesn't look like an OpenRouter key (expected an sk-or-… value)." });
+      }
+      const check = await adapterValidateKey({ provider: "openrouter", apiKey: k, baseUrl: "https://openrouter.ai/api/v1" });
+      if (check.valid !== true) {
+        return res.status(400).json({ error: `OpenRouter rejected that key: ${check.message || check.code || "could not verify"}.`, operatorVerify: check });
+      }
+      setValue(lines, "OPENROUTER_API_KEY", k);
+      wrote.push("OPENROUTER_API_KEY");
+      operatorKeyToApply = k;
+    }
+
     if (wrote.length === 0) {
-      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true and/or a scorecardApiKey." });
+      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true, a scorecardApiKey, and/or an operatorOpenRouterKey." });
     }
 
     const backup = writeEnvAtomic(envPath, lines);
+    // Apply the operator key to THIS running process so seasonal research works
+    // immediately (manual trigger); the scheduled cadence registers at boot.
+    if (operatorKeyToApply) {
+      process.env.OPENROUTER_API_KEY = operatorKeyToApply;
+      OPERATOR_LLM = resolveOperatorLLM();
+      operatorLlmRefreshed = true;
+    }
     stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "setup_initialize", "operator", `wrote ${wrote.join(",")}`, hashIP(req.ip));
     console.log(`[SETUP] Wrote ${wrote.join(", ")} to .env via setup endpoint (restart required).`);
 
@@ -6669,9 +6797,12 @@ app.post("/api/setup/initialize", async (req, res) => {
       wrote,
       promotedDevKey,
       scorecardVerified,
+      operatorLlmRefreshed, // operator OpenRouter key applied live (no restart needed for manual runs)
       backup: backup ? path.basename(backup) : null,
-      restartRequired: true,
-      message: "Saved to .env. Restart the backend for the changes to take effect.",
+      restartRequired: !operatorLlmRefreshed || wrote.some((w) => w !== "OPENROUTER_API_KEY"),
+      message: operatorLlmRefreshed
+        ? "Saved. The operator key is active now — seasonal research can run immediately; restart only to start the scheduled cadence."
+        : "Saved to .env. Restart the backend for the changes to take effect.",
     });
   } catch (err) {
     console.error("[SETUP] initialize error:", err.message);

@@ -1,13 +1,18 @@
 ---
 name: collegeapp-ai
 description: US college application counselor grounded in a rules-first backend (FAFSA/FERPA/Korea PIPA compliant). Helps students build a coherent application story using evidence vectors (5-factor EC strength, directionality, AP mastery, narrative fit, competition prestige) retrieved from the college-counselor-backend. OpenRouter-first BYOK — also runs on OpenAI, Google Gemini, DeepSeek, Qwen/Together, Zhipu/GLM, or local Ollama/LM Studio.
-version: 1.2.0
+version: 1.3.0
 ---
 
-<!-- v1.2.0: OpenRouter-only migration. Provider tiers are now generic (no
-     Anthropic/Claude model names); the live model list comes from
-     GET /api/llm/openrouter/models. Prestige web-research runs on OpenRouter's
-     web plugin (was Anthropic web_search). Added Providers & BYOK and Data
+<!-- v1.3.0: Seasonal credible-source research. A counselor/operator can refresh
+     last-season admissions stats + AP score distributions and propose AP
+     concept updates from official sources only (Common Data Set,
+     collegescorecard.ed.gov, collegeboard.org), each figure verified against
+     its source. Trigger: POST /api/admin/seasonal-research/run (counselor) or
+     scripts/seasonal-run.js; freshness shows in GET /api/methodology
+     (seasonalResearch). Also: the older broad refresh jobs are now opt-in.
+     v1.2.0: OpenRouter-only migration — generic tiers (live list from
+     GET /api/llm/openrouter/models), web-plugin prestige, Providers/BYOK +
      freshness sections. See the ".md network" cross-links at the bottom. -->
 
 
@@ -148,10 +153,10 @@ Useful read-only endpoints (counselor-auth):
 The backend keeps its data current so you can trust it — and surfaces "data as of" provenance:
 
 - **LLM model catalog** — refreshed from OpenRouter's live `/models` at boot + every 24h. `GET /api/llm/openrouter/models` returns `{ reachable, lastFetched, count, models }`.
-- **College Scorecard** — live at request time when a key is configured; a weekly job re-pulls cached schools.
-- **Common Data Set** — re-ingested weekly (operator-registered official links only; never fabricated).
-- **Official pages** — optional daily diff monitoring.
-- `GET /api/methodology` is the single transparency surface: factor weights, thresholds, every data source + its `lastRefreshed` timestamp, and the live model-catalog status. Cite it when a student asks "how do you know this / how fresh is this?"
+- **College Scorecard** — live at request time when a key is configured.
+- **Common Data Set** — operator-registered official links only; never fabricated. Auto re-ingest is opt-in (`AUTO_REFRESH_CDS=1`).
+- **Seasonal credible-source research** — refreshes last-season admissions stats + AP score distributions and proposes AP concept updates from **official sources only** (Common Data Set, `collegescorecard.ed.gov`, `collegeboard.org` — never forums/blogs/Reddit). **Every scraped figure is adversarially verified against its cited source before it's trusted**; anything unconfirmed is quarantined, never shown. AP concept changes are *proposed*, never auto-applied. Opt-in (`ENABLE_SEASONAL_RESEARCH=1`) and needs an OpenRouter operator key. Triggered by the scheduled job or, on demand, by a counselor via `POST /api/admin/seasonal-research/run` / `scripts/seasonal-run.js`. **Note: this is a counselor/operator action — the student-facing skill never triggers it.**
+- `GET /api/methodology` is the single transparency surface: factor weights, thresholds, data sources + freshness, model-catalog status, and `seasonalResearch` (last run + verify/flag counts). Cite it when a student asks "how do you know this / how fresh is this?"
 
 ## Tool allowlist
 

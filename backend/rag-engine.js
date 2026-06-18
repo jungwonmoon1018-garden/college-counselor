@@ -156,7 +156,8 @@ export function initRAGTables(db) {
       grad_rate_6yr REAL,
       median_earnings_10yr INTEGER,
       data_year INTEGER,
-      source TEXT DEFAULT 'NCES IPEDS'
+      source TEXT DEFAULT 'NCES IPEDS',
+      website TEXT
     );
 
     -- API usage log (per-student, per-call tracking ??no PII, just opaque IDs)
@@ -405,6 +406,18 @@ export function initRAGTables(db) {
     console.warn("[RAG] cds_records migration warning:", err.message);
   }
 
+  // baseline_colleges.website — each college's official site (from Scorecard
+  // school.school_url). Lets the seasonal researcher scope web search to that
+  // college's own .edu host. Added after initial release.
+  try {
+    const colCols = db.prepare(`PRAGMA table_info(baseline_colleges)`).all().map((r) => r.name);
+    if (!colCols.includes("website")) {
+      db.exec(`ALTER TABLE baseline_colleges ADD COLUMN website TEXT`);
+    }
+  } catch (err) {
+    console.warn("[RAG] baseline_colleges migration warning:", err.message);
+  }
+
   // Directionality vectors (overall academic trajectory and fit)
   initDirectionalityTable(db);
 
@@ -448,7 +461,7 @@ export function seedBaselines(db, { GPA_BASELINES, SAT_BASELINES, ACT_BASELINES,
     const ecStmt = db.prepare(`INSERT OR REPLACE INTO baseline_ec (category, participation_pct, avg_hours, leadership_pct, impact_tier, target_major, source, data_year) VALUES (?,?,?,?,?,?,?,?)`);
     for (const e of EC_BENCHMARKS) ecStmt.run(e.category, e.participation_pct, e.avg_hours, e.leadership_pct, e.impact_tier, e.target_major, e.source, e.year);
 
-    const colStmt = db.prepare(`INSERT OR REPLACE INTO baseline_colleges (unit_id, name, state, sat_25, sat_75, act_25, act_75, acceptance_rate, enrollment, tuition_in, tuition_out, avg_gpa_admitted, ap_courses_valued_json, top_majors_json, ec_emphasis_json, yield_rate, retention_rate, grad_rate_6yr, median_earnings_10yr, data_year) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const colStmt = db.prepare(`INSERT OR REPLACE INTO baseline_colleges (unit_id, name, state, sat_25, sat_75, act_25, act_75, acceptance_rate, enrollment, tuition_in, tuition_out, avg_gpa_admitted, ap_courses_valued_json, top_majors_json, ec_emphasis_json, yield_rate, retention_rate, grad_rate_6yr, median_earnings_10yr, data_year, website) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const c of COLLEGE_PROFILES) {
       colStmt.run(
         c.unitId, c.name, c.state, c.sat25, c.sat75, c.act25, c.act75,
@@ -458,7 +471,8 @@ export function seedBaselines(db, { GPA_BASELINES, SAT_BASELINES, ACT_BASELINES,
         JSON.stringify(c.topMajors || []),
         JSON.stringify(c.ecEmphasis || []),
         normalizeRate(c.yieldRate), normalizeRate(c.retentionRate),
-        normalizeRate(c.gradRate6yr), c.medianEarnings10yr, c.dataYear
+        normalizeRate(c.gradRate6yr), c.medianEarnings10yr, c.dataYear,
+        c.website || c.url || null
       );
     }
 
@@ -472,6 +486,36 @@ export function seedBaselines(db, { GPA_BASELINES, SAT_BASELINES, ACT_BASELINES,
   });
   tx();
   console.log(`[RAG] Baselines seeded: ${GPA_BASELINES.length} GPA, ${SAT_BASELINES.length} SAT, ${ACT_BASELINES.length} ACT, ${EC_BENCHMARKS.length} EC, ${COLLEGE_PROFILES.length} colleges, ${COMPETITIVE_ACTIVITY_BENCHMARKS?.length || 0} competitive`);
+}
+
+// Backfill baseline_colleges.website from the Scorecard cache (school.school_url
+// is captured into the cached payload as `.website`). Best-effort: only fills
+// rows where website is currently empty, so static seed values win. Returns the
+// number of rows updated. Used by the seasonal researcher to scope web search
+// to each college's official .edu host.
+export function hydrateBaselineWebsites(db) {
+  let updated = 0;
+  try {
+    // Nothing to backfill from if the Scorecard cache hasn't been created yet.
+    const hasCache = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='scorecard_cache'`).get();
+    if (!hasCache) return 0;
+    const rows = db.prepare(`SELECT unit_id, data_json FROM scorecard_cache`).all();
+    const upd = db.prepare(`UPDATE baseline_colleges SET website = ? WHERE unit_id = ? AND (website IS NULL OR website = '')`);
+    const tx = db.transaction(() => {
+      for (const r of rows) {
+        let data;
+        try { data = JSON.parse(r.data_json || "{}"); } catch { continue; }
+        const site = data.website || data.school_url || data["school.school_url"] || "";
+        if (!site || typeof site !== "string") continue;
+        const res = upd.run(site.trim(), r.unit_id);
+        updated += res.changes;
+      }
+    });
+    tx();
+  } catch (err) {
+    console.warn("[RAG] hydrateBaselineWebsites warning:", err.message);
+  }
+  return updated;
 }
 
 
