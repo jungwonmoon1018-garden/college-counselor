@@ -18,17 +18,18 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = path.resolve(__dirname, "../skills/collegeapp-ai");
 
-test("SKILL.md declares v1.3 and the required fields", () => {
+test("SKILL.md declares v1.4 and the required fields", () => {
   const md = fs.readFileSync(path.join(SKILL_DIR, "SKILL.md"), "utf8");
 
   // YAML frontmatter with the core metadata.
   assert.match(md, /^---/,                "YAML frontmatter missing");
   assert.match(md, /name:\s*collegeapp-ai/, "skill name missing");
-  assert.match(md, /version:\s*1\.3\.0/,   "skill version must be 1.3.0 (seasonal credible-source research)");
+  assert.match(md, /version:\s*1\.4\.0/,   "skill version must be 1.4.0 (seasonal hardening + chat-route safety)");
   // Seasonal research must be documented as a verified, official-source-only,
   // counselor-triggered feature.
   assert.match(md, /seasonal-research\/run/, "SKILL.md must document the seasonal trigger endpoint");
-  assert.match(md, /verified against its (cited )?source/i, "SKILL.md must state seasonal figures are source-verified");
+  assert.match(md, /cross-checked through three independent lenses/i, "SKILL.md must state seasonal figures are cross-checked against official sources");
+  assert.match(md, /quarantine/i, "SKILL.md must state contradicted seasonal figures are quarantined, never shown");
 
   // OpenRouter migration markers — the v1.2.0 harness must NOT name Anthropic
   // tiers and must point at the live OpenRouter model list + BYOK gate.
