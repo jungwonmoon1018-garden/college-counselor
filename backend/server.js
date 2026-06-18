@@ -755,6 +755,34 @@ function buildStudentCallLLM(studentId) {
   return { byok, callLLM };
 }
 
+// Operator-keyed callLLM for backend jobs that run WITHOUT a student session
+// (the seasonal research scraper). Mirrors buildStudentCallLLM but uses the
+// shared operator key (OPERATOR_LLM). Web access (wantsWeb) only fires on
+// OpenRouter — the seasonal scraper needs it, so it gates on OpenRouter being
+// the operator provider. Returns { callLLM: null } when no operator key is
+// configured, so callers can no-op gracefully instead of fabricating.
+function buildOperatorCallLLM() {
+  if (!OPERATOR_LLM) return { operator: null, callLLM: null };
+  const callLLM = async (args) => {
+    const provIsOR = OPERATOR_LLM.provider === "openrouter";
+    const useORWebPlugin = provIsOR && !!args.wantsWeb;
+    const model = args.model
+      || (provIsOR ? OPENROUTER_TARGETS.medium : resolveTierDefault(OPERATOR_LLM.provider, "medium"));
+    return adapterCallLLM({
+      provider: OPERATOR_LLM.provider,
+      apiKey: OPERATOR_LLM.apiKey,
+      baseUrl: OPERATOR_LLM.baseUrl,
+      model,
+      maxTokens: args.max_tokens,
+      system: args.system,
+      messages: args.messages,
+      temperature: typeof args.temperature === "number" ? args.temperature : undefined,
+      webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: buildAllowedDomains(args.extraDomains) } : null,
+    });
+  };
+  return { operator: OPERATOR_LLM, callLLM };
+}
+
 // Parse the latest profile snapshot into a clean object for LLM prompts.
 // PII-light: names/descriptions of the student's OWN activities/courses are
 // their own data (no third-party PII), and BYOK calls bill the student.
