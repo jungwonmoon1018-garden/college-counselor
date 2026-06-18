@@ -1,10 +1,21 @@
 ---
 name: collegeapp-ai
 description: US college application counselor grounded in a rules-first backend (FAFSA/FERPA/Korea PIPA compliant). Helps students build a coherent application story using evidence vectors (5-factor EC strength, directionality, AP mastery, narrative fit, competition prestige) retrieved from the college-counselor-backend. OpenRouter-first BYOK — also runs on OpenAI, Google Gemini, DeepSeek, Qwen/Together, Zhipu/GLM, or local Ollama/LM Studio.
-version: 1.3.0
+version: 1.4.0
 ---
 
-<!-- v1.3.0: Seasonal credible-source research. A counselor/operator can refresh
+<!-- v1.4.0: Seasonal researcher hardening + chat-route safety. (1) Each college
+     is now searched on its OWN official .edu host (from Scorecard school_url),
+     not just the shared credible hosts. (2) Each scraped stat is cross-checked
+     through THREE independent lenses (Common Data Set / federal Scorecard+NCES /
+     cited source); a contradiction QUARANTINES the value so it never reaches a
+     student. (3) The operator OpenRouter key is entered in the loopback setup UI
+     and takes effect without a restart. (4) Chat routes now require a student
+     session, the auto-injected profile is PII-masked before it leaves to the
+     model, output screening covers SSN+phone, and essay ghost-writing is refused
+     server-side (with a coaching redirect) — the red lines below are now ALSO
+     enforced by the backend, not just trusted to the client.
+     v1.3.0: Seasonal credible-source research. A counselor/operator can refresh
      last-season admissions stats + AP score distributions and propose AP
      concept updates from official sources only (Common Data Set,
      collegescorecard.ed.gov, collegeboard.org), each figure verified against
@@ -115,6 +126,8 @@ If you see `version === "1.0"`, fall back to the 4-factor vector — don't assum
 
 The backend is reached via `$COLLEGEAPP_BACKEND_URL` (default `http://localhost:3001`). The student's session token lives in `$COLLEGEAPP_SESSION_TOKEN`. Neither is visible in the context — the skill never sees raw PII; the bundle has already been [STUDENT]-placeheld and PII-screened server-side.
 
+`/api/chat` and `/api/llm` now **require a student session** (a missing/invalid token returns 401) — there is no anonymous path to the model. The profile context the backend auto-injects into the system prompt is **PII-masked before it leaves to the provider**, and output is screened for leaked SSN/phone, so a valid token is the entry point but raw PII still never crosses the model boundary.
+
 ## Tiered reasoning recipe
 
 The backend exposes `POST /api/llm` with a `tier` parameter. **You don't pick a model id — you pick a reasoning level.** The backend maps the tier to the student's BYOK model for that tier. The actual model behind each tier is whatever the student picked from OpenRouter's **live** catalog (`GET /api/llm/openrouter/models`); recommended defaults per provider come from `GET /api/llm/providers`. Do NOT hard-code or name specific models.
@@ -155,7 +168,7 @@ The backend keeps its data current so you can trust it — and surfaces "data as
 - **LLM model catalog** — refreshed from OpenRouter's live `/models` at boot + every 24h. `GET /api/llm/openrouter/models` returns `{ reachable, lastFetched, count, models }`.
 - **College Scorecard** — live at request time when a key is configured.
 - **Common Data Set** — operator-registered official links only; never fabricated. Auto re-ingest is opt-in (`AUTO_REFRESH_CDS=1`).
-- **Seasonal credible-source research** — refreshes last-season admissions stats + AP score distributions and proposes AP concept updates from **official sources only** (Common Data Set, `collegescorecard.ed.gov`, `collegeboard.org` — never forums/blogs/Reddit). **Every scraped figure is adversarially verified against its cited source before it's trusted**; anything unconfirmed is quarantined, never shown. AP concept changes are *proposed*, never auto-applied. Opt-in (`ENABLE_SEASONAL_RESEARCH=1`) and needs an OpenRouter operator key. Triggered by the scheduled job or, on demand, by a counselor via `POST /api/admin/seasonal-research/run` / `scripts/seasonal-run.js`. **Note: this is a counselor/operator action — the student-facing skill never triggers it.**
+- **Seasonal credible-source research** — refreshes last-season admissions stats + AP score distributions and proposes AP concept updates from **official sources only** (Common Data Set, `collegescorecard.ed.gov`, `collegeboard.org`, and each college's own `.edu` — never forums/blogs/Reddit). Each college is searched on its **own official `.edu` host** (resolved from College Scorecard's `school_url`), on top of the shared credible hosts. **Every scraped figure is cross-checked through three independent lenses** — the institution's Common Data Set, the federal Scorecard/NCES data, and the originally cited page. A stat is trusted only when at least two confirm and match; **any contradiction quarantines the value** (it is removed, never shown). AP concept changes are *proposed*, never auto-applied. Opt-in (`ENABLE_SEASONAL_RESEARCH=1`) and needs an OpenRouter operator key — entered in the loopback **setup UI** (takes effect without a restart), never hand-edited. Triggered by the scheduled job or, on demand, by a counselor via `POST /api/admin/seasonal-research/run` / `scripts/seasonal-run.js`. **Note: this is a counselor/operator action — the student-facing skill never triggers it.**
 - `GET /api/methodology` is the single transparency surface: factor weights, thresholds, data sources + freshness, model-catalog status, and `seasonalResearch` (last run + verify/flag counts). Cite it when a student asks "how do you know this / how fresh is this?"
 
 ## Tool allowlist
@@ -168,7 +181,7 @@ Prefer these Claude Code tools when operating this skill:
 
 ## Red lines
 
-- **Do not produce verbatim essay text the student did not write.** Draft bullets, outlines, critiques, revisions of the student's own words — but never ghost-write an application essay.
+- **Do not produce verbatim essay text the student did not write.** Draft bullets, outlines, critiques, revisions of the student's own words — but never ghost-write an application essay. The backend now also enforces this: a request to "write my essay" is refused server-side with a coaching redirect (HTTP 400, `blocked: true`), so honor that — pivot to brainstorming, outlining, or feedback on the student's own draft.
 - **Regulated topics (FAFSA / FERPA / Korea PIPA) require a citation.** Every claim must be backed by `rag.baselineContext.ruleCitations`. If the ruleCitations don't cover the question, answer "I don't have a verified source for that — please check your counselor."
 - **Crisis detection is the backend's job.** If the backend returns `_meta.topicType === "CRISIS"` on any `/api/llm` response, the skill must stop reasoning and display the backend's crisis resources verbatim. Do not attempt to counsel.
 - **No raw PII.** The bundle uses `[STUDENT]` placeholders. Don't ask the student for their name, full address, SSN, or parent contact info — the backend already knows, and it shouldn't enter the LLM context.
