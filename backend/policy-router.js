@@ -51,6 +51,11 @@ const PATTERNS = {
     /\b(suicid|kill\s*my\s*self|self[- ]?harm|want\s*to\s*die|end\s*(my|it\s*all)|hurt\s*myself)\b/i,
     /\b(abuse|abused|molest|assault|domestic\s*violence)\b/i,
     /\b(emergency|danger|unsafe|threatened)\b/i,
+    // Korean (a first-class locale here, with Korean crisis hotlines). No \b —
+    // word boundaries behave poorly for CJK; match the lexemes directly.
+    /(자살|자해|죽고\s*싶|죽고싶|목숨을\s*끊|극단적\s*선택)/,
+    /(학대|성추행|성폭행|폭행|가정폭력)/,
+    /(응급|위급|살려\s*주세요|도와\s*주세요)/,
   ],
   regulated: {
     fafsa: /\bfafsa\b|\bstudent\s*aid\s*index\b|\bsai\b|\befc\b|\bexpected\s*family\s*contribution\b|\bfederal\s*student\s*aid\b|\bstudentaid\.gov\b|\bfsa\s*id\b|\bcontributor\b.*\bfafsa\b/i,

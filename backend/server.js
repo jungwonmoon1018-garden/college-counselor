@@ -239,7 +239,10 @@ function resolveOperatorLLM() {
   if (gKey) return { provider: "google", apiKey: gKey, baseUrl: null };
   return null;
 }
-const OPERATOR_LLM = resolveOperatorLLM();
+// `let` (not const): the operator setup UI can write a key at runtime and
+// refresh this in-memory (see /api/setup/initialize), so manual seasonal runs
+// work without a restart. All readers see the reassigned value.
+let OPERATOR_LLM = resolveOperatorLLM();
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,http://localhost:5180").split(",").map(s => s.trim());
 const NODE_ENV = process.env.NODE_ENV || "development";
 // Treat an unfilled `.env.example` placeholder (REPLACE_WITH…) as unset, so a
@@ -523,20 +526,22 @@ if (process.env.AUTO_REFRESH_CDS === "1") {
   console.log(`[BOOT] AUTO_REFRESH_CDS enabled — weekly CDS re-ingest for cycle ${process.env.CDS_REFRESH_CYCLE || "2024-25"}.`);
 }
 
-// Seasonal credible-source admissions + AP research — opt-in, and only when an
-// OpenRouter OPERATOR key is configured (a scheduled job has no student
-// session). Every scraped stat is adversarially verified against its source;
-// AP concept changes are proposed, never auto-applied. Inert by design
-// otherwise — buildOperatorCallLLM yields a null callLLM and runSeasonalResearch
-// no-ops with a clear reason.
-if (process.env.ENABLE_SEASONAL_RESEARCH === "1" && OPERATOR_LLM?.provider === "openrouter") {
+// Seasonal credible-source admissions + AP research — opt-in via the ENABLE
+// flag. Registered on the flag ALONE (not gated on the key at boot) so that an
+// operator key set later via the setup UI activates the next scheduled run
+// without a restart: the job body builds the operator callLLM at run time, and
+// runSeasonalResearch no-ops with a clear reason when no OpenRouter key exists.
+// Every scraped stat is adversarially verified against its source; AP concept
+// changes are proposed, never auto-applied.
+if (process.env.ENABLE_SEASONAL_RESEARCH === "1") {
   const days = Number(process.env.SEASONAL_RESEARCH_INTERVAL_DAYS || 90);
   ensureSeasonalTables(db);
   registerJob("seasonal_research", async () => {
     const { callLLM } = buildOperatorCallLLM();
     return runSeasonalResearch(db, ragStmts, callLLM, { trigger: "scheduled", topN: Number(process.env.SEASONAL_TOP_N || 25) });
   }, days * 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
-  console.log(`[BOOT] ENABLE_SEASONAL_RESEARCH=1 — seasonal admissions+AP research every ${days}d (credible sources only, verified).`);
+  const keyNote = OPERATOR_LLM?.provider === "openrouter" ? "operator OpenRouter key present" : "waiting for an operator OpenRouter key";
+  console.log(`[BOOT] ENABLE_SEASONAL_RESEARCH=1 — seasonal admissions+AP research every ${days}d (credible sources only, verified; ${keyNote}).`);
 }
 
 startAllJobs();
@@ -1458,11 +1463,12 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
     // ── Topic classification + crisis gate ──
     const classification = classifyTopic(userText);
     if (classification.topicType === TOPIC_TYPES.CRISIS) {
-      const crisisResponse = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisisResult = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisis = crisisResult.crisis_response || crisisResult; // builder nests message/resources under crisis_response
       stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", userText.slice(0, 100), hashIP(req.ip));
       return res.json({
-        content: [{ type: "text", text: crisisResponse.message }],
-        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisisResponse.resources },
+        content: [{ type: "text", text: crisis.message }],
+        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
       });
     }
 
@@ -1583,7 +1589,7 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
 
     // ── Review queue ──
     try {
-      if (shouldTriggerReview(classification, { content: resp.content })) {
+      if (shouldTriggerReview(classification, { content: resp.content }).shouldReview) {
         submitForReview(reviewStmts, {
           reviewType: "model_output",
           studentId: studentId || "anonymous",
@@ -2000,11 +2006,12 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
     // ── Step 3: Check if crisis ──
     if (classification.topicType === TOPIC_TYPES.CRISIS) {
-      const crisisResponse = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisisResult = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+      const crisis = crisisResult.crisis_response || crisisResult; // builder nests message/resources under crisis_response
       stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", userText.slice(0, 100), hashIP(req.ip));
       return res.json({
-        content: [{ type: "text", text: crisisResponse.message }],
-        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisisResponse.resources },
+        content: [{ type: "text", text: crisis.message }],
+        _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
       });
     }
 
@@ -2394,7 +2401,7 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
     // ── Step 7: Check if review needed ──
     try {
-      if (shouldTriggerReview(classification, data)) {
+      if (shouldTriggerReview(classification, data).shouldReview) {
         submitForReview(reviewStmts, {
           reviewType: "model_output",
           studentId: studentId || "anonymous",
@@ -6614,6 +6621,8 @@ app.get("/api/setup/status", (req, res) => {
     setupAvailable: SETUP_AVAILABLE,
     encryptionKeyConfigured: ENCRYPTION_KEY_FROM_ENV,   // true ⇒ already set via env; cannot generate
     scorecardConfigured: !!SCORECARD_API_KEY,
+    operatorLlmConfigured: !!OPERATOR_LLM,              // any operator LLM key on file
+    operatorIsOpenRouter: OPERATOR_LLM?.provider === "openrouter", // seasonal web research needs this
     nodeEnv: NODE_ENV,
     needsRestartToApply: true,
   });
@@ -6642,11 +6651,12 @@ app.post("/api/setup/initialize", async (req, res) => {
     if (!isLoopbackRequest(req)) return res.status(403).json({ error: "Setup is only available on the server host (localhost)." });
     if (!setupTokenValid(req)) return res.status(401).json({ error: "Invalid or missing setup token. Use the one-time token printed in the server console at boot." });
 
-    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey } = req.body || {};
+    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey, operatorOpenRouterKey } = req.body || {};
     const { envPath, examplePath, devKeyPath } = defaultPaths(__dirname);
     const lines = readEnvLines(envPath, examplePath);
     const wrote = [];
     let promotedDevKey = false;
+    let operatorLlmRefreshed = false;
 
     // ── ENCRYPTION_KEY — first-run generation only ──
     if (generateEncryptionKey === true) {
@@ -6687,11 +6697,36 @@ app.post("/api/setup/initialize", async (req, res) => {
       wrote.push("SCORECARD_API_KEY");
     }
 
+    // ── OPERATOR OpenRouter key (powers the seasonal research job, which has
+    //    no student session) — live-verified, then applied in-memory so manual
+    //    runs work WITHOUT a restart. The key never leaves the server. ──
+    let operatorKeyToApply = null;
+    if (typeof operatorOpenRouterKey === "string" && operatorOpenRouterKey.trim()) {
+      const k = operatorOpenRouterKey.trim();
+      if (!k.startsWith("sk-or-")) {
+        return res.status(400).json({ error: "That doesn't look like an OpenRouter key (expected an sk-or-… value)." });
+      }
+      const check = await adapterValidateKey({ provider: "openrouter", apiKey: k, baseUrl: "https://openrouter.ai/api/v1" });
+      if (check.valid !== true) {
+        return res.status(400).json({ error: `OpenRouter rejected that key: ${check.message || check.code || "could not verify"}.`, operatorVerify: check });
+      }
+      setValue(lines, "OPENROUTER_API_KEY", k);
+      wrote.push("OPENROUTER_API_KEY");
+      operatorKeyToApply = k;
+    }
+
     if (wrote.length === 0) {
-      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true and/or a scorecardApiKey." });
+      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true, a scorecardApiKey, and/or an operatorOpenRouterKey." });
     }
 
     const backup = writeEnvAtomic(envPath, lines);
+    // Apply the operator key to THIS running process so seasonal research works
+    // immediately (manual trigger); the scheduled cadence registers at boot.
+    if (operatorKeyToApply) {
+      process.env.OPENROUTER_API_KEY = operatorKeyToApply;
+      OPERATOR_LLM = resolveOperatorLLM();
+      operatorLlmRefreshed = true;
+    }
     stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "setup_initialize", "operator", `wrote ${wrote.join(",")}`, hashIP(req.ip));
     console.log(`[SETUP] Wrote ${wrote.join(", ")} to .env via setup endpoint (restart required).`);
 
@@ -6700,9 +6735,12 @@ app.post("/api/setup/initialize", async (req, res) => {
       wrote,
       promotedDevKey,
       scorecardVerified,
+      operatorLlmRefreshed, // operator OpenRouter key applied live (no restart needed for manual runs)
       backup: backup ? path.basename(backup) : null,
-      restartRequired: true,
-      message: "Saved to .env. Restart the backend for the changes to take effect.",
+      restartRequired: !operatorLlmRefreshed || wrote.some((w) => w !== "OPENROUTER_API_KEY"),
+      message: operatorLlmRefreshed
+        ? "Saved. The operator key is active now — seasonal research can run immediately; restart only to start the scheduled cadence."
+        : "Saved to .env. Restart the backend for the changes to take effect.",
     });
   } catch (err) {
     console.error("[SETUP] initialize error:", err.message);

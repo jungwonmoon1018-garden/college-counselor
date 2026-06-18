@@ -39,6 +39,7 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
   const [token, setToken] = useState("");
   const [email, setEmail] = useState("");
   const [scorecard, setScorecard] = useState("");
+  const [operatorKey, setOperatorKey] = useState("");
   const [busy, setBusy] = useState("");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -161,12 +162,32 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
           </p>
         </div>
 
+        {/* Operator OpenRouter key — powers the seasonal research job */}
+        <div style={box}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>3 · Operator OpenRouter key (optional)</div>
+          <p style={{ color: C.sub, fontSize: 13, marginBottom: 12 }}>
+            Powers the seasonal credible-source research job, which has no student session of its own.
+            Only needed if you enable that feature. Get a key at openrouter.ai. It stays on the server.
+          </p>
+          <label style={label}>Paste your operator OpenRouter key</label>
+          <input style={{ ...input, marginBottom: 10 }} value={operatorKey} onChange={(e) => setOperatorKey(e.target.value)}
+                 placeholder="sk-or-…" autoComplete="off" spellCheck={false} type="password" />
+          <button style={btn(C.blue)} disabled={needsToken || !operatorKey.trim() || busy === "operator"}
+                  onClick={() => initialize({ operatorOpenRouterKey: operatorKey.trim() }, "operator")}>
+            {busy === "operator" ? "Verifying…" : "Verify & save to .env"}
+          </button>
+          <p style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>
+            Verified live against OpenRouter before saving. Applied immediately — manual seasonal runs work without a restart.
+          </p>
+        </div>
+
         {error && <div style={{ ...box, borderColor: C.red, color: C.red }}>⚠ {error}</div>}
         {result?.ok && (
           <div style={{ ...box, borderColor: C.green }}>
             <Row color={C.green}>✓ {result.message}</Row>
             <Row color={C.sub}>Wrote: {result.wrote.join(", ")}{result.backup ? ` · backup: ${result.backup}` : ""}</Row>
             {result.scorecardVerified && <Row color={C.green}>Scorecard key verified live against api.data.gov ✓</Row>}
+            {result.operatorLlmRefreshed && <Row color={C.green}>Operator OpenRouter key verified + active now — seasonal research can run immediately ✓</Row>}
             {result.promotedDevKey && <Row color={C.sub}>Promoted the existing dev key, so current local data stays readable.</Row>}
             <Row color={C.orange}>Restart the backend (<code>npm start</code>) to apply.</Row>
           </div>
