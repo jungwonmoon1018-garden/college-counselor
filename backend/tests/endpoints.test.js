@@ -295,8 +295,18 @@ describe("POST /api/notify-parent", () => {
 // API PROXY VALIDATION
 // ═══════════════════════════════════════════════════════════
 describe("POST /api/chat (validation only)", () => {
+  // /api/chat now requires student auth (S1). Validation tests carry a token
+  // so they reach the handler's validation; a separate test covers unauth.
+  let auth;
+  before(async () => { auth = { Authorization: `Bearer ${(await createStudentSession()).token}` }; });
+
+  it("rejects unauthenticated requests", async () => {
+    const { status } = await req("POST", "/api/chat", { tier: "medium", messages: [{ role: "user", content: "hi" }], max_tokens: 100 });
+    assert.equal(status, 401);
+  });
+
   it("rejects empty body", async () => {
-    const { status } = await req("POST", "/api/chat", {});
+    const { status } = await req("POST", "/api/chat", {}, auth);
     assert.equal(status, 400);
   });
 
@@ -305,7 +315,7 @@ describe("POST /api/chat (validation only)", () => {
       model: "bad model id",
       messages: [{ role: "user", content: "test" }],
       max_tokens: 100,
-    });
+    }, auth);
     assert.equal(status, 400);
   });
 
@@ -313,7 +323,7 @@ describe("POST /api/chat (validation only)", () => {
     const { status } = await req("POST", "/api/chat", {
       tier: "medium",
       max_tokens: 100,
-    });
+    }, auth);
     assert.equal(status, 400);
   });
 
@@ -323,7 +333,7 @@ describe("POST /api/chat (validation only)", () => {
       tier: "medium",
       messages,
       max_tokens: 100,
-    });
+    }, auth);
     assert.equal(status, 400);
   });
 });

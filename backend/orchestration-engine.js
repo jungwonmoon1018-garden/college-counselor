@@ -272,7 +272,7 @@ function buildPromptPackage(routing, query, evidence, studentContext, catalog) {
 }
 
 // ─── Build system prompt based on topic classification ───
-function buildSystemPrompt(classification) {
+export function buildSystemPrompt(classification) {
   const base = "You are a college counseling assistant. You provide source-grounded guidance for high school students.";
 
   if (classification.topicType === "regulated") {

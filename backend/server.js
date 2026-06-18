@@ -78,7 +78,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // ── New architecture modules ──
-import { routeRequest, classifyTopic, TOPIC_TYPES, MODEL_TIERS } from "./policy-router.js";
+import { routeRequest, classifyTopic, enforceGates, TOPIC_TYPES, MODEL_TIERS } from "./policy-router.js";
 import { runFAFSAEligibilityCheck, calculateDeadlineStatus, runDocumentCompletenessCheck, computePercentile, computeAPRigorIndex, estimateNetPrice, evaluateComplianceGate, buildCrisisResponse } from "./rules-engine.js";
 import { initFactStore, prepareFactStatements, seedCollegeFacts, lookupFact, searchFacts, expireOldFacts, getFactStoreStats } from "./fact-store.js";
 import { initEvidenceGraph, prepareEvidenceStatements, getEvidenceProfile, buildStudentDimensionProfile, seedECBenchmarkEvidence, seedCollegeEvidence, seedCompetitiveActivityEvidence } from "./evidence-graph.js";
@@ -212,7 +212,7 @@ import {
   getCourseSequence,
   diffCoursesAgainstSequence,
 } from "./course-sequence-catalog.js";
-import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel } from "./orchestration-engine.js";
+import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel, buildSystemPrompt } from "./orchestration-engine.js";
 import { t, resolveLocale, localizeFriendlyLabels } from "./i18n.js";
 import { readEnvLines, getValue, setValue, writeEnvAtomic, resolveFirstRunEncryptionKey, defaultPaths, HEX64, PLACEHOLDER } from "./env-file.js";
 
@@ -803,6 +803,38 @@ function buildOperatorCallLLM() {
     });
   };
   return { operator: OPERATOR_LLM, callLLM };
+}
+
+// ─── Regulated-topic gate for the chat paths (defense-in-depth) ──────────
+// The client sends specialist prompts, but the SERVER must not trust the
+// client for regulated topics. For regulated/high_stakes: gather evidence (the
+// same fact-store / evidence-graph the orchestrate path uses) and run
+// enforceGates — with no trusted source, return a "no verified answer"
+// response and DO NOT call the model; otherwise return a server-side regulated
+// system prompt to prepend. Returns {} for ordinary topics.
+function regulatedChatGate(classification, studentId, userText, locale) {
+  const tt = classification?.topicType;
+  if (tt !== TOPIC_TYPES.REGULATED && tt !== TOPIC_TYPES.HIGH_STAKES) return {};
+  let evidence = [];
+  try {
+    const facts = searchFacts(factStmts, userText || "", 10) || [];
+    const ev = studentId ? getEvidenceProfile(evidenceStmts, "student", studentId) : null;
+    evidence = [...facts, ...((ev && ev.items) || [])];
+  } catch { /* no evidence → the gate denies for regulated topics */ }
+  const gate = enforceGates(tt, classification.subIntent, evidence);
+  if (!gate.allowed) {
+    const msg = locale === "ko"
+      ? "확인된 공식 출처가 없어 이 규제 관련 질문에 정확히 답변할 수 없습니다. 공식 자료(예: FAFSA는 StudentAid.gov)를 확인하거나 학교 상담 선생님께 문의하세요."
+      : "I don't have a verified official source to answer this regulated question, so I can't give a specific answer. Please check the official source (e.g. StudentAid.gov for FAFSA, your school for FERPA) or your counselor.";
+    return {
+      block: true,
+      response: {
+        content: [{ type: "text", text: msg }],
+        _meta: { deterministic: true, topicType: tt, gates: gate.gates, modelTier: "NONE", noVerifiedSource: true },
+      },
+    };
+  }
+  return { systemPrefix: buildSystemPrompt(classification) };
 }
 
 // Parse the latest profile snapshot into a clean object for LLM prompts.
@@ -1408,7 +1440,7 @@ app.get("/api/methodology", apiLimiter, (_req, res) => {
 //   anthropic_beta?  // Anthropic PDF passthrough
 // }
 // Flow mirrors /api/anthropic but routes through the adapter layer.
-app.post("/api/llm", apiLimiter, async (req, res) => {
+app.post("/api/llm", apiLimiter, requireStudentAuth, async (req, res) => {
   try {
     const payload = req.body;
     if (!payload || typeof payload !== "object") {
@@ -1471,6 +1503,10 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
         _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
       });
     }
+
+    // ── Regulated-topic gate (server-enforced, defense-in-depth) ──
+    const regGate = regulatedChatGate(classification, studentId, userText, req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+    if (regGate.block) return res.json(regGate.response);
 
     // ── Korea PIPA cross-border consent for student-identified sessions ──
     if (studentId) {
@@ -1548,6 +1584,12 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
     const useORWebPlugin = wantsWeb && provider === "openrouter";
     const orAllowedDomains = buildAllowedDomains(payload.extraDomains);
 
+    // ── Redact PII before anything leaves to the provider (mirror /api/chat) ──
+    // studentId is guaranteed by requireStudentAuth. The token map restores the
+    // model's reply in the output loop below so the student sees real values.
+    const redacted = redactPayloadForModel(payload, studentId);
+    const sendPayload = redacted.payload;
+
     // ── Call adapter ──
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
@@ -1558,8 +1600,8 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
         apiKey,
         baseUrl,
         model,
-        messages: payload.messages,
-        system: payload.system,
+        messages: sendPayload.messages,
+        system: regGate.systemPrefix ? `${regGate.systemPrefix}\n\n${sendPayload.system || ""}` : sendPayload.system,
         maxTokens,
         temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
         webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
@@ -1582,7 +1624,7 @@ app.post("/api/llm", apiLimiter, async (req, res) => {
         if (block?.type === "text" && block.text) {
           const outputScreen = screenOutput(block.text);
           if (outputScreen.modified) block.text = outputScreen.text;
-          block.text = restorePII(block.text, resp._tokenMap);
+          block.text = restorePII(block.text, redacted.tokenMap);
         }
       }
     }
@@ -1952,7 +1994,7 @@ app.get("/api/context/bundle", studentLimiter, requireStudentAuth, async (req, r
 // for that tier is used. `model` is accepted as an explicit override. Every
 // provider routes through the adapter layer; OpenRouter is the default.
 
-app.post("/api/chat", apiLimiter, async (req, res) => {
+app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
   try {
     let payload = req.body;
     if (!payload || typeof payload !== "object") return res.status(400).json({ error: "Invalid request body" });
@@ -2014,6 +2056,10 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
         _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
       });
     }
+
+    // ── Step 3b: Regulated-topic gate (server-enforced, defense-in-depth) ──
+    const regGate = regulatedChatGate(classification, studentId, userText, req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
+    if (regGate.block) return res.json(regGate.response);
 
     // ── Step 3b: AP concept classification (rules-first, no model) ──
     // Update per-concept mastery components for any AP subject mentioned in
@@ -2158,7 +2204,7 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
     // Every provider is tool-less now, so always strip the "ALWAYS call X
     // tool" directives and auto-inject the student's profile context.
-    const effectiveSystem = rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
+    const effectiveSystem = (regGate.systemPrefix ? regGate.systemPrefix + "\n\n" : "") + rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
 
     let data;
 
@@ -2456,7 +2502,7 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
 
 app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) => {
   try {
-    const { query, topK } = req.body;
+    const { query } = req.body;
     if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
     if (query.length > 4000) return res.status(400).json({ error: "query is too long" });
 
@@ -2469,27 +2515,30 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
     // Step 2: Policy routing
     const routing = routeRequest(query);
 
-    // Step 3: Check if deterministic
-    if (routing.canHandleDeterministically) {
+    // Step 3: Check if deterministic. routeRequest returns { classification,
+    // gateResult, modelTier, isDeterministic, action } — read the real fields
+    // (the prior code read nonexistent top-level routing.* and never fired).
+    const cls = routing.classification;
+    if (routing.isDeterministic) {
       let deterministicResult = null;
 
-      if (routing.subIntent === "fafsa_eligibility") {
+      if (cls.subIntent === "fafsa" || cls.subIntent === "eligibility") {
         deterministicResult = runFAFSAEligibilityCheck(req.body.studentData || {});
-      } else if (routing.subIntent === "deadline_status") {
+      } else if (cls.subIntent === "deadlines") {
         deterministicResult = calculateDeadlineStatus(req.body.deadlineDate);
-      } else if (routing.subIntent === "document_check") {
+      } else if (cls.subIntent === "documents" || cls.subIntent === "document_completeness") {
         deterministicResult = runDocumentCompletenessCheck(req.body.applicationType, req.body.submittedItems);
       }
 
       if (deterministicResult) {
         const answer = composeDeterministicAnswer({
-          classification: { topicType: routing.topicType, subIntent: routing.subIntent },
+          classification: cls,
           result: deterministicResult,
           locale: req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US",
         });
         return res.json({
           ...answer,
-          _meta: { deterministic: true, modelTier: "NONE", cost: "$0.00", topicType: routing.topicType },
+          _meta: { deterministic: true, modelTier: "NONE", cost: "$0.00", topicType: cls.topicType },
         });
       }
     }
@@ -2501,7 +2550,7 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
     // Step 5: Gather evidence + validate sources for regulated topics
     const evidence = getEvidenceProfile(evidenceStmts, "student", req.studentId);
     const facts = searchFacts(factStmts, query, 10);
-    if (routing.topicType === "regulated" || routing.topicType === "high_stakes") {
+    if (cls.topicType === "regulated" || cls.topicType === "high_stakes") {
       const sourceCheck = validateEvidenceSources([...facts, ...(evidence.items || [])], routing.topicType);
       if (!sourceCheck.allTrusted && sourceCheck.untrustedItems?.length > 0) {
         console.warn(`[ORCH] Untrusted sources filtered for ${routing.topicType}: ${sourceCheck.untrustedItems.length}`);
@@ -2512,9 +2561,9 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
     const orchestration = buildOrchestration({
       query: inputScreen.redacted ? inputScreen.redactedText : query,
       studentContext: context.studentContext,
-      ragStmts,
+      factStmts,
+      evidenceStmts,
       catalog: orchestrationCatalog,
-      topK: Math.min(Math.max(parseInt(topK || "3", 10) || 3, 1), 5),
     });
 
     res.json({
@@ -2522,9 +2571,9 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
       evidence: evidence.items?.slice(0, 10) || [],
       verifiedFacts: facts.slice(0, 5),
       _meta: {
-        topicType: routing.topicType,
+        topicType: cls.topicType,
         modelTier: routing.modelTier,
-        gates: routing.gates,
+        gates: cls.gates,
         deterministic: false,
       },
     });
