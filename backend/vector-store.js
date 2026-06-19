@@ -23,6 +23,7 @@ import {
   isEmbeddingsAvailable,
   EMBEDDING_DIMENSIONS,
 } from "./llm-adapters/embedded-embeddings.js";
+import { llmDebug } from "./llm-adapters/llm-log.js";
 
 // ─── Initialize vector store database ───
 export function initVectorStore(dataDir, nodeEnv = "development") {
@@ -196,13 +197,15 @@ export async function semanticSearch(stmts, queryText, sourceType = null, limit 
   // dep isn't installed.
   const available = await isEmbeddingsAvailable();
   if (!available) {
+    llmDebug("EMBED", "semanticSearch → keyword fallback", { reason: "embeddings unavailable" });
     return keywordSearch(stmts, queryText, sourceType, limit);
   }
 
   let queryVec;
   try {
     queryVec = await embedText(queryText);
-  } catch {
+  } catch (err) {
+    llmDebug("EMBED", "semanticSearch → keyword fallback", { reason: `embed failed: ${err?.message}` });
     return keywordSearch(stmts, queryText, sourceType, limit);
   }
 
@@ -211,8 +214,10 @@ export async function semanticSearch(stmts, queryText, sourceType = null, limit 
   // seeded yet, all candidates filtered out), also try keyword so RAG
   // never returns empty when there's actually matching text.
   if (results.length === 0) {
+    llmDebug("EMBED", "semanticSearch → keyword fallback", { reason: "0 semantic hits" });
     return keywordSearch(stmts, queryText, sourceType, limit);
   }
+  llmDebug("EMBED", "semanticSearch via bge", { hits: results.length });
   return results;
 }
 

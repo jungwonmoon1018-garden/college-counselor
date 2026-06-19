@@ -9,6 +9,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import { isEmbeddedAvailable } from "./llm-adapters/index.js";
+import { llmDebug } from "./llm-adapters/llm-log.js";
 
 // ─── Topic Type Definitions ───
 // regulated:     FAFSA, FERPA, eligibility, legal, compliance
@@ -280,13 +281,22 @@ export function enforceGates(topicType, subIntent, availableEvidence = []) {
 function downgradeToEmbeddedIfAvailable(tier) {
   if (tier !== MODEL_TIERS.HAIKU) return tier;
   try {
-    return isEmbeddedAvailable() ? MODEL_TIERS.EMBEDDED_SMALL : tier;
+    const embedded = isEmbeddedAvailable();
+    llmDebug("TIER", "embedded downgrade check", { from: tier, embeddedAvailable: embedded, to: embedded ? MODEL_TIERS.EMBEDDED_SMALL : tier });
+    return embedded ? MODEL_TIERS.EMBEDDED_SMALL : tier;
   } catch {
     return tier;
   }
 }
 
-export function selectModelTier(topicType, subIntent, queryComplexity = "normal", priorAttempt = null, opts = {}) {
+export function selectModelTier(...args) {
+  const tier = selectModelTierInner(...args);
+  const [topicType, subIntent, queryComplexity] = args;
+  llmDebug("TIER", "selectModelTier", { topicType, subIntent, queryComplexity: queryComplexity || "normal", tier });
+  return tier;
+}
+
+function selectModelTierInner(topicType, subIntent, queryComplexity = "normal", priorAttempt = null, opts = {}) {
   const allowCouncil = opts.allowCouncil !== false;
 
   // Crisis: never use a model

@@ -11,6 +11,8 @@
 // throwing.
 // ═══════════════════════════════════════════════════════════════════════
 
+import { llmLog, llmDebug, since } from "./llm-log.js";
+
 const DEFAULT_MODEL_ID = "Xenova/bge-small-en-v1.5";
 const DEFAULT_DIMENSIONS = 384;
 
@@ -46,10 +48,13 @@ async function loadTransformers() {
 async function getPipeline(modelId = DEFAULT_MODEL_ID) {
   if (PIPELINE_PROMISE) return PIPELINE_PROMISE;
   PIPELINE_PROMISE = (async () => {
+    llmLog("EMBED", "loading bge pipeline (first call may download model)", { modelId });
+    const t0 = Date.now();
     const xenova = await loadTransformers();
     const extractor = await xenova.pipeline("feature-extraction", modelId, {
       quantized: true, // smaller download, near-identical quality at 384 dims
     });
+    llmLog("EMBED", "bge pipeline ready", { modelId, ms: since(t0) });
     return { extractor, modelId };
   })();
   try {
@@ -70,9 +75,12 @@ export async function embed(text, { modelId = DEFAULT_MODEL_ID } = {}) {
     return new Float32Array(DEFAULT_DIMENSIONS);
   }
   const { extractor } = await getPipeline(modelId);
+  const t0 = Date.now();
   const output = await extractor(text, { pooling: "mean", normalize: true });
   // Output is a Tensor — we want the raw Float32Array.
-  return new Float32Array(output.data);
+  const vec = new Float32Array(output.data);
+  llmDebug("EMBED", "embed", { chars: text.length, dims: vec.length, ms: since(t0) });
+  return vec;
 }
 
 /**
