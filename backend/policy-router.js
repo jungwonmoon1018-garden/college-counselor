@@ -8,6 +8,8 @@
 // IMPORTANT: This module is 100% deterministic — no LLM calls.
 // ═══════════════════════════════════════════════════════════════════════
 
+import { isEmbeddedAvailable } from "./llm-adapters/index.js";
+
 // ─── Topic Type Definitions ───
 // regulated:     FAFSA, FERPA, eligibility, legal, compliance
 // high_stakes:   Deadlines, school policies, financial aid amounts, scholarship eligibility
@@ -40,7 +42,26 @@ export const MODEL_TIERS = {
   SMALL: "haiku",
   MEDIUM: "sonnet",
   LARGE: "opus",
+  // Embedded in-process inference (node-llama-cpp + GGUF). Returned when
+  // selectModelTier() would normally pick HAIKU/SMALL AND the embedded
+  // provider is fully wired (GGUF present, dep loadable). Orchestration
+  // engine dispatches this through callLLM({provider:"embedded"}).
+  EMBEDDED_SMALL: "embedded_small",
+  // Strategy Council (Pillar 9). Dispatched to council.convene() instead
+  // of callLLM. Composed of 3 embedded + 2 BYOK medium councilors.
+  COUNCIL: "council",
 };
+
+// Subintents that should convene the 5-seat Strategy Council instead of
+// hitting a single model. Per the Pillar 9 design these are the truly
+// high-stakes strategic decisions — everything else stays on the single-
+// model tier ladder.
+export const STRATEGY_COUNCIL_SUBINTENTS = new Set([
+  "ec_strategy",
+  "essay",
+  "college_list",
+  "strategy",
+]);
 
 // ─── Escalation threshold: Sonnet must report confidence below this to escalate to Opus ───
 const OPUS_ESCALATION_THRESHOLD = 0.45;
@@ -245,7 +266,29 @@ export function enforceGates(topicType, subIntent, availableEvidence = []) {
 }
 
 // ─── Model tier selection with escalation logic ───
-export function selectModelTier(topicType, subIntent, queryComplexity = "normal", priorAttempt = null) {
+//
+// Embedded-first rule (Pillar 2): when the resolver lands on HAIKU/SMALL
+// AND the embedded provider is fully wired (GGUF on disk), upgrade the
+// return value to EMBEDDED_SMALL so the dispatcher routes through the
+// zero-cost in-process model. The escalation ladder (SONNET → OPUS on
+// low confidence) is unchanged — embedded just slots in below SONNET.
+//
+// Strategy Council rule (Pillar 9): when the subIntent is in the
+// council-eligible set AND we're not already inside a council-spawned
+// sub-call, return COUNCIL instead of OPUS. The orchestration engine
+// detects the marker and dispatches to council.convene().
+function downgradeToEmbeddedIfAvailable(tier) {
+  if (tier !== MODEL_TIERS.HAIKU) return tier;
+  try {
+    return isEmbeddedAvailable() ? MODEL_TIERS.EMBEDDED_SMALL : tier;
+  } catch {
+    return tier;
+  }
+}
+
+export function selectModelTier(topicType, subIntent, queryComplexity = "normal", priorAttempt = null, opts = {}) {
+  const allowCouncil = opts.allowCouncil !== false;
+
   // Crisis: never use a model
   if (topicType === TOPIC_TYPES.CRISIS) return MODEL_TIERS.NONE;
 
@@ -280,14 +323,13 @@ export function selectModelTier(topicType, subIntent, queryComplexity = "normal"
 
   // Coaching
   if (topicType === TOPIC_TYPES.COACHING) {
-    if (subIntent === "gpa_benchmark") return MODEL_TIERS.NONE;
-    // EC strategy + essay + college-list strategy all need cross-source
-    // reasoning (student profile + school values + competitive context).
-    // Pin these to LARGE/Opus from the first attempt so the model has
-    // the headroom to weigh trade-offs instead of producing surface-level
-    // suggestions. Cost-conscious deployments can lower this in their
-    // own fork.
-    if (subIntent === "ec_strategy" || subIntent === "essay" || subIntent === "college_list" || subIntent === "strategy") {
+    if (subIntent === "gpa_benchmark") return downgradeToEmbeddedIfAvailable(MODEL_TIERS.NONE);
+
+    // Heavy strategic subintents — convene the 5-seat Strategy Council
+    // when allowed. Falls back to OPUS when the caller is already inside
+    // a council sub-call (avoids infinite recursion).
+    if (STRATEGY_COUNCIL_SUBINTENTS.has(subIntent)) {
+      if (allowCouncil) return MODEL_TIERS.COUNCIL;
       return MODEL_TIERS.OPUS;
     }
     if (!priorAttempt) return MODEL_TIERS.SONNET;
@@ -354,16 +396,22 @@ export function routeRequest(query, conversationContext = {}, availableEvidence 
     classification.subIntent,
     conversationContext.queryComplexity || "normal",
     conversationContext.priorAttempt || null,
+    { allowCouncil: conversationContext.allowCouncil !== false },
   );
 
   const isDeterministic = canHandleDeterministically(classification.topicType, classification.subIntent);
+  let action;
+  if (isDeterministic) action = "rules_engine";
+  else if (modelTier === MODEL_TIERS.NONE) action = "fact_store_lookup";
+  else if (modelTier === MODEL_TIERS.COUNCIL) action = "strategy_council";
+  else action = "model_synthesis";
 
   return {
     classification,
     gateResult,
     modelTier,
     isDeterministic,
-    action: isDeterministic ? "rules_engine" : modelTier === MODEL_TIERS.NONE ? "fact_store_lookup" : "model_synthesis",
+    action,
   };
 }
 

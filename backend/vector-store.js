@@ -18,6 +18,11 @@ import Database from "better-sqlite3";
 import crypto from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import {
+  embed as embedText,
+  isEmbeddingsAvailable,
+  EMBEDDING_DIMENSIONS,
+} from "./llm-adapters/embedded-embeddings.js";
 
 // ─── Initialize vector store database ───
 export function initVectorStore(dataDir, nodeEnv = "development") {
@@ -177,7 +182,58 @@ function cosineSimilarity(a, b) {
   return denom === 0 ? 0 : dot / denom;
 }
 
+// ─── Semantic search (Pillar 4): embed query → cosine search → fall back to keyword ───
+//
+// Single-call helper for RAG: takes a plain string and returns the top-k
+// most semantically similar embeddings. Uses the embedded ONNX bge-small
+// model from llm-adapters/embedded-embeddings.js — no remote calls. Falls
+// back to keywordSearch() automatically when the embeddings dep isn't
+// installed or query embedding fails, so callers don't have to branch.
+export async function semanticSearch(stmts, queryText, sourceType = null, limit = 5) {
+  if (!queryText || typeof queryText !== "string") return [];
+
+  // Cheap availability check; avoids paying the model-load cost when the
+  // dep isn't installed.
+  const available = await isEmbeddingsAvailable();
+  if (!available) {
+    return keywordSearch(stmts, queryText, sourceType, limit);
+  }
+
+  let queryVec;
+  try {
+    queryVec = await embedText(queryText);
+  } catch {
+    return keywordSearch(stmts, queryText, sourceType, limit);
+  }
+
+  const results = similaritySearch(stmts, queryVec, sourceType, limit);
+  // Stable fallback: when semantic returns nothing useful (no embeddings
+  // seeded yet, all candidates filtered out), also try keyword so RAG
+  // never returns empty when there's actually matching text.
+  if (results.length === 0) {
+    return keywordSearch(stmts, queryText, sourceType, limit);
+  }
+  return results;
+}
+
+// ─── Embed and store a single row (used by seed scripts) ───
+export async function embedAndStore(stmts, item) {
+  if (!item.embedding) {
+    try {
+      const vec = await embedText(item.content_text);
+      item = { ...item, embedding: Array.from(vec) };
+    } catch (err) {
+      // Still store the row with no embedding — semanticSearch will
+      // skip it and the seeder can retry later when the dep is wired.
+      err && console.warn?.("[vector-store] embed failed:", err.message);
+    }
+  }
+  return storeEmbedding(stmts, item);
+}
+
 // ─── Get store statistics ───
 export function getVectorStoreStats(stmts) {
   return stmts.getStats.all();
 }
+
+export { cosineSimilarity, EMBEDDING_DIMENSIONS };

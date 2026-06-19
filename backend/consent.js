@@ -21,6 +21,13 @@ export const CONSENT_TYPES = {
   INSTITUTIONAL_SHARING: "institutional_sharing", // Sharing data with a school (FERPA)
   CROSS_BORDER_TRANSFER: "cross_border_transfer", // Korea PIPA: data sent to US servers
   BYOK_PARENT_PROVIDED: "byok_parent_provided",   // Parent-provided API key for minor
+  // Pillar 8 — Logseq vault under PII vault
+  LOGSEQ_VAULT: "logseq_vault",                   // Creates and stores the student's Logseq markdown vault
+  LOGSEQ_PARENT_CONVERSATIONS: "logseq_parent_conversations", // Separate gate on the parent-conversations page
+  // Pillar 9 — Strategy Council BYOK seats hitting foreign hosts
+  STRATEGY_COUNCIL_CROSS_BORDER: "strategy_council_cross_border", // PIPA gate for Data Checker + Compliance councilors
+  // Pillar 7 — optional inclusion of chat transcripts in the knowledge graph
+  CHAT_TRANSCRIPT_GRAPHING: "chat_transcript_graphing",
 };
 
 // ─── Grant consent ───

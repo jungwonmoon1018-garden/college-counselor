@@ -13,7 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import crypto from "node:crypto";
-import { callLLM, detectProvider, resolveTierDefault } from "./llm-adapters/index.js";
+import { callLLM, detectProvider, resolveTierDefault, isEmbeddedAvailable } from "./llm-adapters/index.js";
 import { resolveOpenRouterTier } from "./openrouter-model-refresh.js";
 
 // Provider-aware "small" model resolver. For OpenRouter we resolve against the
@@ -21,6 +21,17 @@ import { resolveOpenRouterTier } from "./openrouter-model-refresh.js";
 // providers use their static tier default.
 function smallModelFor(provider) {
   return provider === "openrouter" ? resolveOpenRouterTier("small") : resolveTierDefault(provider, "small");
+}
+
+// Pillar 2: prefer the embedded model when the GGUF is on disk. Confidence
+// from a 1.5B model is fine for narrative-fit (short scoring, structured
+// JSON output); the cache hit downstream means the higher-quality BYOK
+// answer is never displaced after one verified store.
+function embeddedAdapterIfAvailable() {
+  if (!isEmbeddedAvailable()) return null;
+  const model = resolveTierDefault("embedded", "small");
+  if (!model) return null;
+  return { provider: "embedded", apiKey: null, baseUrl: "embedded://local", model };
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -91,6 +102,14 @@ export function hashText(text) {
  *   5. null — signal keyword-only fallback.
  */
 function resolveAdapterConfig(options = {}) {
+  // 0. Embedded-first (Pillar 2). When the local GGUF is ready, prefer it
+  //    over any cloud BYOK row. Callers can opt out with
+  //    `options.preferCloud = true` (used by the council's BYOK seats).
+  if (options.preferCloud !== true) {
+    const embedded = embeddedAdapterIfAvailable();
+    if (embedded) return embedded;
+  }
+
   // 1. Full explicit config.
   if (options.provider && options.apiKey) {
     const model = options.model || smallModelFor(options.provider) || null;

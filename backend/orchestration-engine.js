@@ -60,6 +60,12 @@ const DEFAULT_MODELS = {
   [MODEL_TIERS.HAIKU]:  TIER_DEFAULTS.openrouter.small,
   [MODEL_TIERS.SONNET]: TIER_DEFAULTS.openrouter.medium,
   [MODEL_TIERS.OPUS]:   TIER_DEFAULTS.openrouter.large,
+  // Embedded in-process model (Pillar 1/2). Resolved against the embedded
+  // provider's tier table — no remote provider involved.
+  [MODEL_TIERS.EMBEDDED_SMALL]: TIER_DEFAULTS.embedded?.small || "qwen2.5-1.5b-instruct.q4_k_m",
+  // Strategy Council (Pillar 9). No single model — the dispatcher reads
+  // this tier and routes to council.convene() instead of callLLM.
+  [MODEL_TIERS.COUNCIL]: null,
 };
 
 // ─── Load grounding corpora ───
@@ -82,6 +88,7 @@ export function buildOrchestration({
   evidenceStmts,
   catalog,
   config = {},
+  graphVaultContext = "",
 }) {
   const cleanQuery = (query || "").trim();
 
@@ -109,7 +116,7 @@ export function buildOrchestration({
 
   // Step 6: Build prompt package (only if model call needed)
   const promptPackage = executionPlan.requiresModel
-    ? buildPromptPackage(updatedRouting, cleanQuery, evidence, studentContext, catalog)
+    ? buildPromptPackage(updatedRouting, cleanQuery, evidence, studentContext, catalog, graphVaultContext)
     : null;
 
   return {
@@ -158,19 +165,46 @@ function buildExecutionPlan(routing, modelConfig, evidence) {
     };
   }
 
+  // Strategy Council branch (Pillar 9). The council dispatcher in server.js
+  // sees `executionPlan.tier === "council"` and calls council.convene()
+  // instead of callLLM(). No single `model` field — each councilor picks
+  // its own model.
+  if (modelTier === MODEL_TIERS.COUNCIL) {
+    return {
+      requiresModel: false,
+      requiresCouncil: true,
+      tier: MODEL_TIERS.COUNCIL,
+      model: null,
+      reason: `${classification.subIntent} is a high-stakes strategic decision — convening the 5-seat Strategy Council.`,
+      steps: [
+        { agent: "retrieval", action: "gather_evidence", evidenceCount: evidence.length },
+        { agent: "knowledge_graph", action: "query_student_subgraph" },
+        { agent: "strategy_council", action: "convene_5_seats" },
+        { agent: "answer_composer", action: "compose_council_response" },
+      ],
+    };
+  }
+
   const model = modelConfig[modelTier] || DEFAULT_MODELS[modelTier];
+  const isEmbedded = modelTier === MODEL_TIERS.EMBEDDED_SMALL;
 
   return {
     requiresModel: true,
+    requiresCouncil: false,
     tier: modelTier,
     model,
-    reason: `${classification.topicType} topic requires ${modelTier}-tier synthesis.`,
+    // Hint to the dispatcher: when isEmbedded, callLLM() should be invoked
+    // with `provider: "embedded"`. Other tiers use the student's BYOK row.
+    provider: isEmbedded ? "embedded" : null,
+    reason: isEmbedded
+      ? `Routine ${classification.topicType} call — running on embedded ${model} (zero cost).`
+      : `${classification.topicType} topic requires ${modelTier}-tier synthesis.`,
     steps: [
       { agent: "retrieval", action: "gather_evidence", evidenceCount: evidence.length },
       { agent: modelTier, action: "grounded_synthesis", model },
       { agent: "answer_composer", action: "compose_three_lane_response" },
     ],
-    promptCacheEligible: classification.subIntent === "fafsa" && !!modelConfig.fafsaCaching,
+    promptCacheEligible: classification.subIntent === "fafsa" && !!modelConfig.fafsaCaching && !isEmbedded,
   };
 }
 
@@ -215,7 +249,7 @@ function gatherEvidence({ routing, matchedColleges, factStmts, evidenceStmts, ca
 }
 
 // ─── Build prompt package for model calls ───
-function buildPromptPackage(routing, query, evidence, studentContext, catalog) {
+function buildPromptPackage(routing, query, evidence, studentContext, catalog, graphVaultContext = "") {
   const { classification } = routing;
   const parts = [];
 
@@ -225,6 +259,17 @@ function buildPromptPackage(routing, query, evidence, studentContext, catalog) {
     cacheable: true,
     content: buildSystemPrompt(classification),
   });
+
+  // Student's own structured memory (graph subgraph + vault). Non-cacheable —
+  // it's student-specific and changes as the vault is edited. Replaces broad
+  // retrieval rather than adding to it (kept compact upstream).
+  if (graphVaultContext) {
+    parts.push({
+      role: "context",
+      cacheable: false,
+      content: `Student knowledge graph / notebook:\n${graphVaultContext}`,
+    });
+  }
 
   // Evidence context (small-context: only relevant items)
   if (evidence.length > 0) {

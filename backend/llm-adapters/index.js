@@ -17,6 +17,7 @@
 
 import { callOpenAI,    validateOpenAIKey }    from "./openai.js";
 import { callGoogle,    validateGoogleKey }    from "./google.js";
+import { callEmbeddedLlama, validateEmbedded, isModelFileOnDisk } from "./embedded-llama.js";
 import {
   TIER_DEFAULTS,
   PROVIDER_META,
@@ -36,6 +37,7 @@ export const PROVIDERS = Object.freeze({
   ZHIPU: "zhipu",
   OLLAMA: "ollama",
   LMSTUDIO: "lmstudio",
+  EMBEDDED: "embedded",
 });
 
 // Model id must be a plain string: 3-120 chars, no whitespace, no control
@@ -74,6 +76,7 @@ export function detectProvider({ apiKey = "", provider = "", baseUrl = "" } = {}
   // Infer from baseUrl hostnames for common compat hosts, but only if no
   // provider was explicitly set.
   if (url) {
+    if (url.startsWith("embedded://")) return PROVIDERS.EMBEDDED;
     if (url.includes("openrouter.ai")) return PROVIDERS.OPENROUTER;
     if (url.includes("deepseek.com")) return PROVIDERS.DEEPSEEK;
     if (url.includes("together.xyz")) return PROVIDERS.TOGETHER;
@@ -191,6 +194,15 @@ export async function callLLM(opts = {}) {
   };
 
   switch (wire) {
+    case "embedded":
+      return attachRedaction(await callEmbeddedLlama({
+        model,
+        messages: sanitizedPayload.messages,
+        system: sanitizedPayload.system,
+        maxTokens: effectiveMaxTokens,
+        temperature: opts.temperature,
+        signal: opts.signal,
+      }));
     case "google":
       return attachRedaction(await callGoogle({
         apiKey: opts.apiKey,
@@ -228,6 +240,7 @@ export async function validateKey({ provider, apiKey, baseUrl, fetchImpl, signal
     return { valid: false, status: 400, code: "unknown_provider", message: "Cannot detect provider from inputs" };
   }
   const wire = PROVIDER_WIRE_PROTOCOL[detected];
+  if (wire === "embedded") return validateEmbedded({ model: resolveTierDefault(detected, "small") });
   if (wire === "google")    return validateGoogleKey({ apiKey, baseUrl, fetchImpl, signal });
   return validateOpenAIKey({
     apiKey,
@@ -237,6 +250,16 @@ export async function validateKey({ provider, apiKey, baseUrl, fetchImpl, signal
     signal,
     providerTag: detected,
   });
+}
+
+/**
+ * Sync probe — true iff embedded is fully ready (GGUF on disk; doesn't
+ * verify node-llama-cpp is importable). Used by the policy router.
+ */
+export function isEmbeddedAvailable() {
+  const modelId = resolveTierDefault(PROVIDERS.EMBEDDED, "small");
+  if (!modelId) return false;
+  return isModelFileOnDisk(modelId);
 }
 
 export function listKnownModels(provider) {

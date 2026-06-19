@@ -24,7 +24,40 @@ import { TOPIC_TYPES } from "./policy-router.js";
 const TIER_DISCLOSURE_LABELS = {
   haiku: "small", sonnet: "medium", opus: "large",
   small: "small", medium: "medium", large: "large",
+  embedded_small: "embedded (zero-cost)",
+  council: "strategy council (5 seats)",
 };
+
+// ─── Council answer lane (Pillar 9) ────────────────────────────────────
+// Renders a council envelope as the primary answer + a clearly-labeled
+// dissent block + clickable citations. Distinct from the 3-lane regulated
+// answer because the council output is fundamentally advisory and the
+// dissent is part of the deliverable, not an afterthought.
+export function composeCouncilAnswer({ envelope, locale = "en-US" } = {}) {
+  if (!envelope) return null;
+  const lines = [];
+  lines.push(envelope.recommendation || "(no recommendation)");
+  if (envelope.dissent && envelope.dissent.text) {
+    lines.push("");
+    lines.push(`> **${envelope.dissent.from} flagged:** ${envelope.dissent.text}`);
+  }
+  if (envelope.citations && envelope.citations.length) {
+    lines.push("");
+    lines.push(
+      "_Citations: " +
+      envelope.citations.slice(0, 8).map((c) => `[[${c.type}:${c.id}]]`).join(" ") +
+      "_",
+    );
+  }
+  return {
+    lane: "council",
+    body: lines.join("\n"),
+    confidence: envelope.confidence,
+    moderator_rule: envelope.moderator_rule,
+    council_breakdown: envelope.council_breakdown,
+    ai_disclosure: buildAIDisclosure("council", locale),
+  };
+}
 
 // ─── Build AI disclosure block ───
 function buildAIDisclosure(modelUsed, locale = "en-US") {

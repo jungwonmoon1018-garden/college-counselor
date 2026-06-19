@@ -18,10 +18,18 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { slugifySchoolName, extractCdsViaWeb, extractAdmitRateViaWeb } from "./cds-store.js";
 import { persistAndValidate } from "./cds-validator.js";
 import { extractHost } from "./credible-sources.js";
 import { hydrateBaselineWebsites } from "./rag-engine.js";
+import { compareLensValues } from "./seasonal-verification-v2.js";
+import { getCollegeById } from "./college-scorecard.js";
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const CDS_PARSED_DIR = path.join(MODULE_DIR, "tools", "cds-cache", "parsed");
 
 // Default AP subjects to refresh when the caller doesn't specify a set.
 const DEFAULT_AP_SUBJECTS = Object.freeze([
@@ -379,8 +387,85 @@ function buildVerificationLenses(record) {
   ];
 }
 
+// Read the locally-cached, validated CDS sidecar for a slug (overrides already
+// applied during parsing). Same field names as a scraped `record`, so values
+// compare directly. Returns null when no sidecar exists for this slug.
+function readParsedCDS(slug) {
+  try {
+    const p = path.join(CDS_PARSED_DIR, `${slug}.json`);
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch { return null; }
+}
+
+// Retrieval-first verification: compare the scraped record against two
+// deterministic, zero-token lenses — the institution's cached Common Data Set
+// (Lens A) and the federal College Scorecard (Lens B) — using the numeric
+// comparator in seasonal-verification-v2.js. Returns a conclusive tally only
+// when the lenses clearly agree (≥2 confirm) or any lens contradicts; returns
+// null when the local evidence is inconclusive so the caller can fall back to
+// the LLM web lenses. Costs no LLM tokens.
+async function tryDeterministicVerification(record, { scorecardApiKey, unitId } = {}) {
+  const slug = record.slug || slugifySchoolName(record.school || "");
+  const sat = record.enrolledSAT || {};
+  const scraped = {
+    admit_rate: Number.isFinite(record.overallAdmitRate) ? record.overallAdmitRate : null,
+    sat_25: Number.isFinite(sat.p25) ? sat.p25 : null,
+    sat_75: Number.isFinite(sat.p75) ? sat.p75 : null,
+  };
+
+  // Lens A — local parsed CDS sidecar (fractions + composite SAT, same units).
+  const cds = readParsedCDS(slug);
+  const lensA = cds ? {
+    admit_rate: Number.isFinite(cds.overallAdmitRate) ? cds.overallAdmitRate : null,
+    sat_25: Number.isFinite(cds.enrolledSAT?.p25) ? cds.enrolledSAT.p25 : null,
+    sat_75: Number.isFinite(cds.enrolledSAT?.p75) ? cds.enrolledSAT.p75 : null,
+  } : null;
+
+  // Lens B — federal College Scorecard. acceptanceRate is a percentage (e.g.
+  // 3.65); divide by 100 so it shares the scraped record's fraction units.
+  let lensB = null;
+  if (scorecardApiKey && unitId) {
+    const row = await getCollegeById(scorecardApiKey, unitId);
+    if (row) {
+      lensB = {
+        admit_rate: Number.isFinite(row.acceptanceRate) ? row.acceptanceRate / 100 : null,
+        sat_25: Number.isFinite(row.sat25) ? row.sat25 : null,
+        sat_75: Number.isFinite(row.sat75) ? row.sat75 : null,
+      };
+    }
+  }
+
+  if (!lensA && !lensB) return null;
+
+  const fields = ["admit_rate", "sat_25", "sat_75"];
+  const votes = [];
+  for (const [lensKey, vals] of [["common_data_set", lensA], ["college_scorecard", lensB]]) {
+    if (!vals) continue;
+    let confirm = 0, contradict = 0, compared = 0;
+    for (const field of fields) {
+      const s = scraped[field], lv = vals[field];
+      if (!Number.isFinite(s) || !Number.isFinite(lv)) continue;
+      compared++;
+      const r = compareLensValues(s, lv, field);
+      if (r === "confirm") confirm++;
+      else if (r === "contradict") contradict++;
+    }
+    if (compared === 0) continue;
+    const vote = contradict >= 1 ? "contradict" : confirm >= 1 ? "confirm" : "unconfirmed";
+    votes.push({ lens: lensKey, vote, compared, confirm, contradict });
+  }
+  if (votes.length === 0) return null;
+
+  const confirms = votes.filter((v) => v.vote === "confirm").length;
+  const contradicts = votes.filter((v) => v.vote === "contradict").length;
+  // Conclusive only when authoritative sources clearly agree or any disagrees.
+  if (contradicts >= 1 || confirms >= 2) return { slug, votes, confirms, contradicts };
+  return null;
+}
+
 export async function verifySeasonalRecord(db, callLLM, runId, record, opts = {}) {
-  if (!callLLM || !record) return { status: "unverified", reason: "no_llm_or_record" };
+  if (!record) return { status: "unverified", reason: "no_record" };
   const slug = record.slug || slugifySchoolName(record.school || "");
   const admitPct = record.overallAdmitRate != null ? Math.round(record.overallAdmitRate * 1000) / 10 : null;
   const sat = record.enrolledSAT || {};
@@ -398,6 +483,49 @@ export async function verifySeasonalRecord(db, callLLM, runId, record, opts = {}
       ).run(runId, slug, record.school || "", field, claim.slice(0, 300), sourceUrl || null, status, (notes || "").slice(0, 300));
     } catch { /* non-fatal */ }
   };
+
+  const quarantine = () => {
+    try {
+      const res = db.prepare(
+        `DELETE FROM cds_records WHERE slug = ? AND source_kind LIKE '%web%'`,
+      ).run(slug);
+      return res.changes > 0;
+    } catch { return false; }
+  };
+
+  // ─── Retrieval-first pre-check (zero LLM tokens) ───────────────────────
+  // Compare against the cached CDS + federal Scorecard before spending any
+  // web-search tokens. Only short-circuits on a conclusive local verdict;
+  // otherwise falls through to the LLM web lenses below.
+  try {
+    const det = await tryDeterministicVerification(record, {
+      scorecardApiKey: opts.scorecardApiKey,
+      unitId: opts.unitId,
+    });
+    if (det) {
+      for (const v of det.votes) {
+        logVote(
+          `admissions:${v.lens}`,
+          v.vote,
+          `deterministic compared=${v.compared} confirm=${v.confirm} contradict=${v.contradict}`,
+          v.lens === "college_scorecard" ? "collegescorecard.ed.gov" : "commondataset.org",
+        );
+      }
+      const status = det.contradicts >= 1 ? "discrepancy" : "verified";
+      let quarantined = false;
+      if (status === "discrepancy") quarantined = quarantine();
+      logVote(
+        "admissions",
+        status,
+        `deterministic confirms=${det.confirms} contradicts=${det.contradicts}${quarantined ? " quarantined" : ""}`,
+        record.sourceUrl,
+      );
+      return { status, confirms: det.confirms, contradicts: det.contradicts, votes: det.votes, quarantined, deterministic: true };
+    }
+  } catch { /* fall through to LLM lenses */ }
+
+  // ─── LLM web lenses (fallback when local evidence is inconclusive) ─────
+  if (!callLLM) return { status: "unverified", reason: "inconclusive_no_llm" };
 
   const lenses = buildVerificationLenses(record);
   const votes = [];
@@ -475,13 +603,20 @@ export async function runSeasonalResearch(db, ragStmts, callLLM, opts = {}) {
   try { hydrateBaselineWebsites(db); } catch { /* optional */ }
 
   const colleges = resolveSeasonalColleges(db, { topN: opts.topN ?? 25, explicitColleges: opts.colleges || [] });
+  // slug → unitId, so the deterministic Scorecard lens can be looked up per record.
+  const unitBySlug = new Map(colleges.map((c) => [c.slug, c.unitId]).filter(([, u]) => u));
   const adm = await fetchSeasonalAdmissions(ragStmts, callLLM, colleges, { delayMs: opts.delayMs ?? 750 });
 
   // Adversarially verify each persisted admissions record.
   let verified = 0, flagged = 0;
   for (const r of (adm.results || [])) {
     if (r.ok && r.record) {
-      const v = await verifySeasonalRecord(db, callLLM, runId, r.record, { delayMs: opts.delayMs ?? 750 });
+      const recSlug = r.record.slug || r.slug;
+      const v = await verifySeasonalRecord(db, callLLM, runId, r.record, {
+        delayMs: opts.delayMs ?? 750,
+        scorecardApiKey: opts.scorecardApiKey || null,
+        unitId: unitBySlug.get(recSlug) || null,
+      });
       if (v.status === "verified") verified++; else flagged++;
       r.verification = v.status;
       if (v.quarantined) r.quarantined = true;

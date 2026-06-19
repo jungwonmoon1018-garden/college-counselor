@@ -66,6 +66,60 @@ export function getMonthlySpendUsd(ragStmts, studentId) {
   return Math.round(total * 1_000_000) / 1_000_000; // 6-decimal precision
 }
 
+/**
+ * Pillar 6 — record an embedded (zero-cost) call so the budget UI can
+ * surface "saved by embedded" alongside paid spend. Mirrors the shape
+ * of api_usage_log insertion the orchestration engine uses, but pins
+ * provider="embedded" and cost contribution to 0.
+ */
+export function recordEmbeddedCall(ragStmts, { studentId, tokensIn = 0, tokensOut = 0, model = "embedded", latencyMs = 0 } = {}) {
+  if (!ragStmts?.insertUsageLog || !studentId) return false;
+  try {
+    ragStmts.insertUsageLog.run(
+      studentId,
+      "embedded",          // provider
+      model,
+      tokensIn | 0,
+      tokensOut | 0,
+      latencyMs | 0,
+      0,                   // cost_usd
+    );
+    return true;
+  } catch (err) {
+    console.warn("[usage-budget] recordEmbeddedCall failed:", err.message);
+    return false;
+  }
+}
+
+/**
+ * Pillar 6 — record the per-seat usage breakdown for a council convening.
+ * Walks the council_breakdown array (returned by moderator) and emits
+ * one api_usage_log row per seat tagged with the convening id in
+ * `request_id` so downstream UI can group them.
+ */
+export function recordCouncilCall(ragStmts, { studentId, conveningId, councilBreakdown = [], usageBySeat = {} } = {}) {
+  if (!ragStmts?.insertUsageLog || !studentId) return false;
+  let recorded = 0;
+  for (const seat of councilBreakdown) {
+    const u = usageBySeat[seat.role] || { input_tokens: 0, output_tokens: 0, latency_ms: 0 };
+    try {
+      ragStmts.insertUsageLog.run(
+        studentId,
+        seat.provider || "embedded",
+        `council:${seat.role}:${seat.model || ""}`.slice(0, 200),
+        u.input_tokens | 0,
+        u.output_tokens | 0,
+        u.latency_ms | 0,
+        seat.provider === "embedded" ? 0 : -1, // -1 = "compute at read time" (live OpenRouter pricing)
+      );
+      recorded++;
+    } catch (err) {
+      console.warn(`[usage-budget] recordCouncilCall (${seat.role}) failed:`, err.message);
+    }
+  }
+  return recorded;
+}
+
 // Hard gate — call before any LLM dispatch. Returns:
 //   { allowed: true } when under cap (or cap == 0 = unlimited)
 //   { allowed: false, spend, cap, reason } when over
