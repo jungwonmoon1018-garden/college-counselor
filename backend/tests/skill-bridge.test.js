@@ -18,13 +18,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = path.resolve(__dirname, "../skills/collegeapp-ai");
 
-test("SKILL.md declares v1.4 and the required fields", () => {
+test("SKILL.md declares v1.6 and the required fields", () => {
   const md = fs.readFileSync(path.join(SKILL_DIR, "SKILL.md"), "utf8");
 
   // YAML frontmatter with the core metadata.
   assert.match(md, /^---/,                "YAML frontmatter missing");
   assert.match(md, /name:\s*collegeapp-ai/, "skill name missing");
-  assert.match(md, /version:\s*1\.4\.0/,   "skill version must be 1.4.0 (seasonal hardening + chat-route safety)");
+  assert.match(md, /version:\s*1\.6\.0/,   "skill version must be 1.6.0 (Logseq notebook linked into chat + Strategy Council)");
   // Seasonal research must be documented as a verified, official-source-only,
   // counselor-triggered feature.
   assert.match(md, /seasonal-research\/run/, "SKILL.md must document the seasonal trigger endpoint");

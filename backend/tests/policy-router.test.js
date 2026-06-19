@@ -90,9 +90,12 @@ describe("selectModelTier", () => {
     assert.equal(tier, MODEL_TIERS.SONNET);
   });
 
-  it("returns OPUS for heavy cross-source coaching (essay/ec_strategy)", () => {
-    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex"), MODEL_TIERS.OPUS);
-    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "ec_strategy", "simple"), MODEL_TIERS.OPUS);
+  it("convenes the COUNCIL for heavy strategic coaching (essay/ec_strategy)", () => {
+    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex"), MODEL_TIERS.COUNCIL);
+    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "ec_strategy", "simple"), MODEL_TIERS.COUNCIL);
+    // Inside a council-spawned sub-call (allowCouncil:false) it falls back to
+    // OPUS instead of recursing into another council.
+    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex", null, { allowCouncil: false }), MODEL_TIERS.OPUS);
   });
 
   it("escalates a regulated query to OPUS after a low-confidence Sonnet attempt", () => {
