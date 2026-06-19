@@ -89,6 +89,43 @@ function printHelp(t, locale) {
   process.stdout.write(lines.join("\n"));
 }
 
+// ─── Cross-invocation LRU memo (Pillar 5) ─────────────────────────────
+// One Claude Code session typically calls fetch-context multiple times
+// (initial hydrate, then again on tool-use turns that need fresh
+// vectors). The bundle's `narrative_fingerprint` is its idempotency key
+// — when an unchanged session re-fetches within TTL we can serve from
+// disk and skip the round-trip entirely. Cache TTL is 5 minutes; the
+// cache key includes the session-token hash + focus + locale so a
+// session reset on the same machine never reads someone else's bundle.
+import crypto from "node:crypto";
+import os from "node:os";
+
+const CACHE_TTL_MS = Number(process.env.FETCH_CONTEXT_CACHE_TTL_MS || 5 * 60 * 1000);
+const CACHE_DIR = path.join(os.tmpdir(), "collegeapp-skill-cache");
+
+function cacheKey({ token, focus, locale, includeNarrativeText }) {
+  const h = crypto.createHash("sha256");
+  h.update(`${token}|${focus}|${locale}|${includeNarrativeText ? 1 : 0}`);
+  return h.digest("hex");
+}
+
+function tryReadCached(key) {
+  try {
+    const p = path.join(CACHE_DIR, `${key}.json`);
+    if (!fs.existsSync(p)) return null;
+    const stat = fs.statSync(p);
+    if (Date.now() - stat.mtimeMs > CACHE_TTL_MS) return null;
+    return fs.readFileSync(p, "utf-8");
+  } catch { return null; }
+}
+
+function writeCache(key, body) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(CACHE_DIR, `${key}.json`), body, "utf-8");
+  } catch { /* non-fatal */ }
+}
+
 async function main() {
   const i18n = await loadI18n();
   const { t, normalizeLocale } = i18n;
@@ -100,6 +137,21 @@ async function main() {
   if (!TOKEN) {
     console.error(t("fetch.err.no_token", locale));
     process.exit(2);
+  }
+
+  // Pillar 5 — LRU memo across invocations within the same session.
+  const memoKey = cacheKey({
+    token: TOKEN,
+    focus: args.focus,
+    locale,
+    includeNarrativeText: args.includeNarrativeText,
+  });
+  if (!args.noCache) {
+    const cached = tryReadCached(memoKey);
+    if (cached) {
+      process.stdout.write(cached);
+      return;
+    }
   }
 
   const qs = new URLSearchParams({ focus: args.focus });
@@ -122,12 +174,15 @@ async function main() {
     process.exit(1);
   }
   // Emit compact JSON to stdout so skill pipelines can pipe it directly.
+  let outBody;
   try {
     const parsed = JSON.parse(text);
-    process.stdout.write(JSON.stringify(parsed));
+    outBody = JSON.stringify(parsed);
   } catch {
-    process.stdout.write(text);
+    outBody = text;
   }
+  process.stdout.write(outBody);
+  if (!args.noCache) writeCache(memoKey, outBody);
 }
 
 main().catch(async (err) => {

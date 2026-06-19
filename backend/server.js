@@ -102,6 +102,9 @@ import { initVectorStore, prepareVectorStatements, keywordSearch, getVectorStore
 import { validateEvidenceSources } from "./source-registry.js";
 import { initRAGTables, seedBaselines, prepareRAGStatements, syncStudentData, assembleRAGContext, getDirectStructuredStudentData, getStudentTrends, enhancedCollegeMatch, fetchAndPersistCollegeHistory, buildCollegeHistoryContext, extractGoalUnitIds } from "./rag-engine.js";
 import { runSeasonalResearch, getLatestSeasonalRun, ensureSeasonalTables } from "./seasonal-research.js";
+import { mountPillarRoutes } from "./server-routes-pillars.js";
+import { unwatchAll as unwatchAllVaults } from "./logseq/index.js";
+import { assembleGraphVaultContext } from "./context/graph-vault-context.js";
 import {
   scoreAcademicStrength,
   buildNextStepPlan,
@@ -538,7 +541,7 @@ if (process.env.ENABLE_SEASONAL_RESEARCH === "1") {
   ensureSeasonalTables(db);
   registerJob("seasonal_research", async () => {
     const { callLLM } = buildOperatorCallLLM();
-    return runSeasonalResearch(db, ragStmts, callLLM, { trigger: "scheduled", topN: Number(process.env.SEASONAL_TOP_N || 25) });
+    return runSeasonalResearch(db, ragStmts, callLLM, { trigger: "scheduled", topN: Number(process.env.SEASONAL_TOP_N || 25), scorecardApiKey: SCORECARD_API_KEY });
   }, days * 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
   const keyNote = OPERATOR_LLM?.provider === "openrouter" ? "operator OpenRouter key present" : "waiting for an operator OpenRouter key";
   console.log(`[BOOT] ENABLE_SEASONAL_RESEARCH=1 — seasonal admissions+AP research every ${days}d (credible sources only, verified; ${keyNote}).`);
@@ -1994,6 +1997,32 @@ app.get("/api/context/bundle", studentLimiter, requireStudentAuth, async (req, r
 // for that tier is used. `model` is accepted as an explicit override. Every
 // provider routes through the adapter layer; OpenRouter is the default.
 
+// Build the compact graph/vault injection for chat + orchestrate. Gated on
+// LOGSEQ_VAULT consent only; the assembler itself returns "" when there's no
+// graph and no vault content, so a missing vault never blocks a turn. We do
+// NOT hard-gate on a built graph: the on-disk vault is useful structured
+// memory on its own, and the graph build needs an external LLM that many
+// deployments won't have — gating on it would silently disable the feature.
+// Filesystem-first (logseq:{}): the on-disk vault is the source of truth;
+// HTTP creds matter only for the live notebook endpoints.
+async function buildGraphVaultInjection(studentId, query) {
+  if (!studentId) return "";
+  try {
+    const consent = hasActiveConsent(piiStmts, studentId, "logseq_vault");
+    if (!consent.hasConsent) return "";
+    return await assembleGraphVaultContext({
+      studentId,
+      dataDir: DATA_DIR,
+      query,
+      logseq: {},
+      budgetChars: 2_000,
+    });
+  } catch (err) {
+    console.warn("[graph-vault] injection skipped:", err.message);
+    return "";
+  }
+}
+
 app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
   try {
     let payload = req.body;
@@ -2202,9 +2231,17 @@ app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
       }
     };
 
+    // Compact graph/vault context — cites the student's own structured memory
+    // instead of re-deriving it from snapshots every turn. Gated + graceful;
+    // injected before redaction so any PII inside is masked like profile text.
+    const graphVaultContext = await buildGraphVaultInjection(studentId, userText);
+    const graphVaultBlock = graphVaultContext
+      ? `\n\n─── STUDENT KNOWLEDGE GRAPH / NOTEBOOK (auto-injected from the student's own vault — cite it, don't ask them to retype) ───\n${graphVaultContext}\n─── end knowledge graph / notebook ───`
+      : "";
+
     // Every provider is tool-less now, so always strip the "ALWAYS call X
     // tool" directives and auto-inject the student's profile context.
-    const effectiveSystemRaw = (regGate.systemPrefix ? regGate.systemPrefix + "\n\n" : "") + rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId);
+    const effectiveSystemRaw = (regGate.systemPrefix ? regGate.systemPrefix + "\n\n" : "") + rewriteSystemForNoTools(payload.system) + buildProfileContext(studentId) + graphVaultBlock;
 
     // ── L1: mask PII in the auto-injected system prompt before dispatch ──
     // buildProfileContext() injects the student's real profile (school name,
@@ -2513,7 +2550,7 @@ app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
 // POST /api/agents/orchestrate — FULL RULES-FIRST PIPELINE
 // ═══════════════════════════════════════════════════════════
 
-app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) => {
+app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, async (req, res) => {
   try {
     const { query } = req.body;
     if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
@@ -2570,13 +2607,19 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, (req, res) =
       }
     }
 
-    // Step 6: Build orchestration
+    // Step 6: Build orchestration. Inject the compact graph/vault context so
+    // synthesis cites the student's structured memory (gated + graceful "").
+    const graphVaultContext = await buildGraphVaultInjection(
+      req.studentId,
+      inputScreen.redacted ? inputScreen.redactedText : query,
+    );
     const orchestration = buildOrchestration({
       query: inputScreen.redacted ? inputScreen.redactedText : query,
       studentContext: context.studentContext,
       factStmts,
       evidenceStmts,
       catalog: orchestrationCatalog,
+      graphVaultContext,
     });
 
     res.json({
@@ -2752,6 +2795,7 @@ app.post("/api/admin/seasonal-research/run", requireCounselorAuth, async (req, r
       subjects: Array.isArray(body.subjects) && body.subjects.length ? body.subjects : undefined,
       skipAP: body.skipAP === true,
       delayMs: 500,
+      scorecardApiKey: SCORECARD_API_KEY,
     });
     res.json(result);
   } catch (err) {
@@ -7805,6 +7849,59 @@ setInterval(loadDashboard, 60000);
 
 
 // ═══════════════════════════════════════════════════════════
+// PILLAR ROUTES (embedded status, knowledge-graph, notebook, council)
+// ═══════════════════════════════════════════════════════════
+// Mounted before the static catch-all so /api/* paths resolve here. All
+// accessors are optional from the module's perspective — when an embedded
+// model / graphify / Logseq isn't installed the routes degrade gracefully.
+try {
+  // Bridge the existing requireStudentAuth (sets req.studentId) to the shape
+  // the pillar routes expect (req.user.studentId).
+  const requireAuthBridge = (req, res, next) =>
+    requireStudentAuth(req, res, () => {
+      req.user = req.user || {};
+      if (req.studentId && !req.user.studentId) req.user.studentId = req.studentId;
+      next();
+    });
+
+  mountPillarRoutes(app, {
+    db,
+    dataDir: DATA_DIR,
+    requireAuth: requireAuthBridge,
+    consentStmts: piiStmts,
+    factStmts,
+    evidenceStmts,
+    getStudentBYOK: (studentId) => {
+      const byok = lookupStudentBYOK(piiStmts, piiVault, studentId);
+      if (!byok) return null;
+      return {
+        provider: byok.provider,
+        apiKey: byok.apiKey,
+        baseUrl: byok.baseUrl,
+        model: byok.models?.medium || byok.models?.large || null,
+        crossBorderConsent: hasActiveConsent(
+          piiStmts,
+          studentId,
+          "strategy_council_cross_border",
+        ).hasConsent === true,
+      };
+    },
+    getStudentProfile: (studentId) => {
+      try {
+        const snap = ragStmts.getLatestSnapshot.get(studentId);
+        return snap || null;
+      } catch {
+        return null;
+      }
+    },
+  });
+  console.log("[BOOT] Pillar routes mounted (embedded/knowledge-graph/notebook/council).");
+} catch (err) {
+  console.error("[BOOT] Failed to mount pillar routes:", err.message);
+}
+
+
+// ═══════════════════════════════════════════════════════════
 // SERVE FRONTEND (production static files)
 // ═══════════════════════════════════════════════════════════
 const publicDir = path.join(__dirname, "public");
@@ -7866,9 +7963,10 @@ app.listen(PORT, () => {
 // ═══════════════════════════════════════════════════════════
 // GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════════════════════
-function shutdown(signal) {
+async function shutdown(signal) {
   console.log(`\n[SHUTDOWN] ${signal} received. Stopping jobs and closing databases...`);
   stopAllJobs();
+  await unwatchAllVaults().catch(() => {});
   db.close();
   piiVault.close();
   vectorStore.close();

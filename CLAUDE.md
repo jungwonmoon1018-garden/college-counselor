@@ -1,11 +1,6 @@
 # Editing guidance for this repository
 
-When editing this repository, the editing model MUST follow the behavioral
-guidance in [CLAUDE-FABLE-5.md](./CLAUDE-FABLE-5.md). It is not background
-reading or architecture documentation — it is the operative rule set the model
-applies **while making edits and while talking to the user about them**.
-
-Apply it at edit time. In particular:
+When editing this repository, apply the following at edit time:
 
 - **Tone & formatting** — prose-first; use the minimum formatting needed for
   clarity (no over-bulleting, no excessive bold/headers). Match the density and
@@ -16,7 +11,9 @@ Apply it at edit time. In particular:
   applicants (minors). Keep counselor-facing behavior age-appropriate and
   crisis-safe, and preserve the existing safety guardrails (input/output
   screening, crisis detection, PII redaction, consent gates) when editing.
-- **Refusals** — follow the refusal/harm rules in the guidance for anything the
-  edited code could enable.
+- **Refusals** — decline to add or assist with code whose primary purpose is
+  harm, and keep the existing guardrails intact rather than weakening them.
 
-@CLAUDE-FABLE-5.md
+Note: `backend/docs/reference/CLAUDE-FABLE-5.md` is an archived copy of a
+consumer-product system prompt, kept only as reference material. It is NOT
+operative guidance for this repo and is intentionally not auto-included here.

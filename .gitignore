@@ -34,6 +34,15 @@
 **/generated/
 eng.traineddata
 
+# graphify knowledge-graph output is generated — keep only the hand-written
+# change summaries under recent-changes/, ignore the rest (graph.json/html,
+# obsidian vault, cache).
+/graphify-out/*
+!/graphify-out/recent-changes/
+
+# Accidental nested checkout of this same repo — never commit as a gitlink.
+/college-counselor/
+
 # Logs
 *.log
 **/logs/

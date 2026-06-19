@@ -82,6 +82,15 @@ export const TIER_DEFAULTS = Object.freeze({
     medium: "gpt-4o",
     large: "gpt-4.1",
   }),
+  // Embedded in-process inference (node-llama-cpp + GGUF). Only the small
+  // tier is wired by default; medium/large stay null so callers know to
+  // escalate to the student's BYOK provider for those. Model id matches
+  // the lowercased GGUF filename in backend/models/ (without .gguf).
+  embedded: Object.freeze({
+    small: "qwen2.5-1.5b-instruct.q4_k_m",
+    medium: null,
+    large: null,
+  }),
 });
 
 // Human-friendly metadata exposed via /api/llm/providers so the frontend can
@@ -193,6 +202,16 @@ export const PROVIDER_META = Object.freeze([
     baseUrlOptional: false,
     knownModels: [],
   },
+  {
+    id: "embedded",
+    label: "Embedded (in-process, zero-cost)",
+    keyPrefix: "",
+    baseUrlOptional: true,
+    baseUrl: "embedded://local",
+    // The model id is the filename stem under backend/models/. Add new GGUFs
+    // there to expose them via this dropdown.
+    knownModels: ["qwen2.5-1.5b-instruct.q4_k_m"],
+  },
 ]);
 
 // Build a reverse map: providerId → which adapter kind handles it on the wire.
@@ -208,6 +227,7 @@ export const PROVIDER_WIRE_PROTOCOL = Object.freeze({
   zhipu: "openai",
   ollama: "openai",
   lmstudio: "openai",
+  embedded: "embedded",
 });
 
 // Reasoning models burn output tokens on internal "thinking" before

@@ -1,10 +1,22 @@
 ---
 name: collegeapp-ai
-description: US college application counselor grounded in a rules-first backend (FAFSA/FERPA/Korea PIPA compliant). Helps students build a coherent application story using evidence vectors (5-factor EC strength, directionality, AP mastery, narrative fit, competition prestige) retrieved from the college-counselor-backend. OpenRouter-first BYOK — also runs on OpenAI, Google Gemini, DeepSeek, Qwen/Together, Zhipu/GLM, or local Ollama/LM Studio.
-version: 1.4.0
+description: US college application counselor grounded in a rules-first backend (FAFSA/FERPA/Korea PIPA compliant). Helps students build a coherent application story using evidence vectors (5-factor EC strength, directionality, AP mastery, narrative fit, competition prestige) retrieved from the college-counselor-backend. Embedded-first reasoning (zero-cost Qwen2.5-1.5B for tier=small + bge-small embeddings) with BYOK escalation to OpenRouter / OpenAI / Gemini / DeepSeek / Together / Zhipu / Ollama / LM Studio for medium/large tiers and the Strategy Council's BYOK seats.
+version: 1.6.0
 ---
 
-<!-- v1.4.0: Seasonal researcher hardening + chat-route safety. (1) Each college
+<!-- v1.6.0: Logseq notebook linked into the per-student PII vault, and its
+     contents now feed both the chat models and the Strategy Council. (1) Each
+     student's data lives as plain Logseq markdown under
+     data/student-storage/<sha256(studentId)>/vault/ (pages/ + journals/), read
+     filesystem-first with an optional HTTP path when Logseq desktop's Local
+     REST API is registered via PUT /api/students/:id/notebook/logseq-config.
+     (2) POST /api/chat and POST /api/agents/orchestrate now prepend a compact
+     ~500-token graph/vault context (BFS subgraph + college-list + narrative),
+     gated on logseq_vault consent and graceful when absent. (3) The Strategy
+     Council reads the richer ~2k-token envelope and writes its verdict back to
+     the vault (strategy-council-log.md + the daily journal) alongside the
+     council_convenings SQLite row. See the new "## Logseq notebook" section.
+     v1.4.0: Seasonal researcher hardening + chat-route safety. (1) Each college
      is now searched on its OWN official .edu host (from Scorecard school_url),
      not just the shared credible hosts. (2) Each scraped stat is cross-checked
      through THREE independent lenses (Common Data Set / federal Scorecard+NCES /
@@ -28,6 +40,79 @@ version: 1.4.0
 
 
 # collegeapp-ai — College Application Counselor Skill
+
+## Token economy
+
+The backend is wired for embedded-first reasoning. Default to the smallest tier that can answer the question well; let the backend escalate.
+
+- **Deterministic answers first.** FAFSA eligibility, deadlines, GPA percentiles, crisis response, and document completeness checks MUST go through the rules engine — never through `POST /api/llm`. Hitting these endpoints with the wrong route burns tokens for an answer the rules engine already has.
+- **tier=small for routine scoring.** Narrative-fit, classification, EC component judgements, prestige rationale. The backend will run these on the embedded Qwen2.5-1.5B at zero cost when the GGUF is present (`GET /api/llm/providers/embedded/status` to check). If the embedded model isn't ready, the same tier=small request falls back to the student's BYOK small tier.
+- **tier=medium for synthesis.** RAG-grounded answers, college list comparisons, EC strategy discussion. Always BYOK.
+- **tier=large only for the genuinely hard.** Essay critique, cross-source conflict, multi-factor strategy when medium reported low confidence. The Opus budget gate (5/day, 50/month by default) will refuse otherwise.
+- **Never request tier=large pre-emptively.** Let the policy router decide. Explicit large-tier opt-in by the student or counselor is the only correct path.
+- **Strategy Council overrides tier=large.** For the high-stakes subintents (college-list shape, major pivot, narrative arc, EC strategy change, ED/EA choice, late-cycle pivot), `POST /api/strategy-council/convene` runs 5 councilors (3 embedded + 2 BYOK medium) for ~5k tokens total — cheaper than a single Opus call AND with structured dissent. See the **Strategy Council** section below.
+- **Chat + orchestrate inject the student's own structured memory.** When a student has `logseq_vault` consent, `POST /api/chat` and `POST /api/agents/orchestrate` automatically prepend a **compact (~500-token) graph/vault context** — a BFS subgraph for the question plus the `college-list` and `narrative` vault pages — to the system prompt. This replaces broad re-derivation of context each turn with a citation to the student's persistent notebook, so net input tokens drop. It is graceful: no consent, no vault, or no built graph all degrade to an empty injection that never blocks a turn. The richer ~2k-token envelope (four vault pages + a week of journals) is reserved for the Council. See **Logseq notebook** below.
+
+## Strategy Council
+
+Strategic decisions deserve more than one model's opinion. When the student is making a decision they'd ask a human counselor about, convene the Strategy Council.
+
+**When to convene:**
+- The student is choosing a college list shape (reach/match/safety mix).
+- The student is considering a major pivot.
+- The student is questioning their narrative arc (or considering a new one).
+- The student is reshaping their EC strategy after junior year.
+- The student is weighing ED vs EA vs RD for a specific school.
+- The student is making a late-cycle pivot (post-Nov 1 strategy change).
+- A previous coaching answer came back with confidence < 0.55 in any of the above areas.
+
+**When NOT to convene:**
+- Routine Q&A ("when is Cornell ED deadline?" — rules engine).
+- Information requests ("what's the average SAT at Tufts?" — fact store).
+- Definition / explanation questions ("what is the CSS Profile?" — RAG).
+- Anything the student framed as quick or casual.
+
+**How to invoke:**
+```
+node backend/skills/collegeapp-ai/scripts/convene-council.js \
+  --backend $BACKEND_URL \
+  --student $STUDENT_ID \
+  --token $SESSION_TOKEN \
+  --decision-type major-pivot \
+  --question "Should I switch from CS to applied math given my evidence?"
+```
+Or hit `POST /api/strategy-council/convene` directly with `{question, decision_type, urgency}`.
+
+**How to interpret the result:**
+- `recommendation` is the primary answer. Surface it as the main response.
+- `dissent` (when present) MUST be surfaced too. Don't bury it. The skeptic flagging something is part of the deliverable, not an afterthought.
+- `confidence` < 0.5 means the council punted ("hung panel"). Tell the student plainly and recommend they think it through with a human counselor.
+- `citations` link to graph nodes and Logseq blocks. Resolve `[[graph:nodeId]]` via `GET /api/students/:id/knowledge-graph/query` and `[[logseq:page#blockId]]` via `GET /api/students/:id/notebook/pages/:name` to give the student clickable provenance.
+- `council_breakdown` shows each seat's stance, confidence, and model. If any seat has `fallback_used: true`, mention it — that seat ran on the embedded model because the student's BYOK provider was foreign-hosted without PIPA cross-border consent.
+- An audit row lands in the student's Logseq vault at `pages/strategy-council-log.md` automatically. Mention it: "I logged this in your Notebook for later reference."
+
+**The Compliance Reviewer holds a hard veto.** If the council returns a recommendation that starts with "The Compliance Reviewer flagged this," do not try to argue around it. Surface the flag and recommend the student consult a human counselor.
+
+**What the council reads + writes.** Every seat sees the same ~2k-token envelope built from the student's structured memory: a BFS graph subgraph for the question, the `college-list` / `narrative` / `ec-evidence` / `methodology-notes` vault pages, the last seven daily-journal blocks, and any baseline facts. After the tally, the convening is persisted to **two** places automatically — a `council_convenings` row in `counselor.db` (surfaced by `GET /api/strategy-council/convenings[/:id]`) and an appended block in the vault's `pages/strategy-council-log.md`, cross-linked from that day's journal. So the dissent and citations are durable in the student's own notebook, not just in the response.
+
+## Logseq notebook
+
+Each student gets a private Logseq vault inside the encrypted PII store — their persistent, human-readable memory. It is the structured-memory source for both chat and the Council.
+
+**Where it lives.** `data/student-storage/<sha256(studentId)>/vault/` with `pages/`, `journals/`, and `logseq/config.edn`. The directory is a valid Logseq graph the student (or operator) can open directly in Logseq desktop. The markdown is plaintext **by necessity** — Logseq must read it — so the trust boundary is the hashed directory name plus OS disk encryption, not file-level encryption. (The `pii-vault.db` SQLite store beside it *is* AES-256-GCM encrypted; the vault markdown is not.)
+
+**Consent gate.** All notebook endpoints require active `logseq_vault` consent (`ensureVaultConsent`). `LOGSEQ_PARENT_CONVERSATIONS` separately controls whether parent-conversation pages are seeded. Without consent the endpoints return 403 and neither chat nor the Council reads the vault.
+
+**Endpoints** (all auth + vault-consent gated):
+- `POST /api/students/:id/notebook/init` — bootstrap the seeded pages (`college-list`, `narrative`, `ec-evidence`, `strategy-council-log`, `methodology-notes`) and start a debounced file-watcher that triggers an incremental graph rebuild on vault edits.
+- `GET /api/students/:id/notebook/pages` — list page names.
+- `GET|PUT /api/students/:id/notebook/pages/:name` — read / append-block a page.
+- `GET /api/students/:id/notebook/journal/:date` · `POST .../journal/:date/append` — read / append a daily journal (`:date` is strict `YYYY-MM-DD`).
+- `PUT /api/students/:id/notebook/logseq-config` — register a live Logseq desktop HTTP endpoint (`{http_endpoint, token}`); pass an empty `http_endpoint` to clear.
+
+**Filesystem-first, HTTP-optional.** Reads/writes go straight to the vault directory by default — robust, works whether or not Logseq is running. If the student opens the vault in Logseq desktop with the **Local REST API** plugin and registers its endpoint via `logseq-config`, the client routes through HTTP so live edits are visible without a reload; it transparently falls back to the filesystem when the endpoint isn't reachable. One Logseq desktop instance serves one graph, so HTTP creds are per-student and optional — the filesystem path is the multi-student default.
+
+**Resolving citations.** Council and chat citations point into this vault. Resolve `[[logseq:page#block]]` (or a `baseline_fact` whose id names a vault page, e.g. `College List: Reach: MIT`) via `GET /api/students/:id/notebook/pages/:name`, and `[[graph:nodeId]]` via `GET /api/students/:id/knowledge-graph/query`, to give the student clickable provenance back to their own notes.
 
 ## Mission
 
@@ -233,3 +318,5 @@ This file under `backend/skills/collegeapp-ai/` is the **source of truth**. The 
 cd backend && npm run skill:sync          # copy SKILL.md + scripts/ to the active install
 cd backend && npm run skill:sync -- --check   # exit non-zero if versions differ (deploy guard)
 ```
+
+Bump the `version` in the frontmatter on every substantive edit and prepend a one-paragraph note to the changelog comment at the top of this file — the `--check` guard compares versions, so a stale number is what trips a failed deploy. When you add or rename a backend endpoint, update the matching prose here (the **Logseq notebook**, **Auth**, and **Tool allowlist** sections are the ones that drift fastest) so the skill keeps describing routes that actually exist.
