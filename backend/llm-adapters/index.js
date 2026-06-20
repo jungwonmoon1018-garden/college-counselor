@@ -17,7 +17,7 @@
 
 import { callOpenAI,    validateOpenAIKey }    from "./openai.js";
 import { callGoogle,    validateGoogleKey }    from "./google.js";
-import { callEmbeddedLlama, validateEmbedded, isModelFileOnDisk } from "./embedded-llama.js";
+import { callEmbeddedLlama, validateEmbedded, isModelFileOnDisk, embeddedLlamaRuntimeSafe } from "./embedded-llama.js";
 import {
   TIER_DEFAULTS,
   PROVIDER_META,
@@ -26,6 +26,7 @@ import {
   isReasoningModel,
 } from "./tier-defaults.js";
 import { sanitizeProviderPayload } from "../content-moderation.js";
+import { llmDebug, llmLog, since } from "./llm-log.js";
 
 export const PROVIDERS = Object.freeze({
   OPENAI: "openai",
@@ -146,6 +147,7 @@ export async function callLLM(opts = {}) {
   }
 
   const wire = PROVIDER_WIRE_PROTOCOL[provider];
+  llmDebug("DISPATCH", "callLLM", { provider, wire, model, maxTokens: opts.maxTokens || 1024 });
   const hasTools = Array.isArray(opts.tools) && opts.tools.length > 0;
   if (hasTools) {
     // No provider on the OpenAI/Google wire executes the backend's custom
@@ -194,8 +196,10 @@ export async function callLLM(opts = {}) {
   };
 
   switch (wire) {
-    case "embedded":
-      return attachRedaction(await callEmbeddedLlama({
+    case "embedded": {
+      llmLog("DISPATCH", "→ embedded llama", { model });
+      const t0 = Date.now();
+      const out = attachRedaction(await callEmbeddedLlama({
         model,
         messages: sanitizedPayload.messages,
         system: sanitizedPayload.system,
@@ -203,6 +207,9 @@ export async function callLLM(opts = {}) {
         temperature: opts.temperature,
         signal: opts.signal,
       }));
+      llmDebug("DISPATCH", "← embedded llama done", { model, ms: since(t0), outTokens: out?.usage?.output_tokens });
+      return out;
+    }
     case "google":
       return attachRedaction(await callGoogle({
         apiKey: opts.apiKey,
@@ -253,13 +260,19 @@ export async function validateKey({ provider, apiKey, baseUrl, fetchImpl, signal
 }
 
 /**
- * Sync probe — true iff embedded is fully ready (GGUF on disk; doesn't
- * verify node-llama-cpp is importable). Used by the policy router.
+ * Sync probe — true iff embedded TEXT inference is both ready (GGUF on disk)
+ * AND safe to run on this runtime (see embeddedLlamaRuntimeSafe: Node version,
+ * env kill-switch, crash-loop marker). The single chokepoint every caller
+ * (policy-router, councilor, narrative-fit, seasonal, pillars) routes through,
+ * so an unsafe runtime falls back to BYOK everywhere instead of segfaulting.
+ * Note: embeddings (bge/ONNX) are NOT gated here — they don't segfault and
+ * have their own isEmbeddingsAvailable() probe.
  */
 export function isEmbeddedAvailable() {
   const modelId = resolveTierDefault(PROVIDERS.EMBEDDED, "small");
   if (!modelId) return false;
-  return isModelFileOnDisk(modelId);
+  if (!isModelFileOnDisk(modelId)) return false;
+  return embeddedLlamaRuntimeSafe();
 }
 
 export function listKnownModels(provider) {

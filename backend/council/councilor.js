@@ -18,6 +18,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import { callLLM, resolveTierDefault, isEmbeddedAvailable } from "../llm-adapters/index.js";
+import { llmLog, llmDebug } from "../llm-adapters/llm-log.js";
 
 const PARSE_TRIES = 2; // re-prompt on parse failure
 const MAX_OUTPUT_TOKENS = 600;
@@ -79,6 +80,7 @@ export class Councilor {
   /** Deliberate on a question against a shared context envelope. */
   async deliberate({ question, decisionType, student, context, byok, signal }) {
     const adapter = this.resolveAdapter({ byok });
+    llmLog("COUNCIL", "seat resolved", { role: this.role, tier: this.tier, provider: adapter.provider, model: adapter.model, fallbackUsed: adapter.fallbackUsed });
     const system = this.getSystemPrompt(student);
     const userPrompt = buildUserPrompt({
       role: this.role,
@@ -117,6 +119,7 @@ export class Councilor {
         }
         lastErr = new Error("Failed to parse council envelope JSON.");
       } catch (err) {
+        llmDebug("COUNCIL", "deliberate attempt failed", { role: this.role, attempt, error: err?.message });
         lastErr = err;
       }
     }

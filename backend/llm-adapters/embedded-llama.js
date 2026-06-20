@@ -17,21 +17,78 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { llmLog, llmDebug, breadcrumb, since } from "./llm-log.js";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MODELS_DIR = path.resolve(MODULE_DIR, "..", "models");
+
+// Highest Node major the native node-llama-cpp binary is known-good on here.
+// The project's CI pins Node 22; newer majors (e.g. 25) have segfaulted during
+// native inference (ABI/prebuilt-binary mismatch). Bump this as newer ABIs are
+// verified. Override with EMBEDDED_LLAMA_FORCE=1.
+const SUPPORTED_NODE_MAX = 22;
+
+// Written immediately before a native prompt and deleted right after. If it
+// survives to the next boot, the previous run crashed mid-inference and we
+// disable embedded text for this run (crash-loop breaker).
+const INFLIGHT_MARKER = path.join(MODELS_DIR, ".llama-inflight");
 
 // Cached state — building the LlamaModel takes ~1s, so we keep one alive
 // per process. Keyed by absolute model file path.
 const MODEL_CACHE = new Map(); // path -> { llama, model, context }
 let LLAMA_MODULE = null;       // lazy import handle
 let LLAMA_LOAD_ERROR = null;   // cached failure message so we don't retry on every call
+let RUNTIME_WARNED = false;    // log the "disabled" reason only once per process
+let CRASH_MARKER_SEEN = null;  // memoized: did a marker exist at first check this run?
+
+// ─── Runtime safety gate for native TEXT inference ──────────────────────
+// True iff it is safe to run node-llama-cpp on this process. Sync + cheap so
+// isEmbeddedAvailable() (used synchronously by the policy router) can call it.
+// Unsafe → callers fall back to BYOK instead of risking an uncatchable
+// native segfault. Embeddings (ONNX) are unaffected — they don't crash.
+export function embeddedLlamaRuntimeSafe() {
+  if (process.env.EMBEDDED_LLAMA_FORCE === "1") return true;
+
+  const reasons = [];
+  if (process.env.EMBEDDED_LLAMA_DISABLED === "1") reasons.push("EMBEDDED_LLAMA_DISABLED=1");
+
+  const major = Number(process.versions.node.split(".")[0]);
+  if (Number.isFinite(major) && major > SUPPORTED_NODE_MAX) {
+    reasons.push(`Node v${process.versions.node} outside tested range (<=${SUPPORTED_NODE_MAX})`);
+  }
+
+  // Crash-loop breaker — check once per process and memoize.
+  if (CRASH_MARKER_SEEN === null) {
+    try { CRASH_MARKER_SEEN = fs.existsSync(INFLIGHT_MARKER); } catch { CRASH_MARKER_SEEN = false; }
+  }
+  if (CRASH_MARKER_SEEN) reasons.push("previous run crashed mid-inference (.llama-inflight present)");
+
+  if (reasons.length === 0) return true;
+
+  if (!RUNTIME_WARNED) {
+    RUNTIME_WARNED = true;
+    llmLog("LLAMA", `embedded text inference disabled — ${reasons.join("; ")}. tier=small/councilors will use BYOK. Run on Node <=${SUPPORTED_NODE_MAX} (or set EMBEDDED_LLAMA_FORCE=1) to enable.`);
+  }
+  return false;
+}
+
+function writeInflightMarker(modelId) {
+  try { fs.writeFileSync(INFLIGHT_MARKER, `${modelId} ${new Date().toISOString()}\n`); }
+  catch { /* best-effort */ }
+}
+
+function clearInflightMarker() {
+  try { if (fs.existsSync(INFLIGHT_MARKER)) fs.unlinkSync(INFLIGHT_MARKER); }
+  catch { /* best-effort */ }
+}
 
 async function loadLlamaModule() {
   if (LLAMA_MODULE) return LLAMA_MODULE;
   if (LLAMA_LOAD_ERROR) throw LLAMA_LOAD_ERROR;
   try {
+    const t0 = Date.now();
     LLAMA_MODULE = await import("node-llama-cpp");
+    llmLog("LLAMA", "node-llama-cpp imported", { node: process.versions.node, ms: since(t0) });
     return LLAMA_MODULE;
   } catch (err) {
     LLAMA_LOAD_ERROR = new Error(
@@ -86,7 +143,12 @@ export function isModelFileOnDisk(modelId = "qwen2.5-1.5b-instruct.q4_k_m") {
 }
 
 async function getOrLoadModel(modelPath) {
-  if (MODEL_CACHE.has(modelPath)) return MODEL_CACHE.get(modelPath);
+  if (MODEL_CACHE.has(modelPath)) {
+    llmDebug("LLAMA", "model cache hit", { modelPath });
+    return MODEL_CACHE.get(modelPath);
+  }
+  llmLog("LLAMA", "loading model (cache miss)", { modelPath });
+  const t0 = Date.now();
   const { getLlama } = await loadLlamaModule();
   const llama = await getLlama();
   const model = await llama.loadModel({ modelPath });
@@ -94,6 +156,7 @@ async function getOrLoadModel(modelPath) {
   const context = await model.createContext({ contextSize: 4096 });
   const entry = { llama, model, context };
   MODEL_CACHE.set(modelPath, entry);
+  llmLog("LLAMA", "model + context ready", { ms: since(t0) });
   return entry;
 }
 
@@ -158,6 +221,7 @@ export async function callEmbeddedLlama({
     throw err;
   }
 
+  llmDebug("LLAMA", "callEmbeddedLlama", { model: modelId, maxTokens, temperature });
   const { model, context } = await getOrLoadModel(modelPath);
   const { LlamaChatSession } = await loadLlamaModule();
   const sequence = context.getSequence();
@@ -173,6 +237,14 @@ export async function callEmbeddedLlama({
 
   const startTokens = approxTokens(input, model);
 
+  // Crash breadcrumb + crash-loop marker: the synchronous stderr line and the
+  // on-disk marker both land BEFORE entering native code. If the process
+  // segfaults inside session.prompt(), the START line has no matching END and
+  // the marker survives to the next boot (which disables embedded then).
+  writeInflightMarker(modelId);
+  breadcrumb("LLAMA", `>>> native session.prompt START model=${modelId} inputTokens=${startTokens} maxTokens=${maxTokens} (if no END line follows, this is the segfault site)`);
+  const t0 = Date.now();
+
   let response;
   try {
     response = await session.prompt(input, {
@@ -181,11 +253,13 @@ export async function callEmbeddedLlama({
       signal,
     });
   } finally {
+    clearInflightMarker();
     // Free the sequence so subsequent calls can reuse the context.
     try { sequence.dispose(); } catch { /* ignore */ }
   }
 
   const outputTokens = approxTokens(response, model);
+  breadcrumb("LLAMA", `<<< native session.prompt END model=${modelId} ms=${since(t0)} outTokens=${outputTokens}`);
 
   return {
     content: [{ type: "text", text: response || "" }],
