@@ -237,7 +237,9 @@ export function buildStudentModel(snapshot, strengthRows = [], narrative = null,
 
 export function scoreTestPercentile(student, college, cdsResult) {
   const policy = cdsResult?.parsed?.testPolicy || "test_considered_or_required";
-  if (!student.sat && !student.act) return policy === "test_optional_or_deemphasized" ? 50 : 20;
+  // No scores on file is a genuine unknown, not a positive. Keep it modest even
+  // when the school is test-optional (was 50 → 42; required floor 20 → 18).
+  if (!student.sat && !student.act) return policy === "test_optional_or_deemphasized" ? 42 : 18;
 
   const sat = student.sat || null;
   const act = student.act || null;
@@ -246,17 +248,19 @@ export function scoreTestPercentile(student, college, cdsResult) {
   const act25 = Number(college?.act25 ?? college?.act_25 ?? cdsResult?.parsed?.actComposite?.low ?? 0) || null;
   const act75 = Number(college?.act75 ?? college?.act_75 ?? cdsResult?.parsed?.actComposite?.high ?? 0) || null;
 
+  // Below the 25th percentile drops off faster now (steeper slope, lower floor)
+  // so a sub-range test score reads as the liability it is.
   let score = 50;
   if (sat && sat25 && sat75) {
     if (sat >= sat75) score = 92;
     else if (sat >= sat25) score = 65 + ((sat - sat25) / Math.max(1, sat75 - sat25)) * 25;
-    else score = Math.max(20, 60 - ((sat25 - sat) / 8));
+    else score = Math.max(12, 58 - ((sat25 - sat) / 6));
   } else if (act && act25 && act75) {
     if (act >= act75) score = 92;
     else if (act >= act25) score = 65 + ((act - act25) / Math.max(1, act75 - act25)) * 25;
-    else score = Math.max(20, 60 - ((act25 - act) * 6));
+    else score = Math.max(12, 58 - ((act25 - act) * 7));
   }
-  if (policy === "test_optional_or_deemphasized" && !student.sat && !student.act) score = Math.max(score, 55);
+  if (policy === "test_optional_or_deemphasized" && !student.sat && !student.act) score = Math.max(score, 45);
   return round1(clamp01(score / 100) * 100);
 }
 
@@ -275,9 +279,13 @@ export function scoreAcademicReadiness(student, college, cdsResult) {
   for (const key of Object.keys(featureWeights)) featureWeights[key] /= totalWeight;
 
   const targetGpa = Number(college?.avgGpaAdmitted ?? college?.avg_gpa_admitted ?? cdsResult?.parsed?.gpaAverage ?? 3.75) || 3.75;
+  // Tighter than before but not punitive: at the admitted average ≈54, ~0.2
+  // above ≈85, ~0.2 below ≈23 (was 0.45 cushion / 0.75 slope → at-average ≈60
+  // and 0.45 below still passing). A transcript under the admitted range no
+  // longer reads as comfortably in-range. No-GPA default lowered (35→30).
   const gpaScore = student.gpa != null
-    ? clamp01((student.gpa - (targetGpa - 0.45)) / 0.75) * 100
-    : 35;
+    ? clamp01((student.gpa - (targetGpa - 0.35)) / 0.65) * 100
+    : 30;
   const rigorExpectation = Math.max(4, Math.round((targetGpa - 3.2) * 10));
   const rigorScore = clamp01((student.rigorousCourseCount + student.seniorRigorCount * 0.5) / Math.max(1, rigorExpectation)) * 100;
   const majorPrepScore = clamp01(((student.relevantCourses.length / 5) * 0.55) + (((student.majorRelevantGpa ?? student.gpa ?? 3.2) / 4) * 0.45)) * 100;
@@ -423,7 +431,12 @@ export function scoreInstitutionalSelectivityAdjustment(collegeContext) {
   const admitRate = normalizePercentValue(collegeContext.acceptanceRate ?? collegeContext.acceptance ?? collegeContext.admission_rate ?? null);
   if (admitRate == null) return { adjustment: 1, selectivityIndex: null };
   const selectivityIndex = clamp01(1 - admitRate);
-  const adjustment = round2(0.8 + (selectivityIndex * 0.35));
+  // DAMPENER, not a boost. academic.score is already school-relative (scored
+  // against this school's GPA/SAT ranges), so selectivity should only mildly
+  // dampen — never inflate. ≈0.86 at a 4%-admit school, ≈0.93 at 60%, 1.0 when
+  // unknown. The previous `0.8 + idx*0.35` boosted selective schools up to
+  // 1.15× — the core admissibility over-estimation this corrects.
+  const adjustment = round2(1 - selectivityIndex * 0.15);
   return { adjustment, selectivityIndex: round2(selectivityIndex) };
 }
 
@@ -476,9 +489,12 @@ export function buildRedFlags(student, collegeContext, majorCompetitiveness, nar
 }
 
 export function classifyPositioningLabel(finalScore) {
-  if (finalScore >= 82) return "Highly competitive";
-  if (finalScore >= 67) return "Competitive";
-  if (finalScore >= 48) return "Reach";
+  // Raised cutoffs (was 82/67/48). "Competitive" now requires a genuinely
+  // in-range profile rather than a merely plausible one — the labels were
+  // reading too optimistically.
+  if (finalScore >= 85) return "Highly competitive";
+  if (finalScore >= 70) return "Competitive";
+  if (finalScore >= 52) return "Reach";
   return "High reach";
 }
 
@@ -550,7 +566,7 @@ export function buildPositioningForTarget(student, collegeContext, cdsResult, op
     finalPositioningScore: boundedFinal,
     admissibility: {
       academicReadinessScore: academic.score,
-      summary: academic.score >= 75 ? "academically in-range" : academic.score >= 58 ? "academically plausible but not comfortable" : "academically stretched",
+      summary: academic.score >= 80 ? "academically in-range" : academic.score >= 65 ? "academically plausible but not comfortable" : "academically stretched",
     },
     competitiveness: {
       // Blended: intended-major crowding + the school's real admit-rate

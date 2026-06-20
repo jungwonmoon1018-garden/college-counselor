@@ -6,6 +6,8 @@ import {
   scoreAcademicReadiness,
   scoreInstitutionalPriorityFit,
   scoreMajorCompetitiveness,
+  scoreInstitutionalSelectivityAdjustment,
+  scoreTestPercentile,
   buildPositioningForTarget,
   classifyPositioningLabel,
 } from "../positioning-engine.js";
@@ -188,6 +190,53 @@ test("unvalidated CDS records get a confidence penalty and never read High", () 
   assert.notEqual(unvalidated.confidence.evidenceConfidence, "High");
   assert.equal(unvalidated.confidence.evidenceValidated, false);
   assert.equal(validated.confidence.evidenceValidated, true);
+});
+
+// ─── Critical-calibration guards (admissibility must not over-estimate) ───
+
+test("selectivity is a dampener, never a boost, and scales with selectivity", () => {
+  const adj4 = scoreInstitutionalSelectivityAdjustment({ acceptanceRate: 4 });
+  const adj60 = scoreInstitutionalSelectivityAdjustment({ acceptanceRate: 60 });
+  const adjUnknown = scoreInstitutionalSelectivityAdjustment({});
+  // Never inflate above 1.0 (the old 0.8 + idx*0.35 reached 1.15 for Ivies).
+  assert.ok(adj4.adjustment <= 1, `4%-admit adjustment ${adj4.adjustment} must be <= 1`);
+  assert.ok(adj60.adjustment <= 1);
+  // More selective → stronger dampening (lower multiplier).
+  assert.ok(adj4.adjustment < adj60.adjustment, `${adj4.adjustment} should be < ${adj60.adjustment}`);
+  assert.equal(adjUnknown.adjustment, 1);
+});
+
+test("the same student is LESS admissible at a more selective school", () => {
+  const student = makeStudent();
+  const ranges = { sat25: 1460, sat75: 1560, avgGpaAdmitted: 3.9, topMajors: [] };
+  const cds = { schoolName: "X", fetchStatus: "ok", parsed: { c7: {} } };
+  const selective = buildPositioningForTarget(student, { name: "Selective", acceptanceRate: 4, ...ranges }, cds, { major: "Computer Science" });
+  const open = buildPositioningForTarget(student, { name: "Open", acceptanceRate: 55, ...ranges }, cds, { major: "Computer Science" });
+  assert.ok(
+    selective.finalPositioningScore < open.finalPositioningScore,
+    `selective (${selective.finalPositioningScore}) should be < open (${open.finalPositioningScore})`
+  );
+});
+
+test("a below-range student at a hyper-selective school is a high reach", () => {
+  const weak = buildStudentModel({
+    gpa_unweighted: 3.4,
+    major_interest: "Computer Science",
+    courses_json: JSON.stringify([{ name: "AP Computer Science A", type: "ap", grade: "B", year: "11" }]),
+    test_scores_json: JSON.stringify([{ test: "sat", totalScore: 1280 }]),
+    activities_json: "[]",
+  }, [], null);
+  const r = buildPositioningForTarget(weak, {
+    name: "Lottery U", acceptanceRate: 6, sat25: 1500, sat75: 1570, avgGpaAdmitted: 3.96, topMajors: [],
+  }, { schoolName: "Lottery U", fetchStatus: "ok", parsed: { c7: {}, admitRatePercent: 6 } }, { major: "Computer Science" });
+  assert.equal(r.overallPositioningLabel, "High reach", `got ${r.overallPositioningLabel} @ ${r.finalPositioningScore}`);
+});
+
+test("test-optional with no scores stays conservative (no positive inference)", () => {
+  const student = makeStudent();
+  const noScores = { ...student, sat: null, act: null };
+  const optional = scoreTestPercentile(noScores, { sat25: 1460, sat75: 1560 }, { parsed: { testPolicy: "test_optional_or_deemphasized" } });
+  assert.ok(optional <= 45, `test-optional/no-scores should be <= 45, got ${optional}`);
 });
 
 test("low evidence confidence widens the displayed score bands", () => {
