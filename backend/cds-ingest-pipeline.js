@@ -21,6 +21,13 @@ import { persistAndValidate } from "./cds-validator.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = path.join(__dirname, "data", "cds-cache");
 const PDF_DIR = path.join(CACHE_DIR, "pdfs");
+// Operator-registered CDS source links (written by scripts/add-cds-cycle.mjs).
+// These are authoritative — an operator curated them from each school's
+// official institutional-research page — so they MERGE INTO and OVERRIDE the
+// scraped collegetransitions index below. Without this merge the registered
+// links were dead: getRepositoryIndex only read the scraped HTML, so a fresh
+// cycle added via add-cds-cycle never reached downloadCDS.
+const OPERATOR_INDEX_PATH = path.join(__dirname, "tools", "cds-cache", "index.json");
 
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -36,6 +43,49 @@ function ensureDirs() {
 
 function slugify(name) {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 80);
+}
+
+// ─── Operator-registered index merge ─────────────────────────────────────
+// Read tools/cds-cache/index.json (array or slug-keyed object of
+// { name, slug, links:{cycle:url} }). Returns [] when absent/unreadable.
+function loadOperatorIndex() {
+  try {
+    if (!fs.existsSync(OPERATOR_INDEX_PATH)) return [];
+    const raw = JSON.parse(fs.readFileSync(OPERATOR_INDEX_PATH, "utf8"));
+    const entries = Array.isArray(raw) ? raw : Object.values(raw);
+    return entries.filter((e) => e && (e.name || e.slug) && e.links && typeof e.links === "object");
+  } catch {
+    return [];
+  }
+}
+
+// Merge operator links onto the scraped index. Match by normalized slug
+// (recomputed with this module's slugify so it lines up with enrichIndex,
+// regardless of how add-cds-cycle stored the slug). Operator links WIN on a
+// cycle-key conflict; schools absent from the scrape are appended. downloadCDS
+// then picks the newest cycle key, so a freshly-registered 2025-26 link is used.
+function mergeOperatorIndex(scraped) {
+  const op = loadOperatorIndex();
+  if (op.length === 0) return scraped;
+  const bySlug = new Map(scraped.map((e) => [e.slug, e]));
+  let merged = 0, appended = 0;
+  for (const oe of op) {
+    const slug = slugify(oe.name || oe.slug);
+    const target = bySlug.get(slug);
+    if (target) {
+      target.links = { ...(target.links || {}), ...oe.links };
+      merged++;
+    } else {
+      const entry = { name: oe.name || oe.slug, slug, links: { ...oe.links } };
+      scraped.push(entry);
+      bySlug.set(slug, entry);
+      appended++;
+    }
+  }
+  if (merged || appended) {
+    console.log(`[cds-index] merged operator links: ${merged} matched, ${appended} appended (${op.length} registered).`);
+  }
+  return scraped;
 }
 
 // ─── Drive URL resolver ──────────────────────────────────────────────
@@ -67,14 +117,10 @@ export function resolveDownloadURL(url) {
   return url;
 }
 
-export async function downloadCDS({ school, year, force = false }) {
-  ensureDirs();
-  const slug = school.slug || slugify(school.name);
-  const links = school.links || {};
-  // Prefer the requested year; fall back to the most recent available.
-  const yearKey = year && links[year] ? year : Object.keys(links).sort().reverse()[0];
-  if (!yearKey) throw new Error(`No CDS link for ${school.name}`);
-  const downloadURL = resolveDownloadURL(links[yearKey]);
+// Try one cycle's link: cache hit, else fetch + magic-byte sniff. Returns a
+// result object or throws (so the caller can fall back to an older cycle).
+async function tryDownloadCycle({ slug, name, yearKey, link, force }) {
+  const downloadURL = resolveDownloadURL(link);
   const targetPDF = path.join(PDF_DIR, `${slug}.${yearKey}.pdf`);
   const targetXLSX = path.join(PDF_DIR, `${slug}.${yearKey}.xlsx`);
 
@@ -89,10 +135,9 @@ export async function downloadCDS({ school, year, force = false }) {
   }
 
   const res = await fetch(downloadURL, { headers: BROWSER_HEADERS, redirect: "follow" });
-  if (!res.ok) throw new Error(`Download failed (${res.status}) for ${school.name} ${yearKey}`);
+  if (!res.ok) throw new Error(`Download failed (${res.status}) for ${name} ${yearKey}`);
   const buf = Buffer.from(await res.arrayBuffer());
 
-  // Magic-byte sniff to choose extension
   const head = buf.slice(0, 4).toString("hex");
   let kind = "unknown";
   let target = targetPDF;
@@ -101,12 +146,36 @@ export async function downloadCDS({ school, year, force = false }) {
   else {
     const sniff = buf.slice(0, 256).toString("utf8");
     if (/<html/i.test(sniff)) {
-      throw new Error(`Drive returned HTML virus-warning interstitial for ${school.name} ${yearKey}`);
+      throw new Error(`HTML interstitial (not a PDF) for ${name} ${yearKey}`);
     }
     target = path.join(PDF_DIR, `${slug}.${yearKey}.bin`);
   }
   fs.writeFileSync(target, buf);
   return { path: target, sizeBytes: buf.length, fromCache: false, kind, url: downloadURL, year: yearKey };
+}
+
+export async function downloadCDS({ school, year, force = false }) {
+  ensureDirs();
+  const slug = school.slug || slugify(school.name);
+  const links = school.links || {};
+  // Build the cycle attempt order: the explicitly requested year first (if
+  // present), then every cycle newest→oldest. We try each in turn and return
+  // the first that actually downloads — so a registered-but-dead 2025-26 link
+  // (a school that hasn't published yet) gracefully falls back to the newest
+  // cycle that IS live (e.g. collegetransitions' 2024-25) instead of failing.
+  const ordered = Object.keys(links).sort().reverse();
+  const attemptKeys = year && links[year] ? [year, ...ordered.filter((k) => k !== year)] : ordered;
+  if (attemptKeys.length === 0) throw new Error(`No CDS link for ${school.name}`);
+
+  let lastErr = null;
+  for (const yearKey of attemptKeys) {
+    try {
+      return await tryDownloadCycle({ slug, name: school.name, yearKey, link: links[yearKey], force });
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error(`No downloadable CDS link for ${school.name}`);
 }
 
 // ─── Repository index loader (cached for 24h) ────────────────────────
@@ -124,7 +193,7 @@ export async function getRepositoryIndex({ force = false, fetchImpl = fetch } = 
   if (!force && fs.existsSync(indexHTMLPath) &&
       Date.now() - fs.statSync(indexHTMLPath).mtimeMs < INDEX_TTL_MS) {
     const html = fs.readFileSync(indexHTMLPath, "utf8");
-    indexCache = enrichIndex(parseIndex(html));
+    indexCache = mergeOperatorIndex(enrichIndex(parseIndex(html)));
     indexFetchedAt = now;
     return indexCache;
   }
@@ -147,7 +216,7 @@ export async function getRepositoryIndex({ force = false, fetchImpl = fetch } = 
 
   // Decorate with a `links` map keyed by year label (back-compat with
   // the older ingester contract used by sample CLIs).
-  indexCache = enrichIndex(parseIndex(html));
+  indexCache = mergeOperatorIndex(enrichIndex(parseIndex(html)));
   indexFetchedAt = now;
   return indexCache;
 }
