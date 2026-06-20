@@ -81,3 +81,23 @@ test("deadlines validate dueAt is a parseable ISO-8601", () => {
 test("deadlines status transitions are whitelisted (open|done|snoozed)", () => {
   assert.match(SERVER, /\["open", "done", "snoozed"\]/);
 });
+
+test("overdue deadlines are culled before Aug 1 and re-shown after (display-only)", () => {
+  // Cutoff helper + August (0-indexed 7) boundary.
+  assert.match(SERVER, /function shouldCullOverdue/);
+  assert.match(SERVER, /OVERDUE_RESHOW_MONTH = 7/);
+  // The GET list applies it: overdue rows filtered out, count zeroed, no nag,
+  // and a transparency field on how many were hidden.
+  assert.match(SERVER, /const cullOverdue = shouldCullOverdue\(now\)/);
+  assert.match(SERVER, /overdueCount = cullOverdue \? 0 :/);
+  assert.match(SERVER, /overdueCulled/);
+});
+
+test("shouldCullOverdue boundary: cull Jan–Jul, show Aug–Dec (mirrors server logic)", () => {
+  // Mirrors `new Date(ms).getMonth() < 7` so the intended cutoff is locked in.
+  const cull = (ms) => new Date(ms).getMonth() < 7;
+  assert.equal(cull(Date.parse("2026-07-31T12:00:00Z")), true,  "Jul → cull");
+  assert.equal(cull(Date.parse("2026-08-01T12:00:00Z")), false, "Aug 1 → show");
+  assert.equal(cull(Date.parse("2026-12-15T12:00:00Z")), false, "Dec → show");
+  assert.equal(cull(Date.parse("2026-01-05T12:00:00Z")), true,  "Jan → cull");
+});

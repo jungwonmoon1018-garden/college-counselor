@@ -320,6 +320,59 @@ export function mountPillarRoutes(app, deps) {
       council_breakdown: safeJSON(row.council_breakdown_json),
     });
   });
+
+  // ────────────────────────────────────────────────────────────────
+  // Background hook — auto-convene from non-request triggers (e.g. an EC
+  // file upload classified as EC/course-relevant). Same dep assembly as the
+  // manual route above, throttled to one auto-convening per student per
+  // window so a burst of uploads can't spam the (expensive) Council.
+  // ────────────────────────────────────────────────────────────────
+  const AUTO_CONVENE_THROTTLE_MS = 10 * 60 * 1000;
+  const lastAutoConvene = new Map(); // studentId -> epoch ms
+
+  async function conveneFromUpload({ studentId, question, decisionType, triggerSource = "upload" }) {
+    if (!studentId || !question) return { skipped: "missing studentId/question" };
+    const now = Date.now();
+    const last = lastAutoConvene.get(studentId) || 0;
+    if (now - last < AUTO_CONVENE_THROTTLE_MS) {
+      return { skipped: "throttled", retryInMs: AUTO_CONVENE_THROTTLE_MS - (now - last) };
+    }
+    lastAutoConvene.set(studentId, now);
+
+    let byok = null;
+    let crossBorderConsent = false;
+    let student = null;
+    try {
+      if (typeof getStudentBYOK === "function") {
+        const row = await getStudentBYOK(studentId);
+        byok = row && row.provider ? row : null;
+        crossBorderConsent = !!row?.crossBorderConsent;
+      } else if (consentStmts) {
+        crossBorderConsent = hasActiveConsent(consentStmts, studentId, CONSENT_TYPES.STRATEGY_COUNCIL_CROSS_BORDER).hasConsent;
+      }
+      if (typeof getStudentProfile === "function") student = await getStudentProfile(studentId);
+    } catch (err) {
+      console.warn("[strategy-council] auto dep lookup failed:", err.message);
+    }
+
+    const envelope = await convene({
+      studentId,
+      dataDir,
+      question: String(question).slice(0, 2000),
+      decisionType: decisionType && VALID_DECISION_TYPES.has(decisionType) ? decisionType : DECISION_TYPES.OTHER,
+      student,
+      byok,
+      crossBorderConsent,
+      councilStmts,
+      factStmts,
+      evidenceStmts,
+      logseq: resolveLogseqCreds(studentId),
+    });
+    console.log(`[strategy-council] auto-convened from ${triggerSource} for ${studentId.slice(0, 8)} (${decisionType || "other"})`);
+    return { convened: true, envelope };
+  }
+
+  return { conveneFromUpload };
 }
 
 function safeJSON(raw) {

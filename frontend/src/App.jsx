@@ -9,6 +9,7 @@ import SpikeFinder from "./components/SpikeFinder.jsx";
 import CalibratedFitCard from "./components/CalibratedFitCard.jsx";
 import CourseSequencer from "./components/CourseSequencer.jsx";
 import DisclosurePanel from "./components/DisclosurePanel.jsx";
+import MethodologyPanel from "./MethodologyPanel.jsx";
 import SetupPanel from "./SetupPanel.jsx";
 import { detectLocale, t as tt } from "./i18n.js";
 
@@ -5266,16 +5267,15 @@ export default function App() {
               API key
             </button>
             {/* Transparency: weights, thresholds, and live "data as of"
-                freshness (models + college data). Opens the methodology page. */}
-            <a
-              href="/methodology.html"
-              target="_blank"
-              rel="noopener noreferrer"
+                freshness (models + college data). Opens the methodology as an
+                in-app popup (same overlay as Disclosures). */}
+            <button
+              onClick={() => setActivePanel("methodology")}
               title="See the weights, data sources, and how fresh each source is"
-              style={{padding:"7px 10px",borderRadius:8,border:"1px solid rgba(167,139,250,0.20)",background:"rgba(167,139,250,0.08)",color:"#a78bfa",fontSize:11,cursor:"pointer",textDecoration:"none"}}
+              style={{padding:"7px 10px",borderRadius:8,border:"1px solid rgba(167,139,250,0.20)",background:"rgba(167,139,250,0.08)",color:"#a78bfa",fontSize:11,cursor:"pointer"}}
             >
               How scoring works
-            </a>
+            </button>
           </div>
           {editingField === "gpa" ? (
             <div style={{ background:"rgba(55,138,221,0.08)",borderRadius:10,padding:12,marginBottom:12,border:"1px solid rgba(55,138,221,0.3)" }}>
@@ -5856,6 +5856,9 @@ export default function App() {
             )}
             {activePanel === "disclosure" && (
               <DisclosurePanel locale={locale} />
+            )}
+            {activePanel === "methodology" && (
+              <MethodologyPanel embedded locale={locale} />
             )}
           </div>
         </div>

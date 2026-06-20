@@ -103,6 +103,7 @@ import { validateEvidenceSources } from "./source-registry.js";
 import { initRAGTables, seedBaselines, prepareRAGStatements, syncStudentData, assembleRAGContext, getDirectStructuredStudentData, getStudentTrends, enhancedCollegeMatch, fetchAndPersistCollegeHistory, buildCollegeHistoryContext, extractGoalUnitIds } from "./rag-engine.js";
 import { runSeasonalResearch, getLatestSeasonalRun, ensureSeasonalTables } from "./seasonal-research.js";
 import { mountPillarRoutes } from "./server-routes-pillars.js";
+import { classifyUploadForCouncil } from "./council/upload-trigger.js";
 import { unwatchAll as unwatchAllVaults } from "./logseq/index.js";
 import { assembleGraphVaultContext } from "./context/graph-vault-context.js";
 import {
@@ -1298,6 +1299,11 @@ setTimeout(processNotificationQueue, 5_000);
 // EXPRESS APP
 // ═══════════════════════════════════════════════════════════
 const app = express();
+
+// Assigned when pillar routes mount (see mountPillarRoutes call below). Route
+// handlers defined earlier in source order reference it lazily at request time
+// — by then it is set. Exposes conveneFromUpload(...) for the EC-upload hook.
+let councilHooks = null;
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -4516,6 +4522,26 @@ app.post("/api/ec/upload", studentLimiter, requireStudentAuth, (req, res) => {
       ).catch((err) => console.error("[EC upload] post-recompute failed:", err.message));
     }
 
+    // Auto-link to the Strategy Council when the extracted text is about
+    // extracurriculars or course selection. Rules-gate + embeddings confirm;
+    // throttled and fire-and-forget inside the hook so the upload response is
+    // not delayed. Safe when the Council can't fully run (embedded disabled +
+    // no BYOK) — it records a low-confidence convening rather than crashing.
+    if (councilHooks && extractionStatus === "ok" && extractedText) {
+      classifyUploadForCouncil(extractedText)
+        .then((verdict) => {
+          if (!verdict.relevant) return;
+          const label = ecName || req.file.originalname || "an uploaded document";
+          const question = verdict.decisionType === "course-selection"
+            ? `The student uploaded a document related to their course selection ("${label}"). Based on its content, how should they plan their courses to strengthen academic rigor and narrative fit?`
+            : `The student uploaded a document related to their extracurriculars ("${label}"). Based on its content, how should they position and build on this to strengthen their narrative fit and overall application?`;
+          return councilHooks.conveneFromUpload({
+            studentId, question, decisionType: verdict.decisionType, triggerSource: "ec-upload",
+          });
+        })
+        .catch((err) => console.warn("[EC upload] auto-convene failed:", err.message));
+    }
+
     res.json({
       ok: true,
       attachment_id: attachmentId,
@@ -5214,12 +5240,21 @@ app.get("/api/students/deadlines", studentLimiter, requireStudentAuth, (req, res
     const upcoming = shaped.filter((d) => d.status === "open" && d.daysUntil >= 0);
     const overdue = shaped.filter((d) => d.status === "open" && d.daysUntil < 0);
     const done = shaped.filter((d) => d.status === "done");
+
+    // Before Aug 1, hide overdue deadlines from the surface and don't nag about
+    // them; they re-show automatically once the new cycle starts (Aug 1+).
+    const cullOverdue = shouldCullOverdue(now);
+    const visible = cullOverdue
+      ? shaped.filter((d) => !(d.status === "open" && d.daysUntil < 0))
+      : shaped;
+    const overdueCount = cullOverdue ? 0 : overdue.length;
+
     let friendlyMessage;
-    if (overdue.length > 0) {
+    if (overdueCount > 0) {
       friendlyMessage = t(
-        overdue.length === 1 ? "deadlines.overdue_one" : "deadlines.overdue_many",
+        overdueCount === 1 ? "deadlines.overdue_one" : "deadlines.overdue_many",
         locale,
-        { count: overdue.length },
+        { count: overdueCount },
       );
     } else if (upcoming.length === 0) {
       friendlyMessage = t("deadlines.no_upcoming", locale);
@@ -5233,13 +5268,14 @@ app.get("/api/students/deadlines", studentLimiter, requireStudentAuth, (req, res
     }
     res.json({
       ok: true,
-      count: shaped.length,
+      count: visible.length,
       upcomingCount: upcoming.length,
-      overdueCount: overdue.length,
+      overdueCount,
       doneCount: done.length,
-      deadlines: shaped,
+      deadlines: visible,
       locale,
       friendlyMessage,
+      overdueCulled: cullOverdue ? overdue.length : 0,
     });
   } catch (err) {
     console.error("[deadlines] list error:", err.message);
@@ -5300,6 +5336,16 @@ app.delete("/api/students/deadlines/:id", studentLimiter, requireStudentAuth, (r
     res.status(500).json({ error: "Delete failed" });
   }
 });
+
+// Application deadlines cluster Nov–Jan; once they pass, nagging about overdue
+// dates for the rest of the cycle is noise. We cull overdue deadlines from the
+// surface until Aug 1, when the next application cycle begins and they become
+// relevant again (display-only — rows are never deleted, so they re-show then).
+const OVERDUE_RESHOW_MONTH = 7; // 0-indexed → August
+
+function shouldCullOverdue(nowMs) {
+  return new Date(nowMs ?? Date.now()).getMonth() < OVERDUE_RESHOW_MONTH;
+}
 
 function shapeDeadline(row, nowMs) {
   if (!row) return null;
@@ -7864,7 +7910,7 @@ try {
       next();
     });
 
-  mountPillarRoutes(app, {
+  councilHooks = mountPillarRoutes(app, {
     db,
     dataDir: DATA_DIR,
     requireAuth: requireAuthBridge,
