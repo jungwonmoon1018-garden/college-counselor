@@ -19,6 +19,7 @@ export const DECISION_TYPES = Object.freeze({
   MAJOR_PIVOT: "major-pivot",
   NARRATIVE_ARC: "narrative-arc",
   EC_STRATEGY: "ec-strategy",
+  COURSE_SELECTION: "course-selection",
   ED_EA: "ed-ea",
   LATE_CYCLE: "late-cycle",
   OTHER: "other",
@@ -27,6 +28,7 @@ export const DECISION_TYPES = Object.freeze({
 const SUBINTENT_TO_DECISION = {
   college_list: DECISION_TYPES.COLLEGE_LIST,
   ec_strategy: DECISION_TYPES.EC_STRATEGY,
+  course_selection: DECISION_TYPES.COURSE_SELECTION,
   essay: DECISION_TYPES.NARRATIVE_ARC,
   strategy: DECISION_TYPES.OTHER,
 };

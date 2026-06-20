@@ -16,7 +16,9 @@ const h2 = { fontSize: 16, fontWeight: 700, marginBottom: 10, color: C.text };
 
 function pct(n) { return `${Math.round((n || 0) * 100)}%`; }
 
-export default function MethodologyPanel() {
+// `embedded` renders the panel for the in-app modal (no full-screen wrapper);
+// the standalone /methodology.html page renders it full-page by default.
+export default function MethodologyPanel({ embedded = false } = {}) {
   const [m, setM] = useState(null);
   const [err, setErr] = useState("");
 
@@ -27,8 +29,12 @@ export default function MethodologyPanel() {
       .catch((e) => setErr(e.message));
   }, []);
 
+  const outerStyle = embedded
+    ? { color: C.text }
+    : { minHeight: "100vh", background: C.bg, color: C.text, padding: "32px 16px" };
+
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, padding: "32px 16px" }}>
+    <div style={outerStyle}>
       <div style={{ maxWidth: 720, margin: "0 auto" }}>
         <h1 style={{ fontSize: 24, marginBottom: 4 }}>How scoring works</h1>
         <p style={{ color: C.sub, fontSize: 14, marginBottom: 20 }}>
