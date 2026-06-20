@@ -117,14 +117,10 @@ export function resolveDownloadURL(url) {
   return url;
 }
 
-export async function downloadCDS({ school, year, force = false }) {
-  ensureDirs();
-  const slug = school.slug || slugify(school.name);
-  const links = school.links || {};
-  // Prefer the requested year; fall back to the most recent available.
-  const yearKey = year && links[year] ? year : Object.keys(links).sort().reverse()[0];
-  if (!yearKey) throw new Error(`No CDS link for ${school.name}`);
-  const downloadURL = resolveDownloadURL(links[yearKey]);
+// Try one cycle's link: cache hit, else fetch + magic-byte sniff. Returns a
+// result object or throws (so the caller can fall back to an older cycle).
+async function tryDownloadCycle({ slug, name, yearKey, link, force }) {
+  const downloadURL = resolveDownloadURL(link);
   const targetPDF = path.join(PDF_DIR, `${slug}.${yearKey}.pdf`);
   const targetXLSX = path.join(PDF_DIR, `${slug}.${yearKey}.xlsx`);
 
@@ -139,10 +135,9 @@ export async function downloadCDS({ school, year, force = false }) {
   }
 
   const res = await fetch(downloadURL, { headers: BROWSER_HEADERS, redirect: "follow" });
-  if (!res.ok) throw new Error(`Download failed (${res.status}) for ${school.name} ${yearKey}`);
+  if (!res.ok) throw new Error(`Download failed (${res.status}) for ${name} ${yearKey}`);
   const buf = Buffer.from(await res.arrayBuffer());
 
-  // Magic-byte sniff to choose extension
   const head = buf.slice(0, 4).toString("hex");
   let kind = "unknown";
   let target = targetPDF;
@@ -151,12 +146,36 @@ export async function downloadCDS({ school, year, force = false }) {
   else {
     const sniff = buf.slice(0, 256).toString("utf8");
     if (/<html/i.test(sniff)) {
-      throw new Error(`Drive returned HTML virus-warning interstitial for ${school.name} ${yearKey}`);
+      throw new Error(`HTML interstitial (not a PDF) for ${name} ${yearKey}`);
     }
     target = path.join(PDF_DIR, `${slug}.${yearKey}.bin`);
   }
   fs.writeFileSync(target, buf);
   return { path: target, sizeBytes: buf.length, fromCache: false, kind, url: downloadURL, year: yearKey };
+}
+
+export async function downloadCDS({ school, year, force = false }) {
+  ensureDirs();
+  const slug = school.slug || slugify(school.name);
+  const links = school.links || {};
+  // Build the cycle attempt order: the explicitly requested year first (if
+  // present), then every cycle newest→oldest. We try each in turn and return
+  // the first that actually downloads — so a registered-but-dead 2025-26 link
+  // (a school that hasn't published yet) gracefully falls back to the newest
+  // cycle that IS live (e.g. collegetransitions' 2024-25) instead of failing.
+  const ordered = Object.keys(links).sort().reverse();
+  const attemptKeys = year && links[year] ? [year, ...ordered.filter((k) => k !== year)] : ordered;
+  if (attemptKeys.length === 0) throw new Error(`No CDS link for ${school.name}`);
+
+  let lastErr = null;
+  for (const yearKey of attemptKeys) {
+    try {
+      return await tryDownloadCycle({ slug, name: school.name, yearKey, link: links[yearKey], force });
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error(`No downloadable CDS link for ${school.name}`);
 }
 
 // ─── Repository index loader (cached for 24h) ────────────────────────
