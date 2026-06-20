@@ -323,6 +323,26 @@ export async function ingestBulk(stmts, targets, { concurrency = 3, year = "2023
   return results;
 }
 
+// ─── Full refresh over the whole repository index ─────────────────────
+// Re-scrapes the collegetransitions index (force) — which also re-merges the
+// operator-registered links — then ingests every school, preferring the newest
+// cycle (downloadCDS handles that + the older-cycle fallback). Used by the
+// scheduled daily June-onward refresh so the freshest CDS reaches College Fit.
+// True on/after June 1 (month index >= 5). New CDS cycles publish across the
+// summer, so the scheduled daily refresh stays idle Jan–May and runs Jun–Dec.
+export function shouldRunCdsRefresh(nowMs) {
+  return new Date(nowMs ?? Date.now()).getMonth() >= 5;
+}
+
+export async function refreshAllCds(stmts, { concurrency = 3, year = null } = {}) {
+  const index = await getRepositoryIndex({ force: true });
+  const targets = index.map((e) => e.name).filter(Boolean);
+  const results = await ingestBulk(stmts, targets, { concurrency, year });
+  const byStatus = {};
+  for (const r of results) byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+  return { total: results.length, byStatus };
+}
+
 // ─── Re-validate without re-fetching ──────────────────────────────────
 // When CORRECTIONS changes (operator added new ground truth), re-run
 // validation against existing cds_records rows without re-downloading.

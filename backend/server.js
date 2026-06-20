@@ -104,6 +104,7 @@ import { initRAGTables, seedBaselines, prepareRAGStatements, syncStudentData, as
 import { runSeasonalResearch, getLatestSeasonalRun, ensureSeasonalTables } from "./seasonal-research.js";
 import { mountPillarRoutes } from "./server-routes-pillars.js";
 import { classifyUploadForCouncil } from "./council/upload-trigger.js";
+import { refreshAllCds, shouldRunCdsRefresh } from "./cds-ingest-pipeline.js";
 import { unwatchAll as unwatchAllVaults } from "./logseq/index.js";
 import { assembleGraphVaultContext } from "./context/graph-vault-context.js";
 import {
@@ -546,6 +547,22 @@ if (process.env.ENABLE_SEASONAL_RESEARCH === "1") {
   }, days * 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
   const keyNote = OPERATOR_LLM?.provider === "openrouter" ? "operator OpenRouter key present" : "waiting for an operator OpenRouter key";
   console.log(`[BOOT] ENABLE_SEASONAL_RESEARCH=1 — seasonal admissions+AP research every ${days}d (credible sources only, verified; ${keyNote}).`);
+}
+
+// Daily CDS web-scrape from June 1 onward. New Common Data Sets publish across
+// the summer, so from June 1 through year-end we re-scrape the repository index
+// and re-ingest every school each day, preferring the newest cycle — keeping
+// College Fit grounded in the freshest CDS. Deterministic parse (no LLM/key).
+// Enabled by default; set CDS_DAILY_REFRESH=0 to disable.
+if (process.env.CDS_DAILY_REFRESH !== "0") {
+  registerJob("cds_daily_refresh", async () => {
+    if (!shouldRunCdsRefresh(Date.now())) return { skipped: "before June 1 (off-season)" };
+    const concurrency = Number(process.env.CDS_REFRESH_CONCURRENCY || 3) || 3;
+    const r = await refreshAllCds(ragStmts, { concurrency });
+    console.log(`[BATCH] cds_daily_refresh: ${r.total} schools`, JSON.stringify(r.byStatus));
+    return { changed: true, ...r };
+  }, 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
+  console.log("[BOOT] CDS daily refresh scheduled (active June 1+; CDS_DAILY_REFRESH=0 to disable).");
 }
 
 startAllJobs();
@@ -3816,6 +3833,17 @@ async function searchAndPersistCdsRecord(schoolName) {
   return null;
 }
 
+// A cheap fingerprint of the CDS store (row count + latest update). Folded into
+// the positioning/CDS cache keys so a CDS refresh invalidates stale fit results.
+function currentCdsVersion() {
+  try {
+    const r = db.prepare("SELECT COUNT(*) AS n, MAX(updated_at) AS m FROM cds_records").get();
+    return `${r?.n || 0}:${r?.m || "0"}`;
+  } catch {
+    return "0";
+  }
+}
+
 app.post("/api/positioning/targets", studentLimiter, requireStudentAuth, async (req, res) => {
   try {
     const snap = ragStmts.getLatestSnapshot.get(req.studentId);
@@ -3836,11 +3864,15 @@ app.post("/api/positioning/targets", studentLimiter, requireStudentAuth, async (
     const requestedMajor = req.body?.major || snap.major_interest || null;
     const refreshCds = Boolean(req.body?.refreshCds);
     const cacheKey = computeCdsQueryCacheKey(rawTargets);
+    // Fold a CDS data version into every cache key so a CDS refresh (which
+    // bumps cds_records.updated_at) invalidates stale cached fit results — the
+    // reason a freshly-scraped CDS wasn't reaching the College Fit tab.
+    const cdsVersion = currentCdsVersion();
     let cdsResults = null;
     if (!refreshCds) {
-      const cachedCds = getScorecardQueryCache("cds_targets", { cacheKey, targets: rawTargets });
+      const cachedCds = getScorecardQueryCache("cds_targets", { cacheKey, cdsVersion, targets: rawTargets });
       cdsResults = cachedCds?.data?.results || null;
-      const cachedPositioning = getScorecardQueryCache("positioning_targets", { cacheKey, targets: rawTargets, major: requestedMajor });
+      const cachedPositioning = getScorecardQueryCache("positioning_targets", { cacheKey, cdsVersion, targets: rawTargets, major: requestedMajor });
       if (cachedPositioning?.data) {
         return res.json(withScorecardMeta(cachedPositioning.data, {
           cached: true,
@@ -3852,7 +3884,7 @@ app.post("/api/positioning/targets", studentLimiter, requireStudentAuth, async (
 
     if (!cdsResults) {
       cdsResults = (await resolveAndParseCdsTargets(rawTargets));
-      putScorecardQueryCache("cds_targets", { cacheKey, targets: rawTargets }, {
+      putScorecardQueryCache("cds_targets", { cacheKey, cdsVersion, targets: rawTargets }, {
         targets: rawTargets,
         results: cdsResults,
         source: "College Transitions CDS repository",
@@ -3938,18 +3970,25 @@ app.post("/api/positioning/targets", studentLimiter, requireStudentAuth, async (
         ? Math.round(Number(collegeRow.acceptance_rate) * 1000) / 10
         : null;
 
+      // When we have a VALIDATED CDS record, its enrolled ranges are the
+      // freshest ground truth — prefer them over the static IPEDS baseline so
+      // the academic-readiness scoring reflects the newest CDS (the baseline
+      // row, used first before, made fit ignore a just-scraped CDS). Fall back
+      // to baseline only for fields the CDS lacks.
+      const cdsFirst = storedCds && cdsValidated;
+      const pick = (cdsVal, baseVal) => (cdsFirst ? (cdsVal ?? baseVal) : (baseVal ?? cdsVal));
       const collegeContext = {
         unitId: collegeRow?.unit_id || resolvedUnitId || null,
         name: collegeRow?.name || storedCds?.school || cdsResult.schoolName,
         state: collegeRow?.state || null,
-        sat25: collegeRow?.sat_25 ?? storedCds?.enrolledSAT?.p25 ?? null,
-        sat75: collegeRow?.sat_75 ?? storedCds?.enrolledSAT?.p75 ?? null,
-        act25: collegeRow?.act_25 ?? storedCds?.enrolledACT?.p25 ?? null,
-        act75: collegeRow?.act_75 ?? storedCds?.enrolledACT?.p75 ?? null,
+        sat25: pick(storedCds?.enrolledSAT?.p25, collegeRow?.sat_25) ?? null,
+        sat75: pick(storedCds?.enrolledSAT?.p75, collegeRow?.sat_75) ?? null,
+        act25: pick(storedCds?.enrolledACT?.p25, collegeRow?.act_25) ?? null,
+        act75: pick(storedCds?.enrolledACT?.p75, collegeRow?.act_75) ?? null,
         acceptanceRate: cdsAdmitPercent ?? baselineAdmitPercent ?? effectiveCds?.parsed?.admitRatePercent ?? null,
-        avgGpaAdmitted: collegeRow?.avg_gpa_admitted ?? storedCds?.enrolledGPA?.avg ?? effectiveCds?.parsed?.gpaAverage ?? null,
+        avgGpaAdmitted: pick(storedCds?.enrolledGPA?.avg, collegeRow?.avg_gpa_admitted) ?? effectiveCds?.parsed?.gpaAverage ?? null,
         topMajors: safeParseJSON(collegeRow?.top_majors_json, []),
-        source: collegeRow?.source || (storedCds ? "cds_store" : "baseline_colleges"),
+        source: cdsFirst ? "cds_store" : (collegeRow?.source || (storedCds ? "cds_store" : "baseline_colleges")),
       };
 
       // Last-resort admit rate: no CDS and no IPEDS baseline number, but we
@@ -4028,7 +4067,7 @@ app.post("/api/positioning/targets", studentLimiter, requireStudentAuth, async (
       targets: scoredTargets,
     };
 
-    putScorecardQueryCache("positioning_targets", { cacheKey, targets: rawTargets, major: requestedMajor }, payload);
+    putScorecardQueryCache("positioning_targets", { cacheKey, cdsVersion, targets: rawTargets, major: requestedMajor }, payload);
     res.json(withScorecardMeta(payload, {
       cached: false,
       cacheKind: "positioning_targets",
