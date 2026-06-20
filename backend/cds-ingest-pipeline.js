@@ -21,6 +21,13 @@ import { persistAndValidate } from "./cds-validator.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = path.join(__dirname, "data", "cds-cache");
 const PDF_DIR = path.join(CACHE_DIR, "pdfs");
+// Operator-registered CDS source links (written by scripts/add-cds-cycle.mjs).
+// These are authoritative — an operator curated them from each school's
+// official institutional-research page — so they MERGE INTO and OVERRIDE the
+// scraped collegetransitions index below. Without this merge the registered
+// links were dead: getRepositoryIndex only read the scraped HTML, so a fresh
+// cycle added via add-cds-cycle never reached downloadCDS.
+const OPERATOR_INDEX_PATH = path.join(__dirname, "tools", "cds-cache", "index.json");
 
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -36,6 +43,49 @@ function ensureDirs() {
 
 function slugify(name) {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 80);
+}
+
+// ─── Operator-registered index merge ─────────────────────────────────────
+// Read tools/cds-cache/index.json (array or slug-keyed object of
+// { name, slug, links:{cycle:url} }). Returns [] when absent/unreadable.
+function loadOperatorIndex() {
+  try {
+    if (!fs.existsSync(OPERATOR_INDEX_PATH)) return [];
+    const raw = JSON.parse(fs.readFileSync(OPERATOR_INDEX_PATH, "utf8"));
+    const entries = Array.isArray(raw) ? raw : Object.values(raw);
+    return entries.filter((e) => e && (e.name || e.slug) && e.links && typeof e.links === "object");
+  } catch {
+    return [];
+  }
+}
+
+// Merge operator links onto the scraped index. Match by normalized slug
+// (recomputed with this module's slugify so it lines up with enrichIndex,
+// regardless of how add-cds-cycle stored the slug). Operator links WIN on a
+// cycle-key conflict; schools absent from the scrape are appended. downloadCDS
+// then picks the newest cycle key, so a freshly-registered 2025-26 link is used.
+function mergeOperatorIndex(scraped) {
+  const op = loadOperatorIndex();
+  if (op.length === 0) return scraped;
+  const bySlug = new Map(scraped.map((e) => [e.slug, e]));
+  let merged = 0, appended = 0;
+  for (const oe of op) {
+    const slug = slugify(oe.name || oe.slug);
+    const target = bySlug.get(slug);
+    if (target) {
+      target.links = { ...(target.links || {}), ...oe.links };
+      merged++;
+    } else {
+      const entry = { name: oe.name || oe.slug, slug, links: { ...oe.links } };
+      scraped.push(entry);
+      bySlug.set(slug, entry);
+      appended++;
+    }
+  }
+  if (merged || appended) {
+    console.log(`[cds-index] merged operator links: ${merged} matched, ${appended} appended (${op.length} registered).`);
+  }
+  return scraped;
 }
 
 // ─── Drive URL resolver ──────────────────────────────────────────────
@@ -124,7 +174,7 @@ export async function getRepositoryIndex({ force = false, fetchImpl = fetch } = 
   if (!force && fs.existsSync(indexHTMLPath) &&
       Date.now() - fs.statSync(indexHTMLPath).mtimeMs < INDEX_TTL_MS) {
     const html = fs.readFileSync(indexHTMLPath, "utf8");
-    indexCache = enrichIndex(parseIndex(html));
+    indexCache = mergeOperatorIndex(enrichIndex(parseIndex(html)));
     indexFetchedAt = now;
     return indexCache;
   }
@@ -147,7 +197,7 @@ export async function getRepositoryIndex({ force = false, fetchImpl = fetch } = 
 
   // Decorate with a `links` map keyed by year label (back-compat with
   // the older ingester contract used by sample CLIs).
-  indexCache = enrichIndex(parseIndex(html));
+  indexCache = mergeOperatorIndex(enrichIndex(parseIndex(html)));
   indexFetchedAt = now;
   return indexCache;
 }
