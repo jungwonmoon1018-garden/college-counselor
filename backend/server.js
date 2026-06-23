@@ -1523,7 +1523,11 @@ app.post("/api/llm", apiLimiter, requireStudentAuth, async (req, res) => {
     if (classification.topicType === TOPIC_TYPES.CRISIS) {
       const crisisResult = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
       const crisis = crisisResult.crisis_response || crisisResult; // builder nests message/resources under crisis_response
-      stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", userText.slice(0, 100), hashIP(req.ip));
+      // Never persist the student's crisis words. The audit row exists for the
+      // count/timestamp signal (getCrisisCount24h) and the counselor alert — the
+      // raw text can carry address/medical PII into the unencrypted audit table,
+      // so we store a neutral marker instead of userText.slice(0, 100).
+      stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", "[crisis text redacted]", hashIP(req.ip));
       return res.json({
         content: [{ type: "text", text: crisis.message }],
         _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
@@ -2102,7 +2106,11 @@ app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
     if (classification.topicType === TOPIC_TYPES.CRISIS) {
       const crisisResult = buildCrisisResponse(req.headers["accept-language"]?.startsWith("ko") ? "ko" : "en-US");
       const crisis = crisisResult.crisis_response || crisisResult; // builder nests message/resources under crisis_response
-      stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", userText.slice(0, 100), hashIP(req.ip));
+      // Never persist the student's crisis words. The audit row exists for the
+      // count/timestamp signal (getCrisisCount24h) and the counselor alert — the
+      // raw text can carry address/medical PII into the unencrypted audit table,
+      // so we store a neutral marker instead of userText.slice(0, 100).
+      stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "crisis_detected", studentId?.slice(0, 12) || "", "[crisis text redacted]", hashIP(req.ip));
       return res.json({
         content: [{ type: "text", text: crisis.message }],
         _meta: { deterministic: true, topicType: "CRISIS", modelTier: "NONE", crisisResources: crisis.resources, disclaimer: crisis.disclaimer },
