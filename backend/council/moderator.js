@@ -26,10 +26,37 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 const STRONG_CONFIDENCE = 0.7;
+// An ungrounded "support" is clamped here — below STRONG_CONFIDENCE so that a
+// rubber-stamp can't count toward strong/modify consensus on volume alone.
+const SYCOPHANCY_CAP = 0.6;
+
+// Anti-sycophancy + anti-hallucination calibration, applied to every seat
+// before the tally. A seat that votes "support" with high confidence but cites
+// nothing is an ungrounded rubber-stamp: agreement not backed by the shared
+// context. We clamp its confidence so it cannot manufacture consensus, and we
+// flag it so the breakdown/audit trail shows why. The seat prompts ask for the
+// same discipline; this is the deterministic backstop that doesn't trust the
+// model to police itself. Vetoes (Compliance/Data Checker) are untouched.
+function clamp01(n) {
+  if (!Number.isFinite(n)) return 0;
+  return n < 0 ? 0 : n > 1 ? 1 : n;
+}
+
+function calibrateSeat(seat) {
+  const citations = Array.isArray(seat.citations) ? seat.citations : [];
+  const grounded = citations.length > 0;
+  let confidence = clamp01(Number(seat.confidence));
+  let calibrated = null;
+  if (seat.stance === "support" && !grounded && confidence >= STRONG_CONFIDENCE) {
+    confidence = SYCOPHANCY_CAP;
+    calibrated = "ungrounded_support_clamped";
+  }
+  return { ...seat, confidence, grounded, calibrated };
+}
 
 export function moderate(councilorEnvelopes) {
-  const seats = councilorEnvelopes.filter(Boolean);
-  if (seats.length === 0) {
+  const rawSeats = councilorEnvelopes.filter(Boolean);
+  if (rawSeats.length === 0) {
     return {
       recommendation: "The council could not deliberate — no councilor envelopes received.",
       confidence: 0,
@@ -39,6 +66,8 @@ export function moderate(councilorEnvelopes) {
       council_breakdown: [],
     };
   }
+  // Calibrate first; every rule below reads the calibrated confidences.
+  const seats = rawSeats.map(calibrateSeat);
 
   const bySeat = Object.fromEntries(seats.map((s) => [s.role, s]));
   const strategist = bySeat["Strategist"] || null;
@@ -180,5 +209,9 @@ function summarizeSeats(seats) {
     provider: s.provider,
     fallback_used: !!s.fallback_used,
     abstained: !!s.abstained,
+    // Grounding transparency: did the seat cite anything, and was its
+    // confidence clamped for ungrounded agreement (anti-sycophancy)?
+    grounded: !!s.grounded,
+    calibrated: s.calibrated || null,
   }));
 }

@@ -5416,24 +5416,35 @@ export default function App() {
           <div style={{ fontSize:11,fontWeight:600,color:"#6a6a7a",textTransform:"uppercase",letterSpacing:"0.06em",margin:"18px 0 8px" }}>🎯 Target schools</div>
           <div style={{ fontSize:10,color:"#555",marginBottom:8,lineHeight:1.5 }}>Used to tailor Rank EC ideas, Edit your story &amp; Course plan.</div>
           <div style={{ display:"flex",flexWrap:"wrap",gap:6,marginBottom:8 }}>
-            {targetSchools.length === 0 && <span style={{ fontSize:11,color:"#555" }}>None set yet.</span>}
+            {targetSchools.length === 0 && (
+              <span style={{ fontSize:11,color:"#6a6a7a",lineHeight:1.5 }}>
+                No targets yet — add the schools you're aiming for, then tap any one to see its fit.
+              </span>
+            )}
             {targetSchools.map((s)=>(
               <span key={s} style={{ display:"inline-flex",alignItems:"center",gap:6,padding:"3px 8px",borderRadius:12,background:"rgba(167,139,250,0.10)",border:"1px solid rgba(167,139,250,0.25)",fontSize:11,color:"#c4b5fd" }}>
                 <button
                   onClick={()=>{ setCollegeValuesQuery(s); lookupCollege(s); }}
                   title="See College Fit for this school"
+                  aria-label={`See College Fit for ${s}`}
                   style={{ background:"none",border:"none",color:"#c4b5fd",cursor:"pointer",fontSize:11,padding:0,textDecoration:"underline",textDecorationStyle:"dotted" }}
                 >{s}</button>
-                <button onClick={()=>removeTargetSchool(s)} title="Remove" style={{ background:"none",border:"none",color:"#c4b5fd",cursor:"pointer",fontSize:12,padding:0,lineHeight:1 }}>✕</button>
+                <button onClick={()=>removeTargetSchool(s)} title="Remove" aria-label={`Remove ${s}`} style={{ background:"none",border:"none",color:"#c4b5fd",cursor:"pointer",fontSize:12,padding:0,lineHeight:1 }}>✕</button>
               </span>
             ))}
           </div>
+          {targetSchools.length > 0 && (
+            <div style={{ fontSize:10,color:"#6a6a7a",marginBottom:8,lineHeight:1.5 }}>
+              {targetSchools.length} target{targetSchools.length>1?"s":""} · tap a school to check its fit — aim for a mix of reach, target &amp; safety schools.
+            </div>
+          )}
           <div style={{ display:"flex",gap:6,marginBottom:14 }}>
             <input
               value={targetSchoolInput}
               onChange={(e)=>setTargetSchoolInput(e.target.value)}
               onKeyDown={(e)=>{ if(e.key==="Enter"){ e.preventDefault(); addTargetSchool(targetSchoolInput); } }}
               placeholder="Add a university…"
+              aria-label="Add a target university"
               style={{ flex:1,padding:"6px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)",color:"#e8e6e3",fontSize:12,outline:"none" }}
             />
             <button onClick={()=>addTargetSchool(targetSchoolInput)} disabled={!targetSchoolInput.trim()} style={{ padding:"6px 12px",borderRadius:8,border:"1px solid rgba(167,139,250,0.25)",background:"rgba(167,139,250,0.08)",color:"#c4b5fd",fontSize:12,cursor:targetSchoolInput.trim()?"pointer":"default" }}>Add</button>

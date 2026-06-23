@@ -101,6 +101,16 @@ const PATTERNS = {
   },
 };
 
+// Standalone crisis predicate over the SAME patterns classifyTopic uses, so
+// there is one source of truth for the crisis lexicon. Exported for callers
+// that only need the yes/no (e.g. the chat-history title guard) without a full
+// topic classification.
+export function isCrisisText(text) {
+  const s = (text || "").trim();
+  if (!s) return false;
+  return PATTERNS.crisis.some((pattern) => pattern.test(s));
+}
+
 // ─── Main classification function ───
 export function classifyTopic(query, conversationContext = {}) {
   const text = (query || "").trim().toLowerCase();

@@ -7,11 +7,16 @@
 // Soft-delete via archived_at — restorable via a future "trash" view.
 
 import crypto from "node:crypto";
+import { isCrisisText } from "./policy-router.js";
 
 const MAX_THREADS_PER_LIST = 50;
 const MAX_MESSAGES_PER_THREAD = 500;
 const MAX_MESSAGE_CHARS = 50_000;
 const DEFAULT_TITLE = "New conversation";
+// Neutral, supportive title used instead of echoing a minor's crisis words into
+// the thread list (a glanceable, plaintext surface). Strengthens the crisis
+// guardrail without changing the deterministic crisis response itself.
+const CRISIS_SAFE_TITLE = "Support resources";
 
 export function createThread(stmts, studentId, title) {
   const id = "thr_" + crypto.randomBytes(8).toString("hex");
@@ -43,9 +48,14 @@ export function appendMessage(stmts, studentId, threadId, role, content, attachm
   stmts.insertMessage.run(threadId, role, safe, attachmentName);
   stmts.touchThread.run(1, threadId);
 
-  // Auto-title from first user turn if title is still the placeholder
+  // Auto-title from first user turn if title is still the placeholder. If the
+  // first message trips the crisis detector, use a neutral supportive title
+  // rather than pinning the student's crisis words in the sidebar list. This is
+  // server-side and unbypassable — it covers crisis caught client-side too.
   if (role === "user" && thread.message_count === 0 && (thread.title === DEFAULT_TITLE || !thread.title)) {
-    const derived = safe.split(/\r?\n/)[0].trim().slice(0, 60) || DEFAULT_TITLE;
+    const derived = isCrisisText(safe)
+      ? CRISIS_SAFE_TITLE
+      : (safe.split(/\r?\n/)[0].trim().slice(0, 60) || DEFAULT_TITLE);
     stmts.updateThreadTitle.run(derived, threadId, studentId);
   }
   return { ok: true };
