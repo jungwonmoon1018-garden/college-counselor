@@ -4,7 +4,6 @@ import DriftBanner from "./components/DriftBanner.jsx";
 import CandidateRanker from "./components/CandidateRanker.jsx";
 import DeadlineTracker from "./components/DeadlineTracker.jsx";
 import PrestigeCard from "./components/PrestigeCard.jsx";
-import FactorVector5 from "./components/FactorVector5.jsx";
 import SpikeFinder from "./components/SpikeFinder.jsx";
 import CalibratedFitCard from "./components/CalibratedFitCard.jsx";
 import CourseSequencer from "./components/CourseSequencer.jsx";
