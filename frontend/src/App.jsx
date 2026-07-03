@@ -11,6 +11,7 @@ import CourseSequencer from "./components/CourseSequencer.jsx";
 import DisclosurePanel from "./components/DisclosurePanel.jsx";
 import MethodologyPanel from "./MethodologyPanel.jsx";
 import SetupPanel from "./SetupPanel.jsx";
+import { useDraftPersistence, loadDraft, clearDraft } from "./useDraftPersistence.js";
 import { detectLocale, t as tt } from "./i18n.js";
 
 // ═══════════════════════════════════════════════════════════
@@ -2642,6 +2643,55 @@ export default function App() {
   // Chat state
   const [user, setUser] = useState(null); // { name, email, grade }
   const [passphrase, setPassphrase] = useState("");
+
+  // ── Data-saver: auto-persist the in-progress survey so a refresh/crash
+  //    doesn't lose it. Client-side only, scoped to the logged-in account's own
+  //    data (keyed like the vault via safeBtoa) — no browser cache/history is
+  //    ever read. Restored on entering the survey; cleared once it syncs.
+  //    Declared after `user`/`passphrase` since it reads user?.email.
+  const draftKey = user?.email ? `cc_draft_${safeBtoa(user.email).replace(/[^a-zA-Z0-9]/g, "")}` : null;
+  const surveyDraft = {
+    v: 1, surveyStep,
+    sGpaUw, sGpaW, sNoGpaYet,
+    sCourseYear, sCourses,
+    sTests, sNoTestsYet, sAPScores,
+    sECs, sGoals, sMajorInterest,
+    sParentEmail, sParentNotify,
+  };
+  useDraftPersistence(storageApi, draftKey, surveyDraft, { enabled: screen === S.SURVEY && !!draftKey });
+
+  const surveyHydratedRef = useRef(false);
+  useEffect(() => {
+    if (screen !== S.SURVEY || !draftKey || surveyHydratedRef.current) return undefined;
+    // Only restore into a genuinely fresh/interrupted survey — never clobber
+    // data a returning student has already loaded/edited this session.
+    const isEmpty = !sGpaUw && !sGpaW && !sNoGpaYet && sTests.length === 0 &&
+      sAPScores.length === 0 && sECs.length === 0 && sGoals.length === 0 &&
+      !sMajorInterest && !sParentEmail && surveyStep === 0 &&
+      Object.values(sCourses).every((arr) => !arr || arr.length === 0);
+    if (!isEmpty) { surveyHydratedRef.current = true; return undefined; }
+    let cancelled = false;
+    (async () => {
+      const d = await loadDraft(storageApi, draftKey);
+      if (cancelled || !d || d.v !== 1) { surveyHydratedRef.current = true; return; }
+      if (typeof d.sGpaUw === "string") setSGpaUw(d.sGpaUw);
+      if (typeof d.sGpaW === "string") setSGpaW(d.sGpaW);
+      if (typeof d.sNoGpaYet === "boolean") setSNoGpaYet(d.sNoGpaYet);
+      if (typeof d.sCourseYear === "string") setSCourseYear(d.sCourseYear);
+      if (d.sCourses && typeof d.sCourses === "object") setSCourses(d.sCourses);
+      if (Array.isArray(d.sTests)) setSTests(d.sTests);
+      if (typeof d.sNoTestsYet === "boolean") setSNoTestsYet(d.sNoTestsYet);
+      if (Array.isArray(d.sAPScores)) setSAPScores(d.sAPScores);
+      if (Array.isArray(d.sECs)) setSECs(d.sECs);
+      if (Array.isArray(d.sGoals)) setSGoals(d.sGoals);
+      if (typeof d.sMajorInterest === "string") setsMajorInterest(d.sMajorInterest);
+      if (typeof d.sParentEmail === "string") setSParentEmail(d.sParentEmail);
+      if (typeof d.sParentNotify === "boolean") setSParentNotify(d.sParentNotify);
+      if (typeof d.surveyStep === "number") setSurveyStep(d.surveyStep);
+      surveyHydratedRef.current = true;
+    })();
+    return () => { cancelled = true; };
+  }, [screen, draftKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [data, setData] = useState({ profile:null, activities:[], studyNotes:[], documents:[] });
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -3535,6 +3585,11 @@ export default function App() {
   // Observable session health: re-auth + background-sync status for non-blocking toasts.
   const [reauthStatus, setReauthStatus] = useState("idle"); // idle | attempting | ok | failed
   const [syncStatus, setSyncStatus] = useState("idle");     // idle | ok | failed
+  // Offline-first: true when the vault unlocked locally but the backend was
+  // unreachable at sign-in. The student keeps full access to their on-device
+  // data; server features (chat, sync) resume when the backend returns. Cleared
+  // on the next successful server contact.
+  const [offlineMode, setOfflineMode] = useState(false);
 
   // Register the module-level re-auth notifier so the silent token-recovery
   // path becomes visible to the student instead of a confusing dead end.
@@ -3600,6 +3655,7 @@ export default function App() {
             })
           });
           setSyncStatus("ok");
+          setOfflineMode(false); // a sync landed — backend is reachable again
           setTimeout(() => setSyncStatus((s) => (s === "ok" ? "idle" : s)), 2000);
         } catch (err) { console.warn("RAG sync failed (non-blocking):", err?.message); setSyncStatus("failed"); }
       }
@@ -3672,6 +3728,7 @@ export default function App() {
           lastUpdated: body.profile?.lastUpdated || null,
           pulledAt: Date.now(),
         });
+        setOfflineMode(false); // reached the backend — we're back online
       } catch (err) {
         // Non-fatal — server may be offline, session may have expired
         console.warn("[sync-pull] Profile poll failed:", err?.message);
@@ -3837,10 +3894,14 @@ export default function App() {
     //    (e.g. a fresh or restored backend).
     const proxyUrl = window.__CC_PROXY_URL__;
     const sess = await establishServerSession({ proxyUrl, email, grade: acct.grade, mode: "login" });
-    if (proxyUrl && !sess.ok && !sess.offline) {
-      setLError("Couldn't reach the server to sign you in. Make sure the backend is running, then try again.");
-      return;
-    }
+    // Offline-first: the vault already decrypted locally above, so a down/
+    // unreachable backend must NOT lock the student out of their own on-device
+    // data (that made it look like the account was wiped). Enter in a degraded
+    // "offline" mode instead of blocking — server features (chat, sync, the
+    // API-key check) resume when the backend returns; authedFetch re-auths
+    // lazily on the next call.
+    const serverUnreachable = !!proxyUrl && !sess.ok && !sess.offline;
+    setOfflineMode(serverUnreachable);
 
     const u = { name: acct.name, email, grade: acct.grade };
     setUser(u);
@@ -3899,6 +3960,21 @@ export default function App() {
           }
         }
       } catch (err) { console.warn("[login-recover] failed:", err?.message); }
+    }
+
+    // Offline: skip the server-gated API-key check (it can't run without the
+    // backend and would otherwise strand the student on the API-key screen).
+    // Land them directly on their local data — CHAT if onboarding is done,
+    // else the (local) survey.
+    if (serverUnreachable) {
+      if (acct.surveyCompleted) {
+        setMessages([{ role:"assistant", content:`Hey ${acct.name}! You're offline right now — your data is here and safe. Chat resumes once your connection's back.` }]);
+        setScreen(S.CHAT);
+      } else {
+        setSurveyStep(0);
+        setScreen(S.SURVEY);
+      }
+      return;
     }
 
     // If the backend already has a populated profile, the survey is
@@ -4019,6 +4095,9 @@ export default function App() {
       saveAccounts(updated);
       // Cache a flag so the chat system knows to collect the student's story
       try { localStorage.setItem("cc_narrative_pending_" + user.email, "1"); } catch { /* ignore */ }
+      // Survey is committed — drop the interrupted-draft autosave so it can't
+      // rehydrate stale entries next time.
+      clearDraft(storageApi, `cc_draft_${safeBtoa(user.email).replace(/[^a-zA-Z0-9]/g, "")}`);
     }
 
     setScreen(S.CHAT);
@@ -5072,17 +5151,18 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   return (
     <div style={{ display:"flex",height:"100vh",fontFamily:FONT,background:BG,color:"#e8e6e3" }}>
-      {/* Non-blocking session-health toast (re-auth / background-sync status) */}
-      {(reauthStatus === "attempting" || reauthStatus === "failed" || syncStatus === "failed") && (
+      {/* Non-blocking session-health toast (offline / re-auth / background-sync status) */}
+      {(offlineMode || reauthStatus === "attempting" || reauthStatus === "failed" || syncStatus === "failed") && (
         <div style={{
           position:"fixed", top:12, left:"50%", transform:"translateX(-50%)", zIndex:9999,
           padding:"8px 14px", borderRadius:10, fontSize:12, fontWeight:600, boxShadow:"0 4px 16px rgba(0,0,0,0.3)",
-          background: reauthStatus==="failed" ? "rgba(245,101,101,0.15)" : syncStatus==="failed" ? "rgba(246,173,85,0.15)" : "rgba(99,179,237,0.15)",
-          border:`1px solid ${reauthStatus==="failed" ? "rgba(245,101,101,0.4)" : syncStatus==="failed" ? "rgba(246,173,85,0.4)" : "rgba(99,179,237,0.4)"}`,
-          color: reauthStatus==="failed" ? "#fc8181" : syncStatus==="failed" ? "#f6ad55" : "#63b3ed",
+          background: reauthStatus==="failed" ? "rgba(245,101,101,0.15)" : (offlineMode || syncStatus==="failed") ? "rgba(246,173,85,0.15)" : "rgba(99,179,237,0.15)",
+          border:`1px solid ${reauthStatus==="failed" ? "rgba(245,101,101,0.4)" : (offlineMode || syncStatus==="failed") ? "rgba(246,173,85,0.4)" : "rgba(99,179,237,0.4)"}`,
+          color: reauthStatus==="failed" ? "#fc8181" : (offlineMode || syncStatus==="failed") ? "#f6ad55" : "#63b3ed",
         }}>
           {reauthStatus === "attempting" ? "Reconnecting to your counselor…"
             : reauthStatus === "failed" ? "Session expired — sign out and sign in again."
+            : offlineMode ? "Offline — your data is safe on this device. Counseling features resume when you reconnect."
             : "Last change didn't sync — will retry."}
         </div>
       )}

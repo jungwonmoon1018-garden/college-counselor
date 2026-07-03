@@ -90,7 +90,8 @@ import { OPENROUTER_TARGETS, OPENROUTER_STATUS, OPENROUTER_CATALOG, refreshOpenR
 import { randomExemplarGroup, exemplarsPromptBlock } from "./crimson-ec-exemplars.js";
 import { buildMethodology } from "./methodology.js";
 import * as chatHistory from "./chat-history.js";
-import { buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS } from "./credible-sources.js";
+import { buildAllowedDomains, DEFAULT_ALLOWED_DOMAINS, extractHost } from "./credible-sources.js";
+import { WEB_SEARCH_ENABLED, tavilySearch, verifyTavilyKeyLive, formatWebResultsBlock, isValidTavilyKeyFormat } from "./web-search.js";
 import { extractCollegeValues, computeFit } from "./college-values.js";
 import { callLLM as adapterCallLLM, detectProvider, validateKey as adapterValidateKey, listProviders, isReasonableModelId as adapterIsReasonableModelId, resolveTierDefault, TIER_DEFAULTS, PROVIDERS } from "./llm-adapters/index.js";
 import { screenInput, screenOutput, restorePII, redactProviderText } from "./content-moderation.js";
@@ -763,6 +764,50 @@ function resolvePrestigeAdapter(_studentId) {
 }
 
 // ───────────────────────────────────────────────────────────
+// Dedicated web-search augmentation (operator-configured Tavily key). When the
+// deployment has TAVILY_API_KEY set AND the caller wants web access, run a
+// credible, domain-restricted search and prepend the results to the system
+// prompt so the model has fresh, citable context BEFORE it answers. Strictly
+// additive and best-effort: on any miss it returns `system` unchanged, and the
+// per-provider OpenRouter web plugin remains the existing fallback. The results
+// block is inserted after PII redaction on purpose — it's public web content,
+// not student PII, and the URLs must stay intact for citation. `extraDomains`
+// (schools named this turn) are front-loaded so they survive the domain cap.
+async function augmentSystemWithWebSearch(system, { wantsWeb, query, extraDomains } = {}) {
+  if (!wantsWeb || !WEB_SEARCH_ENABLED()) return system;
+  const q = (query || "").trim();
+  if (!q) return system;
+  try {
+    const results = await tavilySearch({
+      query: q,
+      allowedDomains: buildAllowedDomains(extraDomains),
+      priorityDomains: (extraDomains || []).map(extractHost).filter(Boolean),
+    });
+    const block = formatWebResultsBlock(results);
+    if (!block) return system;
+    return `${block}\n\n${system || ""}`.trim();
+  } catch (e) {
+    console.warn("[web-search] augmentation failed (non-fatal):", e.message);
+    return system;
+  }
+}
+
+// Best-effort extraction of the last user message's text, used as the search
+// query. Handles both string content and the array-of-blocks content shape.
+function lastUserText(messages) {
+  const msgs = Array.isArray(messages) ? messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m || m.role !== "user") continue;
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) {
+      return m.content.map((b) => (typeof b?.text === "string" ? b.text : "")).join(" ").trim();
+    }
+  }
+  return "";
+}
+
+// ───────────────────────────────────────────────────────────
 // Shared per-student LLM closure (BYOK). Mirrors the inlined
 // closure in /api/colleges/values so the generation endpoints
 // (EC ideas, narrative draft) bill the student's own key and
@@ -780,13 +825,20 @@ function buildStudentCallLLM(studentId) {
     const useORWebPlugin = provIsOR && !!args.wantsWeb;
     const orAllowedDomains = buildAllowedDomains(args.extraDomains);
     const model = args.model || byok.models.medium || byok.models.large;
+    // Dedicated web-search augmentation (operator Tavily key) — provider-agnostic,
+    // so even non-OpenRouter BYOK students get credible web context when enabled.
+    const system = await augmentSystemWithWebSearch(args.system, {
+      wantsWeb: !!args.wantsWeb,
+      query: lastUserText(args.messages),
+      extraDomains: args.extraDomains,
+    });
     const result = await adapterCallLLM({
       provider: byok.provider,
       apiKey: byok.apiKey,
       baseUrl: byok.baseUrl,
       model,
       maxTokens: args.max_tokens,
-      system: args.system,
+      system,
       messages: args.messages,
       webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
     });
@@ -811,13 +863,18 @@ function buildOperatorCallLLM() {
     const useORWebPlugin = provIsOR && !!args.wantsWeb;
     const model = args.model
       || (provIsOR ? OPENROUTER_TARGETS.medium : resolveTierDefault(OPERATOR_LLM.provider, "medium"));
+    const system = await augmentSystemWithWebSearch(args.system, {
+      wantsWeb: !!args.wantsWeb,
+      query: lastUserText(args.messages),
+      extraDomains: args.extraDomains,
+    });
     return adapterCallLLM({
       provider: OPERATOR_LLM.provider,
       apiKey: OPERATOR_LLM.apiKey,
       baseUrl: OPERATOR_LLM.baseUrl,
       model,
       maxTokens: args.max_tokens,
-      system: args.system,
+      system,
       messages: args.messages,
       temperature: typeof args.temperature === "number" ? args.temperature : undefined,
       webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: buildAllowedDomains(args.extraDomains) } : null,
@@ -1617,6 +1674,14 @@ app.post("/api/llm", apiLimiter, requireStudentAuth, async (req, res) => {
     const sendPayload = redacted.payload;
 
     // ── Call adapter ──
+    // Dedicated web-search augmentation (operator Tavily key) — prepend credible
+    // results to the system prompt when web is wanted and a key is configured.
+    const baseSystem = regGate.systemPrefix ? `${regGate.systemPrefix}\n\n${sendPayload.system || ""}` : sendPayload.system;
+    const augmentedSystem = await augmentSystemWithWebSearch(baseSystem, {
+      wantsWeb,
+      query: userText,
+      extraDomains: payload.extraDomains,
+    });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
     let resp;
@@ -1627,7 +1692,7 @@ app.post("/api/llm", apiLimiter, requireStudentAuth, async (req, res) => {
         baseUrl,
         model,
         messages: sendPayload.messages,
-        system: regGate.systemPrefix ? `${regGate.systemPrefix}\n\n${sendPayload.system || ""}` : sendPayload.system,
+        system: augmentedSystem,
         maxTokens,
         temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
         webPlugin: useORWebPlugin ? { enabled: true, allowedDomains: orAllowedDomains } : null,
@@ -2276,8 +2341,17 @@ app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
     // them after output screening. Already-tokenized payload.system text is
     // idempotent here (tokens don't re-match the PII patterns).
     const sysRedaction = redactProviderText(effectiveSystemRaw);
-    const effectiveSystem = sysRedaction.text;
+    let effectiveSystem = sysRedaction.text;
     Object.assign(redacted.tokenMap, sysRedaction.tokenMap);
+
+    // Dedicated web-search augmentation (operator Tavily key). Prepend AFTER
+    // redaction: web results are public content, not student PII, and the URLs
+    // must survive for citation. No-op unless a key is set and web is wanted.
+    effectiveSystem = await augmentSystemWithWebSearch(effectiveSystem, {
+      wantsWeb,
+      query: userText,
+      extraDomains: payload.extraDomains,
+    });
 
     let data;
 
@@ -6814,6 +6888,8 @@ app.get("/api/setup/status", (req, res) => {
     scorecardConfigured: !!SCORECARD_API_KEY,
     operatorLlmConfigured: !!OPERATOR_LLM,              // any operator LLM key on file
     operatorIsOpenRouter: OPERATOR_LLM?.provider === "openrouter", // seasonal web research needs this
+    webSearchConfigured: WEB_SEARCH_ENABLED(),          // dedicated Tavily web-search key on file
+    webSearchProvider: WEB_SEARCH_ENABLED() ? "tavily" : null,
     nodeEnv: NODE_ENV,
     needsRestartToApply: true,
   });
@@ -6842,7 +6918,7 @@ app.post("/api/setup/initialize", async (req, res) => {
     if (!isLoopbackRequest(req)) return res.status(403).json({ error: "Setup is only available on the server host (localhost)." });
     if (!setupTokenValid(req)) return res.status(401).json({ error: "Invalid or missing setup token. Use the one-time token printed in the server console at boot." });
 
-    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey, operatorOpenRouterKey } = req.body || {};
+    const { generateEncryptionKey, scorecardApiKey, verifyScorecardKey, operatorOpenRouterKey, tavilyApiKey, verifyWebSearchKey } = req.body || {};
     const { envPath, examplePath, devKeyPath } = defaultPaths(__dirname);
     const lines = readEnvLines(envPath, examplePath);
     const wrote = [];
@@ -6906,8 +6982,29 @@ app.post("/api/setup/initialize", async (req, res) => {
       operatorKeyToApply = k;
     }
 
+    // ── Dedicated WEB-SEARCH key (Tavily) — powers credible, domain-restricted
+    //    web augmentation for the counselor. Live-verified, then applied
+    //    in-memory so it works WITHOUT a restart. The key never leaves the
+    //    server (only a boolean is ever surfaced to the browser). ──
+    let webSearchKeyToApply = null;
+    let webSearchVerified = false;
+    if (typeof tavilyApiKey === "string" && tavilyApiKey.trim()) {
+      const k = tavilyApiKey.trim();
+      if (!isValidTavilyKeyFormat(k)) {
+        return res.status(400).json({ error: "That doesn't look like a Tavily key (expected a tvly-… value)." });
+      }
+      if (verifyWebSearchKey !== false) {
+        const check = await verifyTavilyKeyLive(k);
+        if (!check.ok) return res.status(400).json({ error: check.message, webSearchVerify: check });
+        webSearchVerified = true;
+      }
+      setValue(lines, "TAVILY_API_KEY", k);
+      wrote.push("TAVILY_API_KEY");
+      webSearchKeyToApply = k;
+    }
+
     if (wrote.length === 0) {
-      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true, a scorecardApiKey, and/or an operatorOpenRouterKey." });
+      return res.status(400).json({ error: "Nothing to do. Pass generateEncryptionKey:true, a scorecardApiKey, an operatorOpenRouterKey, and/or a tavilyApiKey." });
     }
 
     const backup = writeEnvAtomic(envPath, lines);
@@ -6918,19 +7015,30 @@ app.post("/api/setup/initialize", async (req, res) => {
       OPERATOR_LLM = resolveOperatorLLM();
       operatorLlmRefreshed = true;
     }
+    // Apply the Tavily key to THIS process so web augmentation turns on
+    // immediately — WEB_SEARCH_ENABLED() reads process.env live.
+    if (webSearchKeyToApply) {
+      process.env.TAVILY_API_KEY = webSearchKeyToApply;
+    }
     stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "setup_initialize", "operator", `wrote ${wrote.join(",")}`, hashIP(req.ip));
     console.log(`[SETUP] Wrote ${wrote.join(", ")} to .env via setup endpoint (restart required).`);
 
+    // OPENROUTER_API_KEY and TAVILY_API_KEY are applied to the live process
+    // above, so writing only those needs no restart.
+    const liveApplied = new Set(["OPENROUTER_API_KEY", "TAVILY_API_KEY"]);
+    const restartRequired = wrote.some((w) => !liveApplied.has(w));
     res.json({
       ok: true,
       wrote,
       promotedDevKey,
       scorecardVerified,
       operatorLlmRefreshed, // operator OpenRouter key applied live (no restart needed for manual runs)
+      webSearchVerified,    // Tavily key verified live against the API
+      webSearchApplied: !!webSearchKeyToApply, // active in this process now
       backup: backup ? path.basename(backup) : null,
-      restartRequired: !operatorLlmRefreshed || wrote.some((w) => w !== "OPENROUTER_API_KEY"),
-      message: operatorLlmRefreshed
-        ? "Saved. The operator key is active now — seasonal research can run immediately; restart only to start the scheduled cadence."
+      restartRequired,
+      message: !restartRequired
+        ? "Saved and active now — no restart needed."
         : "Saved to .env. Restart the backend for the changes to take effect.",
     });
   } catch (err) {
