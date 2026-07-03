@@ -40,6 +40,7 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
   const [email, setEmail] = useState("");
   const [scorecard, setScorecard] = useState("");
   const [operatorKey, setOperatorKey] = useState("");
+  const [tavily, setTavily] = useState("");
   const [busy, setBusy] = useState("");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -73,6 +74,7 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
   const needsToken = !token.trim();
   const encConfigured = status?.encryptionKeyConfigured;
   const scoreConfigured = status?.scorecardConfigured;
+  const webSearchConfigured = status?.webSearchConfigured;
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, padding: "32px 16px" }}>
@@ -100,6 +102,9 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
               </Row>
               <Row color={scoreConfigured ? C.green : C.orange}>
                 {scoreConfigured ? "✓ College Scorecard (IPEDS) key configured" : "• Scorecard (IPEDS) key not set — backend runs offline"}
+              </Row>
+              <Row color={webSearchConfigured ? C.green : C.orange}>
+                {webSearchConfigured ? "✓ Web search key configured (Tavily)" : "• Web search key not set — counselor answers from injected context only"}
               </Row>
               <Row color={C.muted}>Environment: {status.nodeEnv}</Row>
             </>
@@ -181,6 +186,32 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
           </p>
         </div>
 
+        {/* Web search provider key — dedicated, credible-source web search */}
+        <div style={box}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>4 · Web search provider key (Tavily, optional)</div>
+          <p style={{ color: C.sub, fontSize: 13, marginBottom: 12 }}>
+            A deployment-wide web-search key (separate from any student's LLM key). When set, the
+            counselor augments answers with credible, domain-restricted results (<code>.edu</code> /{" "}
+            <code>.gov</code> / Common App). Get a key at tavily.com. It stays on the server.
+          </p>
+          {webSearchConfigured ? (
+            <Row color={C.green}>Already configured — nothing to do.</Row>
+          ) : (
+            <>
+              <label style={label}>Paste your Tavily API key</label>
+              <input style={{ ...input, marginBottom: 10 }} value={tavily} onChange={(e) => setTavily(e.target.value)}
+                     placeholder="tvly-…" autoComplete="off" spellCheck={false} type="password" />
+              <button style={btn(C.blue)} disabled={needsToken || !tavily.trim() || busy === "web"}
+                      onClick={() => initialize({ tavilyApiKey: tavily.trim() }, "web")}>
+                {busy === "web" ? "Verifying…" : "Verify & save to .env"}
+              </button>
+              <p style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>
+                Verified live against Tavily before saving. Applied immediately — no restart needed.
+              </p>
+            </>
+          )}
+        </div>
+
         {error && <div style={{ ...box, borderColor: C.red, color: C.red }}>⚠ {error}</div>}
         {result?.ok && (
           <div style={{ ...box, borderColor: C.green }}>
@@ -188,8 +219,9 @@ export default function SetupPanel({ embedded = false, onComplete } = {}) {
             <Row color={C.sub}>Wrote: {result.wrote.join(", ")}{result.backup ? ` · backup: ${result.backup}` : ""}</Row>
             {result.scorecardVerified && <Row color={C.green}>Scorecard key verified live against api.data.gov ✓</Row>}
             {result.operatorLlmRefreshed && <Row color={C.green}>Operator OpenRouter key verified + active now — seasonal research can run immediately ✓</Row>}
+            {result.webSearchApplied && <Row color={C.green}>Web search key{result.webSearchVerified ? " verified +" : ""} active now — credible web results augment answers ✓</Row>}
             {result.promotedDevKey && <Row color={C.sub}>Promoted the existing dev key, so current local data stays readable.</Row>}
-            <Row color={C.orange}>Restart the backend (<code>npm start</code>) to apply.</Row>
+            {result.restartRequired && <Row color={C.orange}>Restart the backend (<code>npm start</code>) to apply.</Row>}
           </div>
         )}
 
