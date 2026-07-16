@@ -190,6 +190,29 @@ async function clearSession() {
   } catch {}
 }
 
+// ─── Vault blob shape ────────────────────────────────────────────────────
+// The passphrase-encrypted per-student vault carries both the student's data
+// and their identity (name/grade). Identity lives here — inside the encrypted
+// blob — rather than in a plaintext registry, so login can recover it without
+// the backend disclosing who has an account. `_verifier` marks a vault seeded
+// at signup that holds no data yet. Every write must go through
+// buildVaultBlob() so identity survives auto-save.
+function buildVaultBlob(data, identity, { verifier = false } = {}) {
+  const blob = { ...data, _identity: identity };
+  if (verifier) blob._verifier = true;
+  return blob;
+}
+
+function readVaultIdentity(blob) {
+  const identity = blob?._identity;
+  return identity?.name && identity?.grade ? identity : null;
+}
+
+function readVaultData(blob) {
+  const { _identity, _verifier, ...data } = blob || {};
+  return data;
+}
+
 // ─── Authoritative server-session establishment ──────────────────────────
 // The single source of truth for "do we have a backend session?". Both the
 // create and login flows MUST gate on this before entering authenticated
@@ -199,8 +222,14 @@ async function clearSession() {
 //
 // Sets window.__CC_SESSION_TOKEN__ on success. Returns one of:
 //   { ok: true, token, studentId }
-//   { existing: true }           — (create mode) account already exists server-side
-//   { ok: false, reason }        — backend unreachable or credentials rejected
+//   { existing: true }              — (create mode) account already exists server-side
+//   { ok: false, offline: true }    — backend unreachable (transport failed)
+//   { ok: false, reason }           — backend answered and rejected the credentials
+//
+// `offline` separates "the server said no" from "there was no server". Login
+// treats the former as a hard rejection and the latter as degraded-but-allowed
+// (the vault already decrypted on-device); create requires a reachable server
+// either way, since the backend owns the credential.
 async function establishServerSession({ email, password, name, grade, mode }) {
   const post = async (path, body) => {
     const r = await fetch(`/api${path}`, {
@@ -232,7 +261,36 @@ async function establishServerSession({ email, password, name, grade, mode }) {
     if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
     return { ok: false, reason: res.d.error || `server returned ${res.status}` };
   } catch (err) {
-    return { ok: false, reason: err?.message || "network error" };
+    // Transport-level failure only — fetch rejects when it cannot reach the
+    // backend. A reachable server that rejects credentials returns above.
+    return { ok: false, offline: true, reason: err?.message || "network error" };
+  }
+}
+
+const GRADE_LABELS = { 9: "Freshman", 10: "Sophomore", 11: "Junior", 12: "Senior" };
+
+// ─── Identity recovery from the backend ──────────────────────────────────
+// The vault is the normal home for name/grade, but a passphrase reset writes a
+// fresh vault that cannot inherit them (the old blob is undecryptable by
+// design). Rebuild identity from the authenticated session instead, so the
+// student isn't stranded: grade comes back with the budget status and the name
+// from the student's own data export. Best-effort — a null result just means
+// the caller must ask the student again.
+async function fetchServerIdentity(token) {
+  const get = async (path) => {
+    const r = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+    return r.ok ? r.json() : null;
+  };
+  try {
+    const [budget, exported] = await Promise.all([
+      get("/api/students/budget").catch(() => null),
+      get("/api/students/export").catch(() => null),
+    ]);
+    const grade = GRADE_LABELS[Number(budget?.grade)];
+    const name = exported?.profile?.name;
+    return name && grade ? { name, grade } : null;
+  } catch {
+    return null;
   }
 }
 
@@ -2369,7 +2427,6 @@ const S = { LOADING:0, CREATE:1, LOGIN:2, SURVEY:3, CHAT:4 };
 
 export default function App() {
   const [screen, setScreen] = useState(S.LOADING);
-  const [accounts, setAccounts] = useState({});
 
   // Create account fields
   // Name is collected as first + last (browser autofill via autoComplete
@@ -3230,34 +3287,26 @@ export default function App() {
     return () => setReauthCredentialProvider(null);
   }, [user?.email, passphrase]);
 
-  // ─── AUTO-LOGIN: check for saved session on mount ───
+  // ─── ROUTE ON MOUNT ───
+  // There is no local account registry and no persisted session: the backend
+  // owns identity, and sessions are memory-only. So there is nothing to
+  // rehydrate — start at login and let a first-time student take the "Create
+  // account" link. Routing by "do any accounts exist" is deliberately gone:
+  // it would disclose account existence before authentication, which the
+  // backend's uniform invalid-credentials response is designed to avoid.
   useEffect(() => {
-    (async () => {
-      const accts = await loadAccounts();
-      setAccounts(accts);
-      const session = await loadSession();
-      if (session?.emailHash) {
-        // Match hashed email against known accounts
-        for (const email of Object.keys(accts)) {
-          const h = await hashEmail(email);
-          if (h === session.emailHash) {
-            setLEmail(email);
-            setScreen(S.LOGIN);
-            return;
-          }
-        }
-      }
-      setScreen(Object.keys(accts).length === 0 ? S.CREATE : S.LOGIN);
-    })();
+    clearSession();
+    setScreen(S.LOGIN);
   }, []);
 
   // ─── AUTO-SAVE data + SYNC TO RAG BACKEND ───
   useEffect(() => {
     if ((screen !== S.CHAT && screen !== S.SURVEY) || !user || !passphrase) return;
     const t = setTimeout(async () => {
-      // 1. Save to encrypted localStorage (offline-first)
-      const storageKey = storageKeyFor(user.email);
-      const e = await encrypt(data, passphrase, user.email);
+      // 1. Save to encrypted localStorage (offline-first). Identity is written
+      //    alongside the data — it is the only copy login can read back.
+      const storageKey = await storageKeyFor(user.email);
+      const e = await encrypt(buildVaultBlob(data, { name: user.name, grade: user.grade }), passphrase, user.email);
       try { await storageApi.set(storageKey, e); } catch (err) { console.warn("Auto-save failed:", err?.message); }
 
       // 2. Sync to RAG backend — persists grades/GPA/ECs server-side so
@@ -3400,15 +3449,14 @@ export default function App() {
     if (!cConsentAI) { setCError("You must acknowledge that this is an AI system before continuing"); return; }
     if (!cConsentData) { setCError("You must consent to data processing before continuing"); return; }
     const email = cEmail.toLowerCase().trim();
-    if (accounts[email]) { setCError("An account with this email already exists. Go to login."); return; }
 
-    // ── Establish the server account FIRST (authoritative when a backend is
-    //    configured). We must NOT create local state or advance into the
-    //    API-key / survey steps unless the backend confirmed the account.
-    //    A silent backend failure here is exactly what used to strand users
-    //    on the API-key screen with no session ("Not authenticated").
-    const proxyUrl = window.__CC_PROXY_URL__;
-    const sess = await establishServerSession({ proxyUrl, email, password: cPass, name: cName.trim(), grade: cGrade, mode: "create" });
+    // ── Establish the server account FIRST — it is authoritative. We must NOT
+    //    create local state or advance into the survey unless the backend
+    //    confirmed the account. A silent backend failure here is exactly what
+    //    used to strand users with no session ("Not authenticated"). Duplicate
+    //    emails are detected by the backend (409 → sess.existing), not by a
+    //    local registry.
+    const sess = await establishServerSession({ email, password: cPass, name: cName.trim(), grade: cGrade, mode: "create" });
     // Existing email must not silently drop the user into someone else's
     // data (their profile and chat threads). Route to LOGIN instead.
     if (sess.existing) {
@@ -3417,42 +3465,41 @@ export default function App() {
       setScreen(S.LOGIN);
       return;
     }
-    // Backend configured but registration didn't complete — stop here with an
-    // actionable error rather than entering an unauthenticated state.
-    if (proxyUrl && !sess.ok && !sess.offline) {
-      setCError("Couldn't reach the server to finish creating your account. Make sure the backend is running, then try again.");
+    // Registration didn't complete — stop here with an actionable error rather
+    // than entering an unauthenticated state. Unlike login, create cannot fall
+    // back to offline: the backend is what stores the credential.
+    if (!sess.ok) {
+      setCError(sess.offline
+        ? "Couldn't reach the server to finish creating your account. Make sure the backend is running, then try again."
+        : (sess.reason || "Couldn't create your account. Please try again."));
       return;
     }
 
-    // Server confirmed (or genuinely offline/local-only) → create local state.
-    // Store a passphrase verification token so login can verify even before first data save.
-    const storageKey = storageKeyFor(email);
-    const verifier = await encrypt({ _verifier: true }, cPass, email);
+    // Server confirmed → seed the on-device vault. Identity lives inside the
+    // passphrase-encrypted blob (never a plaintext registry), so login can both
+    // verify the passphrase and recover the student's name/grade offline.
+    const identity = { name: cName.trim(), grade: cGrade };
+    const storageKey = await storageKeyFor(email);
+    const verifier = await encrypt(buildVaultBlob({}, identity, { verifier: true }), cPass, email);
     await storageApi.set(storageKey, verifier);
 
-    const newAccounts = { ...accounts, [email]: { name: cName.trim(), grade: cGrade, createdAt: new Date().toISOString(), surveyCompleted: false } };
-    setAccounts(newAccounts);
-    await saveAccounts(newAccounts);
-
-    const u = { name: cName.trim(), email, grade: cGrade };
+    const u = { name: identity.name, email, grade: identity.grade };
     setUser(u);
     setPassphrase(cPass);
-    await saveSession({ email });
     setStudentRecoveryCode(sess.recoveryCode || "");
 
     // Grant onboarding consents now that we hold a verified server session.
-    if (sess.ok && window.__CC_SESSION_TOKEN__) {
-      const base = proxyUrl.replace(/\/chat\/?$/,"");
+    if (window.__CC_SESSION_TOKEN__) {
       const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
       await Promise.allSettled([
-        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
-        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
+        fetch("/api/consent/grant", { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
+        fetch("/api/consent/grant", { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
       ]);
     }
 
     setSurveyStep(0);
     setScreen(S.SURVEY);
-  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData, accounts]);
+  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData]);
 
   // ─── LOGIN ───
   const [loginAttempts, setLoginAttempts] = useState({});
@@ -3474,51 +3521,69 @@ export default function App() {
     if (attempts.count >= 5 && now - attempts.lastFail >= 5 * 60 * 1000) {
       setLoginAttempts(prev => ({ ...prev, [email]: { count: 0, lastFail: 0 } }));
     }
-    const acct = accounts[email];
-    if (!acct) { setLError("No account found with this email. Create one first."); return; }
-
-    const storageKey = storageKeyFor(email);
+    // The on-device vault both verifies the passphrase and carries the
+    // student's identity — there is no plaintext registry to consult.
+    const storageKey = await storageKeyFor(email);
+    let identity = null;
     try {
       const saved = await storageApi.get(storageKey);
-      if (saved?.value) {
-        const d = await decrypt(saved.value, lPass, email);
-        if (!d) {
-          setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
-          setLError("Wrong passphrase. Your data is encrypted — only the correct passphrase can unlock it.");
-          return;
-        }
-        // If it's just the initial verifier token, start with fresh data
-        if (!d._verifier) { setData(d); }
-      } else {
-        // No stored data at all — cannot verify passphrase, reject
+      if (!saved?.value) {
+        // No vault on this device — cannot verify the passphrase offline.
         setLError("Account data not found. It may have been cleared. Please create a new account.");
         return;
       }
-    } catch (err) { console.warn("Login decryption error:", err?.message); }
+      const d = await decrypt(saved.value, lPass, email);
+      if (!d) {
+        setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
+        setLError("Wrong passphrase. Your data is encrypted — only the correct passphrase can unlock it.");
+        return;
+      }
+      identity = readVaultIdentity(d);
+      // A verifier-only vault has no student data to restore yet.
+      if (!d._verifier) { setData(readVaultData(d)); }
+    } catch (err) {
+      console.warn("Login decryption error:", err?.message);
+      setLError("Couldn't unlock your data. Please try again.");
+      return;
+    }
 
     // Clear failed login counter on success
     setLoginAttempts(prev => { const next = { ...prev }; delete next[email]; return next; });
 
-    // ── Establish the backend session BEFORE entering the app. When a backend
-    //    is configured this is REQUIRED — otherwise the API-key / survey-sync /
-    //    chat steps fail with "Not authenticated". Auth, falling back to
-    //    register, heals a returning user whose server account is missing
-    //    (e.g. a fresh or restored backend).
-    const proxyUrl = window.__CC_PROXY_URL__;
-    const sess = await establishServerSession({ proxyUrl, email, password: lPass, grade: acct.grade, mode: "login" });
-    // Offline-first: the vault already decrypted locally above, so a down/
-    // unreachable backend must NOT lock the student out of their own on-device
-    // data (that made it look like the account was wiped). Enter in a degraded
-    // "offline" mode instead of blocking — server features (chat, sync, the
-    // API-key check) resume when the backend returns; authedFetch re-auths
-    // lazily on the next call.
-    const serverUnreachable = !!proxyUrl && !sess.ok && !sess.offline;
-    setOfflineMode(serverUnreachable);
+    // ── Establish the backend session BEFORE entering the app — otherwise the
+    //    survey-sync / chat steps fail with "Not authenticated".
+    const sess = await establishServerSession({ email, password: lPass, mode: "login" });
+    // A reachable backend that rejects the credentials is authoritative: stop.
+    // (The local vault opening only proves the passphrase decrypts on-device.)
+    if (!sess.ok && !sess.offline) {
+      setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
+      setLError(sess.reason || "Invalid email or password.");
+      return;
+    }
+    // Offline-first: the vault already decrypted above, so an unreachable
+    // backend must NOT lock the student out of their own on-device data (that
+    // made it look like the account was wiped). Enter in a degraded "offline"
+    // mode instead of blocking — server features resume when the backend
+    // returns; authedFetch re-auths lazily on the next call.
+    setOfflineMode(!!sess.offline);
 
-    const u = { name: acct.name, email, grade: acct.grade };
+    // A vault written by a passphrase reset carries no identity. Rebuild it
+    // from the session we just established, then persist it so later logins
+    // read it locally again.
+    if (!identity && sess.ok) {
+      identity = await fetchServerIdentity(window.__CC_SESSION_TOKEN__);
+      if (identity) {
+        await storageApi.set(storageKey, await encrypt(buildVaultBlob({}, identity, { verifier: true }), lPass, email));
+      }
+    }
+    if (!identity) {
+      setLError("Account data is incomplete. Reconnect to the server and sign in again to restore it.");
+      return;
+    }
+
+    const u = { name: identity.name, email, grade: identity.grade };
     setUser(u);
     setPassphrase(lPass);
-    await saveSession({ email });
 
     // ─── Backend profile recovery ───
     // The backend DB is the durable source of truth for grades/GPA/ECs.
@@ -3589,7 +3654,7 @@ export default function App() {
 
     setMessages([{ role:"assistant", content:`Hey ${acct.name}! What would you like to work on?` }]);
     setScreen(S.CHAT);
-  }, [lEmail, lPass, accounts, loginAttempts]);
+  }, [lEmail, lPass, loginAttempts]);
 
   const handleStudentRecovery = useCallback(async (event) => {
     event.preventDefault();
@@ -3606,10 +3671,10 @@ export default function App() {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Recovery failed.");
-      // The old local vault cannot be decrypted without its passphrase. Start
-      // a new encrypted verifier; server-synced profile data is restored after
-      // the next successful login.
-      await storageApi.set(storageKeyFor(email), await encrypt({ _verifier:true }, studentRecoveryPassword, email));
+      // The old local vault cannot be decrypted without its passphrase. Start a
+      // new encrypted verifier; identity and server-synced profile data are
+      // restored on the next successful login (see fetchServerIdentity).
+      await storageApi.set(await storageKeyFor(email), await encrypt({ _verifier:true }, studentRecoveryPassword, email));
       setLPass(studentRecoveryPassword);
       setStudentRecoveryInput("");
       setStudentRecoveryPassword("");
@@ -3659,13 +3724,9 @@ export default function App() {
     try {
       const response = await authedFetch("/api/students", { method: "DELETE" });
       if (!response.ok) throw new Error("The server did not confirm complete deletion.");
-      await storageApi.delete(storageKeyFor(email));
+      await storageApi.delete(await storageKeyFor(email));
       await storageApi.delete(`cc_draft_${safeBtoa(email).replace(/[^a-zA-Z0-9]/g, "")}`);
       try { localStorage.removeItem(`cc_targets_${email}`); } catch {}
-      const updated = { ...accounts };
-      delete updated[email];
-      setAccounts(updated);
-      await saveAccounts(updated);
       await clearSession();
       sessionTimer.clear();
       rateLimiter.reset();
@@ -3678,7 +3739,7 @@ export default function App() {
     } catch (error) {
       window.alert(error?.message || "Deletion failed. No local data was removed.");
     }
-  }, [accounts, authedFetch, user?.email]);
+  }, [authedFetch, user?.email]);
 
   // ─── COMPLETE SURVEY → build profile → go to chat ───
   const handleSurveyComplete = useCallback(async () => {
@@ -3754,9 +3815,6 @@ export default function App() {
     }
 
     if (user?.email) {
-      const updated = { ...accounts, [user.email]: { ...accounts[user.email], surveyCompleted: true } };
-      setAccounts(updated);
-      saveAccounts(updated);
       // Cache a flag so the chat system knows to collect the student's story
       try { localStorage.setItem("cc_narrative_pending_" + user.email, "1"); } catch { /* ignore */ }
       // Survey is committed — drop the interrupted-draft autosave so it can't
@@ -3765,7 +3823,7 @@ export default function App() {
     }
 
     setScreen(S.CHAT);
-  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, user, accounts, messages, authedFetch]);
+  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, user, messages, authedFetch]);
 
   // ─── SEND MESSAGE ───
   const send = useCallback(async () => {
@@ -4612,29 +4670,8 @@ export default function App() {
             {studentRecoveryMessage && <p role={studentRecoveryMessage.type==="error"?"alert":"status"} style={{fontSize:13,color:studentRecoveryMessage.type==="error"?"#ffb4ba":"#a9edce"}}>{studentRecoveryMessage.text}</p>}
           </div>
 
-          {/* Show registered accounts as quick-pick — mask emails for privacy on shared devices */}
-          {Object.keys(accounts).length > 0 && (
-            <div style={{ marginTop:20 }}>
-              <div style={{ fontSize:11,color:"#555",textAlign:"center",marginBottom:8 }}>Accounts on this device</div>
-              {Object.entries(accounts).map(([email, acct]) => {
-                const [local, domain] = email.split("@");
-                const masked = local.slice(0, 2) + "***@" + (domain || "");
-                return (
-                <button key={email} onClick={()=>setLEmail(email)} style={{
-                  width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${lEmail===email?"rgba(55,138,221,0.3)":"rgba(255,255,255,0.05)"}`,
-                  background:lEmail===email?"rgba(55,138,221,0.06)":"transparent",color:"#aaa",fontSize:12,cursor:"pointer",
-                  display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,textAlign:"left",transition:"all 0.15s"
-                }}>
-                  <div>
-                    <div style={{ fontWeight:500,color:lEmail===email?"#63b3ed":"#aaa" }}>{acct.name.split(" ")[0]}</div>
-                    <div style={{ fontSize:10,color:"#555" }}>{masked}</div>
-                  </div>
-                  <span style={{ fontSize:10,color:"#555" }}>{acct.grade}</span>
-                </button>
-                );
-              })}
-            </div>
-          )}
+          {/* No account quick-pick: this device keeps no registry of who has an
+              account, so there is nothing to enumerate on a shared machine. */}
 
           <div style={{ textAlign:"center",marginTop:16 }}>
             <button onClick={()=>{setScreen(S.CREATE);setLError("");}} style={{ background:"none",border:"none",color:"#6a6a7a",fontSize:13,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:3 }}>
