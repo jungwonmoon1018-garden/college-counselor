@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 // Holds a HARD veto. If this seat returns stance="oppose" the moderator
 // downgrades the council output regardless of the other 4 votes.
-// Runs on BYOK medium tier because mis-classifying compliance carries
+// Uses the configured medium tier because mis-classifying compliance carries
 // real legal/safety risk; the embedded 1.5B is not strong enough here.
 //
 // Checks:

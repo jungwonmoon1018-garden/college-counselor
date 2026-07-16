@@ -1,0 +1,111 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #eef2f7;
+  background: #10141b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: #10141b; }
+button, input { font: inherit; }
+button, a { min-height: 44px; }
+button:focus-visible, input:focus-visible, a:focus-visible {
+  outline: 3px solid #69b8ff;
+  outline-offset: 2px;
+}
+
+.admin-shell { min-height: 100vh; display: flex; flex-direction: column; }
+.admin-header {
+  min-height: 64px;
+  padding: 10px clamp(16px, 4vw, 40px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #303846;
+  background: #171c24;
+}
+.admin-brand { margin: 0; font-size: 18px; letter-spacing: 0; }
+.admin-header-actions { display: flex; align-items: center; gap: 8px; }
+.admin-header a, .admin-link-button {
+  color: #9ed1ff;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 10px 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.admin-main { width: min(760px, 100%); margin: 0 auto; padding: clamp(24px, 5vw, 56px) 20px; flex: 1; }
+.admin-main h1 { margin: 0 0 8px; font-size: clamp(26px, 4vw, 36px); letter-spacing: 0; }
+.admin-lede { margin: 0 0 28px; max-width: 62ch; color: #b7c1ce; line-height: 1.6; }
+.admin-panel {
+  padding: clamp(20px, 4vw, 32px);
+  border: 1px solid #384250;
+  border-radius: 8px;
+  background: #191f28;
+}
+.admin-form { display: grid; gap: 18px; }
+.admin-field { display: grid; gap: 7px; }
+.admin-field label { font-weight: 650; color: #e7edf4; }
+.admin-field small { color: #aeb9c7; line-height: 1.45; }
+.admin-field input {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid #4a5666;
+  border-radius: 6px;
+  background: #0f1319;
+  color: #fff;
+  padding: 10px 12px;
+}
+.admin-primary, .admin-secondary, .admin-danger {
+  min-height: 44px;
+  border-radius: 6px;
+  padding: 10px 15px;
+  border: 1px solid transparent;
+  font-weight: 700;
+  cursor: pointer;
+}
+.admin-primary { background: #2f86cf; color: #fff; }
+.admin-secondary { background: #252d38; border-color: #495565; color: #e7edf4; }
+.admin-danger { background: transparent; border-color: #a94d55; color: #ff9da5; }
+button:disabled { cursor: wait; opacity: .62; }
+.admin-alert { margin: 0 0 18px; padding: 12px 14px; border-radius: 6px; line-height: 1.5; }
+.admin-alert.error { border: 1px solid #a94d55; background: #351d23; color: #ffc0c5; }
+.admin-alert.success { border: 1px solid #3f8a69; background: #183328; color: #a9edce; }
+.admin-recovery {
+  margin: 18px 0 0;
+  padding: 14px;
+  border: 1px solid #bf8a35;
+  border-radius: 6px;
+  background: #312817;
+}
+.admin-recovery code { display: block; margin-top: 8px; color: #ffe1a2; overflow-wrap: anywhere; user-select: all; }
+.admin-secret-list { display: grid; gap: 14px; }
+.admin-secret {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 16px 0;
+  border-bottom: 1px solid #303846;
+}
+.admin-secret:last-child { border-bottom: 0; }
+.admin-secret h2 { margin: 0 0 4px; font-size: 16px; }
+.admin-secret p { margin: 0; color: #aeb9c7; line-height: 1.45; }
+.admin-badge { display: inline-block; margin-top: 7px; padding: 3px 7px; border-radius: 4px; font-size: 12px; font-weight: 700; }
+.admin-badge.on { color: #a9edce; background: #183328; }
+.admin-badge.off { color: #ffc2a8; background: #382318; }
+.admin-secret-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.admin-editor { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.admin-editor label { grid-column: 1 / -1; font-weight: 650; }
+.admin-editor input { min-width: 0; min-height: 44px; border: 1px solid #4a5666; border-radius: 6px; background: #0f1319; padding: 9px 11px; }
+.admin-footnote { margin-top: 18px; color: #97a5b5; font-size: 13px; line-height: 1.5; }
+
+@media (max-width: 620px) {
+  .admin-header { align-items: flex-start; }
+  .admin-header-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .admin-secret { grid-template-columns: 1fr; }
+  .admin-secret-actions { justify-content: flex-start; }
+  .admin-editor { grid-template-columns: 1fr; }
+}

@@ -1,140 +1,336 @@
-// ═══════════════════════════════════════════════════════════════════════
-// USAGE BUDGET — per-student monthly USD cap + auto-cutoff
-// ═══════════════════════════════════════════════════════════════════════
-// One row per student in student_api_keys holds the user-defined monthly USD
-// cap (`monthly_budget_usd`). Token usage lives in api_usage_log; the helper
-// below converts tokens → USD using live OpenRouter pricing and compares to
-// the cap.
-//
-// Behavior:
-//   - Default budget = 0 → unlimited (key never auto-cuts off).
-//   - Positive cap → /api/chat and /api/llm refuse with 402 once
-//     month-to-date spend exceeds the cap.
-//   - Rolling 30-day window via the existing api_usage_log index.
-//
-// Pricing source: OpenRouter's live /api/v1/models catalog (per-token prompt
-// and completion prices), exposed by openrouter-model-refresh.js. Models not
-// found in the catalog contribute $0 (undercount is safer than blocking).
-// ═══════════════════════════════════════════════════════════════════════
+// Calendar-month cost reservations for OpenRouter calls.
 
+import crypto from "node:crypto";
 import { getOpenRouterPricingUSDPerMTok } from "./openrouter-model-refresh.js";
 
+export const MONTHLY_CAPS_USD = Object.freeze({
+  9: 10,
+  10: 10,
+  11: 10,
+  12: 15,
+});
+
+function normalizeGrade(grade) {
+  const match = String(grade ?? "").match(/\d{1,2}/);
+  const value = match ? Number(match[0]) : NaN;
+  return Object.hasOwn(MONTHLY_CAPS_USD, value) ? value : null;
+}
+
+export function monthlyCapForGrade(grade) {
+  const normalized = normalizeGrade(grade);
+  return normalized ? MONTHLY_CAPS_USD[normalized] : null;
+}
+
+export function calendarMonthKey(now = new Date()) {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  return year + "-" + month;
+}
+
+function modelIdForPricing(model) {
+  return String(model || "").replace(/^openrouter:/, "");
+}
+
+function normalizedPricing(model, pricingLookup) {
+  const pricing = pricingLookup(modelIdForPricing(model));
+  if (!pricing) return null;
+  const input = Number(pricing.input);
+  const output = Number(pricing.output);
+  if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) return null;
+  return { input, output };
+}
+
+function costForTokens(tokensIn, tokensOut, pricing) {
+  const value =
+    Math.max(0, Number(tokensIn) || 0) / 1_000_000 * pricing.input +
+    Math.max(0, Number(tokensOut) || 0) / 1_000_000 * pricing.output;
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+export function estimateRequestCost({
+  model,
+  maxInputTokens,
+  maxOutputTokens,
+  pricingLookup = getOpenRouterPricingUSDPerMTok,
+} = {}) {
+  const pricing = normalizedPricing(model, pricingLookup);
+  if (!pricing) {
+    return {
+      ok: false,
+      code: "unknown_model_pricing",
+      reason: "The selected model has no verified price and cannot be used.",
+    };
+  }
+  const inputTokens = Math.max(0, Number(maxInputTokens) || 0);
+  const outputTokens = Math.max(0, Number(maxOutputTokens) || 0);
+  if (inputTokens === 0 && outputTokens === 0) {
+    return { ok: false, code: "invalid_token_limit", reason: "A positive token limit is required." };
+  }
+  return {
+    ok: true,
+    model: modelIdForPricing(model),
+    maxInputTokens: inputTokens,
+    maxOutputTokens: outputTokens,
+    pricing,
+    estimatedCostUsd: costForTokens(inputTokens, outputTokens, pricing),
+  };
+}
+
+export function initUsageBudget(db) {
+  db.exec([
+    "CREATE TABLE IF NOT EXISTS usage_budget_reservations (",
+    " id TEXT PRIMARY KEY,",
+    " request_id TEXT NOT NULL UNIQUE,",
+    " student_id TEXT NOT NULL,",
+    " period TEXT NOT NULL,",
+    " grade INTEGER NOT NULL CHECK (grade BETWEEN 9 AND 12),",
+    " model TEXT NOT NULL,",
+    " max_input_tokens INTEGER NOT NULL,",
+    " max_output_tokens INTEGER NOT NULL,",
+    " input_price_per_mtok REAL NOT NULL,",
+    " output_price_per_mtok REAL NOT NULL,",
+    " reserved_usd REAL NOT NULL,",
+    " actual_usd REAL,",
+    " actual_input_tokens INTEGER,",
+    " actual_output_tokens INTEGER,",
+    " status TEXT NOT NULL CHECK (status IN ('reserved', 'reconciled', 'released')),",
+    " created_at TEXT NOT NULL,",
+    " reconciled_at TEXT",
+    ");",
+    "CREATE INDEX IF NOT EXISTS idx_budget_student_period",
+    " ON usage_budget_reservations(student_id, period, status);",
+  ].join("\n"));
+}
+
+function rowCharge(row) {
+  if (row.status === "reserved") return Number(row.reserved_usd) || 0;
+  if (row.status === "reconciled") return Number(row.actual_usd) || 0;
+  return 0;
+}
+
+export function getBudgetStatus(db, { studentId, grade, now = new Date() } = {}) {
+  const cap = monthlyCapForGrade(grade);
+  if (!studentId) return { allowed: false, code: "student_required" };
+  if (cap == null) return { allowed: false, code: "grade_required", reason: "Grade 9-12 is required before paid calls." };
+  const period = calendarMonthKey(now);
+  const rows = db.prepare([
+    "SELECT status, reserved_usd, actual_usd FROM usage_budget_reservations",
+    "WHERE student_id = ? AND period = ?",
+  ].join("\n")).all(studentId, period);
+  const committedUsd = Math.round(rows.reduce((sum, row) => sum + rowCharge(row), 0) * 1_000_000) / 1_000_000;
+  return {
+    allowed: committedUsd < cap,
+    period,
+    grade: normalizeGrade(grade),
+    capUsd: cap,
+    committedUsd,
+    remainingUsd: Math.max(0, Math.round((cap - committedUsd) * 1_000_000) / 1_000_000),
+  };
+}
+
+export function reserveBudget(db, {
+  studentId,
+  grade,
+  requestId,
+  model,
+  maxInputTokens,
+  maxOutputTokens,
+  now = new Date(),
+  pricingLookup = getOpenRouterPricingUSDPerMTok,
+} = {}) {
+  if (!studentId || !requestId) {
+    return { allowed: false, code: "identity_required", reason: "Student and request IDs are required." };
+  }
+  const estimate = estimateRequestCost({ model, maxInputTokens, maxOutputTokens, pricingLookup });
+  if (!estimate.ok) return { allowed: false, ...estimate };
+  const gradeNumber = normalizeGrade(grade);
+  const cap = monthlyCapForGrade(gradeNumber);
+  if (cap == null) {
+    return { allowed: false, code: "grade_required", reason: "Grade 9-12 is required before paid calls." };
+  }
+  const period = calendarMonthKey(now);
+  const createdAt = now.toISOString();
+
+  const tx = db.transaction(() => {
+    const existing = db.prepare("SELECT * FROM usage_budget_reservations WHERE request_id = ?").get(requestId);
+    if (existing) {
+      if (existing.student_id !== studentId) {
+        return { allowed: false, code: "request_id_conflict" };
+      }
+      return {
+        allowed: existing.status !== "released",
+        idempotent: true,
+        reservationId: existing.id,
+        reservedUsd: Number(existing.reserved_usd),
+        capUsd: cap,
+        period,
+      };
+    }
+
+    const status = getBudgetStatus(db, { studentId, grade: gradeNumber, now });
+    const afterReservation = status.committedUsd + estimate.estimatedCostUsd;
+    if (afterReservation > cap + Number.EPSILON) {
+      return {
+        allowed: false,
+        code: "monthly_cap_exceeded",
+        capUsd: cap,
+        committedUsd: status.committedUsd,
+        requestedUsd: estimate.estimatedCostUsd,
+        remainingUsd: status.remainingUsd,
+        period,
+      };
+    }
+
+    const reservationId = crypto.randomUUID();
+    db.prepare([
+      "INSERT INTO usage_budget_reservations (",
+      " id, request_id, student_id, period, grade, model, max_input_tokens, max_output_tokens,",
+      " input_price_per_mtok, output_price_per_mtok, reserved_usd, status, created_at",
+      ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    ].join("\n")).run(
+      reservationId,
+      requestId,
+      studentId,
+      period,
+      gradeNumber,
+      estimate.model,
+      estimate.maxInputTokens,
+      estimate.maxOutputTokens,
+      estimate.pricing.input,
+      estimate.pricing.output,
+      estimate.estimatedCostUsd,
+      "reserved",
+      createdAt,
+    );
+    return {
+      allowed: true,
+      reservationId,
+      requestId,
+      period,
+      grade: gradeNumber,
+      capUsd: cap,
+      reservedUsd: estimate.estimatedCostUsd,
+      committedUsd: Math.round(afterReservation * 1_000_000) / 1_000_000,
+      remainingUsd: Math.max(0, Math.round((cap - afterReservation) * 1_000_000) / 1_000_000),
+    };
+  });
+  return tx.immediate();
+}
+
+export function reconcileBudget(db, {
+  reservationId,
+  inputTokens = 0,
+  outputTokens = 0,
+  now = new Date(),
+} = {}) {
+  if (!reservationId) return { ok: false, code: "reservation_required" };
+  const tx = db.transaction(() => {
+    const row = db.prepare("SELECT * FROM usage_budget_reservations WHERE id = ?").get(reservationId);
+    if (!row) return { ok: false, code: "reservation_not_found" };
+    if (row.status === "released") return { ok: false, code: "reservation_released" };
+    if (row.status === "reconciled") {
+      return { ok: true, idempotent: true, actualUsd: Number(row.actual_usd), reservationId };
+    }
+    const actualInput = Math.max(0, Number(inputTokens) || 0);
+    const actualOutput = Math.max(0, Number(outputTokens) || 0);
+    const actualUsd = costForTokens(actualInput, actualOutput, {
+      input: Number(row.input_price_per_mtok),
+      output: Number(row.output_price_per_mtok),
+    });
+    db.prepare([
+      "UPDATE usage_budget_reservations SET status = 'reconciled', actual_usd = ?,",
+      " actual_input_tokens = ?, actual_output_tokens = ?, reconciled_at = ? WHERE id = ? AND status = 'reserved'",
+    ].join("\n")).run(actualUsd, actualInput, actualOutput, now.toISOString(), reservationId);
+    return {
+      ok: true,
+      reservationId,
+      reservedUsd: Number(row.reserved_usd),
+      actualUsd,
+      releasedUsd: Math.max(0, Math.round((Number(row.reserved_usd) - actualUsd) * 1_000_000) / 1_000_000),
+      overrun: actualUsd > Number(row.reserved_usd),
+    };
+  });
+  return tx.immediate();
+}
+
+export function releaseBudget(db, { reservationId, now = new Date() } = {}) {
+  if (!reservationId) return { ok: false, code: "reservation_required" };
+  const result = db.prepare([
+    "UPDATE usage_budget_reservations SET status = 'released', reconciled_at = ?",
+    "WHERE id = ? AND status = 'reserved'",
+  ].join("\n")).run(now.toISOString(), reservationId);
+  return { ok: result.changes === 1, reservationId };
+}
+
+// Compatibility helpers retained while server routes migrate to the ledger.
 export function ensureBudgetColumn(piiVault) {
   if (!piiVault?.db) return;
-  const cols = piiVault.db.prepare(`PRAGMA table_info(student_api_keys)`).all().map(r => r.name);
-  if (!cols.includes("monthly_budget_usd")) {
-    piiVault.db.exec(`ALTER TABLE student_api_keys ADD COLUMN monthly_budget_usd REAL DEFAULT 0`);
+  const table = piiVault.db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'student_api_keys'"
+  ).get();
+  if (!table) return;
+  const columns = piiVault.db.prepare("PRAGMA table_info(student_api_keys)").all().map((row) => row.name);
+  if (!columns.includes("monthly_budget_usd")) {
+    piiVault.db.exec("ALTER TABLE student_api_keys ADD COLUMN monthly_budget_usd REAL DEFAULT 0");
   }
 }
 
 export function getStudentBudget(piiVault, studentId) {
   if (!piiVault?.db || !studentId) return 0;
-  const row = piiVault.db
-    .prepare(`SELECT monthly_budget_usd FROM student_api_keys WHERE student_id = ?`)
-    .get(studentId);
-  return row?.monthly_budget_usd != null ? Number(row.monthly_budget_usd) : 0;
+  const table = piiVault.db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'student_api_keys'"
+  ).get();
+  if (!table) return 0;
+  const row = piiVault.db.prepare(
+    "SELECT monthly_budget_usd FROM student_api_keys WHERE student_id = ?"
+  ).get(studentId);
+  return Number(row?.monthly_budget_usd) || 0;
 }
 
 export function setStudentBudget(piiVault, studentId, monthlyBudgetUsd) {
   if (!piiVault?.db || !studentId) return false;
-  const n = Number(monthlyBudgetUsd);
-  if (!Number.isFinite(n) || n < 0) return false;
-  const result = piiVault.db
-    .prepare(`
-      UPDATE student_api_keys
-      SET monthly_budget_usd = ?, updated_at = datetime('now')
-      WHERE student_id = ?
-    `)
-    .run(n, studentId);
+  const value = Number(monthlyBudgetUsd);
+  if (!Number.isFinite(value) || value < 0) return false;
+  const result = piiVault.db.prepare([
+    "UPDATE student_api_keys SET monthly_budget_usd = ?, updated_at = datetime('now')",
+    "WHERE student_id = ?",
+  ].join("\n")).run(value, studentId);
   return result.changes > 0;
 }
 
-// Walk api_usage_log over the last 30 days and tally USD using live OpenRouter
-// per-model pricing. The router writes models as "provider:model" — strip the
-// prefix before the price lookup. Unknown models contribute $0.
-export function getMonthlySpendUsd(ragStmts, studentId) {
+export function getMonthlySpendUsd(ragStmts, studentId, { allowUnknown = false } = {}) {
   if (!ragStmts?.getUsageHistoryByModel) return 0;
-  const rows = ragStmts.getUsageHistoryByModel.all(studentId);
   let total = 0;
-  for (const r of rows) {
-    const model = String(r.model || "").replace(/^[^:]+:/, "");
-    const price = getOpenRouterPricingUSDPerMTok(model);
-    if (!price) continue;
-    total += (Number(r.input_total)  || 0) / 1_000_000 * price.input;
-    total += (Number(r.output_total) || 0) / 1_000_000 * price.output;
-  }
-  return Math.round(total * 1_000_000) / 1_000_000; // 6-decimal precision
-}
-
-/**
- * Pillar 6 — record an embedded (zero-cost) call so the budget UI can
- * surface "saved by embedded" alongside paid spend. Mirrors the shape
- * of api_usage_log insertion the orchestration engine uses, but pins
- * provider="embedded" and cost contribution to 0.
- */
-export function recordEmbeddedCall(ragStmts, { studentId, tokensIn = 0, tokensOut = 0, model = "embedded", latencyMs = 0 } = {}) {
-  if (!ragStmts?.insertUsageLog || !studentId) return false;
-  try {
-    ragStmts.insertUsageLog.run(
-      studentId,
-      "embedded",          // provider
-      model,
-      tokensIn | 0,
-      tokensOut | 0,
-      latencyMs | 0,
-      0,                   // cost_usd
-    );
-    return true;
-  } catch (err) {
-    console.warn("[usage-budget] recordEmbeddedCall failed:", err.message);
-    return false;
-  }
-}
-
-/**
- * Pillar 6 — record the per-seat usage breakdown for a council convening.
- * Walks the council_breakdown array (returned by moderator) and emits
- * one api_usage_log row per seat tagged with the convening id in
- * `request_id` so downstream UI can group them.
- */
-export function recordCouncilCall(ragStmts, { studentId, conveningId, councilBreakdown = [], usageBySeat = {} } = {}) {
-  if (!ragStmts?.insertUsageLog || !studentId) return false;
-  let recorded = 0;
-  for (const seat of councilBreakdown) {
-    const u = usageBySeat[seat.role] || { input_tokens: 0, output_tokens: 0, latency_ms: 0 };
-    try {
-      ragStmts.insertUsageLog.run(
-        studentId,
-        seat.provider || "embedded",
-        `council:${seat.role}:${seat.model || ""}`.slice(0, 200),
-        u.input_tokens | 0,
-        u.output_tokens | 0,
-        u.latency_ms | 0,
-        seat.provider === "embedded" ? 0 : -1, // -1 = "compute at read time" (live OpenRouter pricing)
-      );
-      recorded++;
-    } catch (err) {
-      console.warn(`[usage-budget] recordCouncilCall (${seat.role}) failed:`, err.message);
+  for (const row of ragStmts.getUsageHistoryByModel.all(studentId)) {
+    const pricing = normalizedPricing(row.model, getOpenRouterPricingUSDPerMTok);
+    if (!pricing) {
+      if (allowUnknown) continue;
+      throw new Error("Unknown model pricing for " + String(row.model || "(missing model)"));
     }
+    total += costForTokens(row.input_total, row.output_total, pricing);
   }
-  return recorded;
+  return Math.round(total * 1_000_000) / 1_000_000;
 }
 
-// Hard gate — call before any LLM dispatch. Returns:
-//   { allowed: true } when under cap (or cap == 0 = unlimited)
-//   { allowed: false, spend, cap, reason } when over
 export function checkBudget(piiVault, ragStmts, studentId) {
-  if (!studentId) return { allowed: true };
   const cap = getStudentBudget(piiVault, studentId);
-  if (!cap || cap <= 0) return { allowed: true, cap: 0 };
-  const spend = getMonthlySpendUsd(ragStmts, studentId);
-  if (spend >= cap) {
-    return {
-      allowed: false,
-      spend,
-      cap,
-      reason: `Monthly spend $${spend.toFixed(4)} has reached your cap of $${cap.toFixed(2)}.`,
-    };
+  if (!cap || cap <= 0) {
+    return { allowed: false, cap: 0, reason: "Use the grade-based reservation ledger before paid calls." };
   }
-  return { allowed: true, spend, cap };
+  try {
+    const spend = getMonthlySpendUsd(ragStmts, studentId);
+    return spend >= cap
+      ? { allowed: false, spend, cap, reason: "Monthly spend has reached the configured cap." }
+      : { allowed: true, spend, cap };
+  } catch (error) {
+    return { allowed: false, cap, reason: error.message, code: "unknown_model_pricing" };
+  }
+}
+
+export function recordEmbeddedCall() {
+  return false;
+}
+
+export function recordCouncilCall() {
+  return false;
 }

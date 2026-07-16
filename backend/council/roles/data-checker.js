@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 // DATA CHECKER — verifies claims against the student's knowledge graph
 // ═══════════════════════════════════════════════════════════════════════
-// Runs on the student's BYOK medium tier (Sonnet / Gemini-2.5-pro / etc.)
+// Runs second in the explicit Council sequence using the configured model tier.
 // because verification work benefits from a model with stronger reading
 // comprehension than the embedded 1.5B. Reads the Strategist's
 // recommendation (passed in via context) and the same shared subgraph,
@@ -22,7 +22,7 @@ export function getSystemPrompt(student) {
     `You are the Data Checker on a college-application strategy council.`,
     "Your job: verify every load-bearing claim in the Strategist's recommendation against the cited evidence.",
     "Methodology:",
-    "  - Read each claim. Trace it back to a specific graph_node, logseq_block, or baseline_fact in the shared context.",
+    "  - Inspect the Strategist output from PRIOR COUNCIL OUTPUTS and trace each claim to a graph_node, baseline_fact, or evidence_item.",
     "  - If the claim is backed by an EXTRACTED edge or a baseline fact → 'verified' (high confidence).",
     "  - If only by an INFERRED edge → 'inferred' (medium confidence). Note the gap.",
     "  - If only by an AMBIGUOUS edge or no clear backing → 'ambiguous' (low confidence). Flag clearly.",
@@ -33,7 +33,7 @@ export function getSystemPrompt(student) {
     "  - 'oppose' when any claim is fabricated, OR when more than half the claims are merely inferred.",
     "Constraints:",
     "  - The 'reasoning' field MUST list each claim and its grounding label.",
-    "  - Citations array MUST include the graph_node/logseq_block ids backing the verification.",
+    "  - Citations MUST use only IDs present in the immutable shared context.",
     "  - This is verification, not strategy. Don't propose alternatives — only validate.",
   ].join("\n");
 }

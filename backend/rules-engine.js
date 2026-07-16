@@ -7,6 +7,16 @@
 
 import crypto from "node:crypto";
 
+export const FAFSA_RULESET = Object.freeze({
+  id: "federal_student_aid_eligibility",
+  academicYear: "2026-2027",
+  effectiveAt: "2026-07-01T00:00:00.000Z",
+  expiresAt: "2027-06-30T23:59:59.999Z",
+  sourceUrl: "https://fsapartners.ed.gov/knowledge-center/fsa-handbook/2026-2027/vol1/ch1-school-determined-requirements",
+  sourceTitle: "2026-2027 Federal Student Aid Handbook, Volume 1, Chapter 1",
+  sourceDomain: "fsapartners.ed.gov",
+});
+
 // ═══════════════════════════════════════════════════════════
 // FAFSA ELIGIBILITY PRE-CHECK
 // ═══════════════════════════════════════════════════════════
@@ -50,14 +60,6 @@ const FAFSA_ELIGIBILITY_RULES = [
     source: "https://studentaid.gov/apply-for-aid/fafsa/eligibility",
   },
   {
-    id: "selective_service",
-    label: "Selective Service Registration (if applicable)",
-    description: "Males aged 18-25 must be registered with Selective Service. Register at sss.gov.",
-    required: true,
-    appliesTo: "male_18_25",
-    source: "https://www.sss.gov",
-  },
-  {
     id: "no_drug_conviction",
     label: "No Drug Conviction During Federal Aid Period",
     description: "As of the FAFSA Simplification Act (2024-2025 onward), drug convictions no longer affect eligibility for federal student aid.",
@@ -79,17 +81,7 @@ export function runFAFSAEligibilityCheck(studentData = {}) {
     const fieldValue = studentData[rule.id];
     let status = "unknown"; // unknown, pass, fail, not_applicable
 
-    if (rule.appliesTo === "male_18_25") {
-      const isMale = studentData.gender === "male";
-      const age = studentData.age;
-      if (!isMale || (age && age < 18)) {
-        status = "not_applicable";
-      } else if (fieldValue === true) {
-        status = "pass";
-      } else if (fieldValue === false) {
-        status = "fail";
-      }
-    } else if (!rule.required) {
+    if (!rule.required) {
       status = "not_applicable";
     } else if (fieldValue === true) {
       status = "pass";
@@ -105,6 +97,11 @@ export function runFAFSAEligibilityCheck(studentData = {}) {
       status,
       source: rule.source,
       note: rule.note || null,
+      academicYear: FAFSA_RULESET.academicYear,
+      effectiveAt: FAFSA_RULESET.effectiveAt,
+      expiresAt: FAFSA_RULESET.expiresAt,
+      sourceTitle: FAFSA_RULESET.sourceTitle,
+      sourceDomain: FAFSA_RULESET.sourceDomain,
     };
   });
 
@@ -124,7 +121,18 @@ export function runFAFSAEligibilityCheck(studentData = {}) {
         : "Based on the information provided, you appear to meet the basic FAFSA eligibility requirements. This is an informal assessment only — submit your FAFSA at StudentAid.gov for an official determination.",
     results,
     advisory: "This is NOT an official eligibility determination. Only the U.S. Department of Education can make official FAFSA eligibility decisions. Submit your FAFSA at https://studentaid.gov.",
-    source: "https://studentaid.gov/apply-for-aid/fafsa/eligibility",
+    academicYear: FAFSA_RULESET.academicYear,
+    effectiveAt: FAFSA_RULESET.effectiveAt,
+    expiresAt: FAFSA_RULESET.expiresAt,
+    source: FAFSA_RULESET.sourceUrl,
+    sourceTitle: FAFSA_RULESET.sourceTitle,
+    removedRequirements: [
+      {
+        id: "selective_service",
+        note: "Selective Service registration is not a Title IV federal student aid eligibility requirement.",
+        source: FAFSA_RULESET.sourceUrl,
+      },
+    ],
   };
 }
 
@@ -354,7 +362,10 @@ export function evaluateComplianceGate(topicType, evidenceObjects = [], options 
   // For regulated topics: must have at least one verified evidence object from trusted source
   if (topicType === "regulated" || topicType === "high_stakes") {
     const verified = evidenceObjects.filter(
-      (e) => e.confidence === "verified" && e.trust_level === "official"
+      (e) => e.confidence === "verified" &&
+        e.trust_level === "official" &&
+        (e.source_url || e.source_domain) &&
+        (!e.expires_at || Date.parse(e.expires_at) > Date.now())
     );
 
     if (verified.length === 0 && !options.allowUnverified) {

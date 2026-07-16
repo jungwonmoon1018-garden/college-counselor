@@ -1,0 +1,98 @@
+{
+  "name": "college-counselor-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "description": "Local desktop host for College Counselor",
+  "scripts": {
+    "start": "electron .",
+    "build:frontend": "npm --prefix ../frontend run build",
+    "install:backend:production": "npm --prefix ../backend ci --omit=dev",
+    "rebuild:backend": "electron-rebuild -f -m ../backend",
+    "dist": "npm run build:frontend && npm run install:backend:production && npm run rebuild:backend && electron-builder",
+    "dist:win": "npm run build:frontend && npm run install:backend:production && npm run rebuild:backend && electron-builder --win nsis",
+    "dist:mac": "npm run build:frontend && npm run install:backend:production && npm run rebuild:backend && electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.1",
+    "electron": "^43.1.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "org.collegecounselor.desktop",
+    "productName": "College Counselor",
+    "asar": true,
+    "files": [
+      "main.mjs",
+      "preload.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!node_modules{,/**/*}",
+          "!package-lock.json",
+          "!.gitignore",
+          "!eslint.config.js",
+          "!**/.env*",
+          "!**/.dev-encryption-key",
+          "!**/*.db*",
+          "!tests{,/**/*}",
+          "!coverage{,/**/*}",
+          "!models{,/**/*}"
+        ]
+      },
+      {
+        "from": "../backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*",
+          "!.bin{,/**/*}",
+          "!.cache{,/**/*}",
+          "!**/test{,/**/*}",
+          "!**/tests{,/**/*}",
+          "!**/__tests__{,/**/*}",
+          "!**/coverage{,/**/*}",
+          "!**/.env*",
+          "!**/*.md",
+          "!**/*.map"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.education",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "sign": false
+    }
+  }
+}

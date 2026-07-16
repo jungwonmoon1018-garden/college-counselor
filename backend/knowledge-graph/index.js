@@ -20,7 +20,6 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   getStudentKnowledgeGraphPath,
-  getStudentVaultPath,
   hasStudentGraph,
 } from "../student-storage.js";
 import {
@@ -237,5 +236,4 @@ export function scheduleStudentGraphRebuild(studentId, opts = {}) {
   });
 }
 
-// Re-export Logseq vault path so server routes can DRY their handlers.
-export { getStudentVaultPath, getStudentKnowledgeGraphPath };
+export { getStudentKnowledgeGraphPath };

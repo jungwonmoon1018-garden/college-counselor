@@ -1,177 +1,165 @@
-// ═══════════════════════════════════════════════════════════════════════
-// STRATEGY COUNCIL — public API (Pillar 9)
-// ═══════════════════════════════════════════════════════════════════════
-// One function: convene(). Takes a student question + decision type +
-// dependencies (db statements, BYOK row, Logseq creds), runs all 5
-// councilors in parallel against a shared context envelope, tallies via
-// the deterministic moderator, persists the audit trail, returns the
-// recommendation envelope.
-//
-// The five seats (per Pillar 9 plan):
-//   1. Strategist     — embedded
-//   2. Skeptic        — embedded
-//   3. Devil's Advocate — embedded
-//   4. Data Checker   — BYOK medium
-//   5. Compliance     — BYOK medium
-//
-// PIPA: when STRATEGY_COUNCIL_CROSS_BORDER consent is missing AND the
-// student's BYOK provider is foreign-hosted, Data Checker and Compliance
-// fall back to embedded. The audit trail records the fallback so the
-// student knows the assurance is lower than usual.
-// ═══════════════════════════════════════════════════════════════════════
+// Explicit sequential Strategy Council:
+// Strategist -> Data Checker -> Skeptic -> Devil's Advocate -> Moderator.
 
 import { Councilor } from "./councilor.js";
 import * as strategistRole from "./roles/strategist.js";
+import * as dataCheckerRole from "./roles/data-checker.js";
 import * as skepticRole from "./roles/skeptic.js";
 import * as devilsAdvocateRole from "./roles/devils-advocate.js";
-import * as dataCheckerRole from "./roles/data-checker.js";
-import * as complianceRole from "./roles/compliance.js";
 import { moderate } from "./moderator.js";
 import { buildCouncilContext } from "./context-builder.js";
 import { recordConvening } from "./audit-trail.js";
 import { DECISION_TYPES, subIntentToDecisionType } from "./triggers.js";
 
-const FOREIGN_PROVIDERS = new Set(["openai", "openrouter", "google", "deepseek", "together", "zhipu", "openai_compat"]);
+export const COUNCIL_STAGE_ORDER = Object.freeze([
+  "Strategist",
+  "Data Checker",
+  "Skeptic",
+  "Devil's Advocate",
+  "Moderator",
+]);
 
-function buildCouncilors({ student, byok, crossBorderConsent }) {
-  const allowForeign = crossBorderConsent || !byok || !byok.provider || !FOREIGN_PROVIDERS.has(byok.provider);
-  // Embedded seats — always embedded.
-  const seats = [
-    new Councilor({ role: strategistRole.ROLE, getSystemPrompt: strategistRole.getSystemPrompt, tier: strategistRole.TIER, preferEmbedded: true }),
-    new Councilor({ role: skepticRole.ROLE, getSystemPrompt: skepticRole.getSystemPrompt, tier: skepticRole.TIER, preferEmbedded: true }),
-    new Councilor({ role: devilsAdvocateRole.ROLE, getSystemPrompt: devilsAdvocateRole.getSystemPrompt, tier: devilsAdvocateRole.TIER, preferEmbedded: true }),
+function buildCouncilors(callModel) {
+  return [
+    new Councilor({
+      role: strategistRole.ROLE,
+      getSystemPrompt: strategistRole.getSystemPrompt,
+      tier: strategistRole.TIER,
+      callModel,
+    }),
+    new Councilor({
+      role: dataCheckerRole.ROLE,
+      getSystemPrompt: dataCheckerRole.getSystemPrompt,
+      tier: dataCheckerRole.TIER,
+      callModel,
+    }),
+    new Councilor({
+      role: skepticRole.ROLE,
+      getSystemPrompt: skepticRole.getSystemPrompt,
+      tier: skepticRole.TIER,
+      callModel,
+    }),
+    new Councilor({
+      role: devilsAdvocateRole.ROLE,
+      getSystemPrompt: devilsAdvocateRole.getSystemPrompt,
+      tier: devilsAdvocateRole.TIER,
+      callModel,
+    }),
   ];
-
-  // Data Checker + Compliance — BYOK medium when consent allows, else embedded fallback.
-  seats.push(new Councilor({
-    role: dataCheckerRole.ROLE,
-    getSystemPrompt: dataCheckerRole.getSystemPrompt,
-    tier: dataCheckerRole.TIER,
-    preferEmbedded: !allowForeign, // force embedded when consent missing
-  }));
-  seats.push(new Councilor({
-    role: complianceRole.ROLE,
-    getSystemPrompt: complianceRole.getSystemPrompt,
-    tier: complianceRole.TIER,
-    preferEmbedded: !allowForeign,
-  }));
-
-  return { seats, allowForeign };
 }
 
-/**
- * Convene the 5-seat Strategy Council.
- *
- * @param {object} opts
- * @param {string} opts.studentId
- * @param {string} opts.dataDir
- * @param {string} opts.question
- * @param {string} [opts.decisionType]    — see triggers.DECISION_TYPES
- * @param {string} [opts.subIntent]       — for confidence-escalation callers
- * @param {object} opts.student           — student profile (no PII)
- * @param {object} [opts.byok]            — {provider, apiKey, baseUrl, model}
- * @param {boolean} [opts.crossBorderConsent=false]
- * @param {object} opts.councilStmts      — from prepareCouncilStatements()
- * @param {object} [opts.factStmts]
- * @param {object} [opts.evidenceStmts]
- * @param {object} [opts.logseq]          — {httpEndpoint, token}
- * @param {AbortSignal} [opts.signal]
- */
-export async function convene(opts) {
+function normalizeContext(value) {
+  if (!value) return null;
+  if (typeof value === "string") return { text: value, evidenceIndex: {}, immutable: true };
+  return {
+    text: String(value.text || ""),
+    evidenceIndex: value.evidenceIndex || {},
+    immutable: true,
+  };
+}
+
+export async function convene(opts = {}) {
   const {
     studentId,
     dataDir,
     question,
     student,
-    byok,
-    crossBorderConsent = false,
     councilStmts,
     factStmts,
-    evidenceStmts,
-    logseq = {},
     signal,
+    callModel,
+    beforeStage,
+    afterStage,
   } = opts;
-
+  const llm = opts.llm || opts.byok;
+  if (opts.explicit !== true) {
+    const error = new Error("Strategy Council requires an explicit, cost-disclosed student action.");
+    error.code = "COUNCIL_EXPLICIT_ACTION_REQUIRED";
+    throw error;
+  }
   if (!studentId) throw new Error("convene() requires studentId");
   if (!question) throw new Error("convene() requires question");
-  if (!councilStmts) throw new Error("convene() requires councilStmts (run prepareCouncilStatements)");
+  if (!councilStmts) throw new Error("convene() requires councilStmts");
+  if (!llm?.apiKey) throw new Error("convene() requires the administrator's OpenRouter key");
+  if (opts.requestId && councilStmts.getByRequestId?.get(opts.requestId, studentId)) {
+    const error = new Error("This Council request has already been processed.");
+    error.code = "COUNCIL_DUPLICATE_REQUEST";
+    throw error;
+  }
 
-  const decisionType = opts.decisionType
-    || subIntentToDecisionType(opts.subIntent)
-    || DECISION_TYPES.OTHER;
-
-  // 1. Build the shared context envelope.
-  const context = await buildCouncilContext({
+  const decisionType = opts.decisionType ||
+    subIntentToDecisionType(opts.subIntent) ||
+    DECISION_TYPES.OTHER;
+  const context = normalizeContext(opts.contextOverride) || await buildCouncilContext({
     studentId,
     dataDir,
     question,
     student,
     factStmts,
-    evidenceStmts,
-    logseq,
+    evidenceStmts: opts.evidenceStmts,
   });
+  const outputs = [];
 
-  // 2. Spin up the 5 seats with PIPA-aware composition.
-  const { seats } = buildCouncilors({ student, byok, crossBorderConsent });
-
-  // 3. Parallel deliberation. Each seat catches its own errors and
-  //    returns an abstention envelope on failure, so a single seat's
-  //    blow-up doesn't kill the whole council.
-  const results = await Promise.all(
-    seats.map((seat) =>
-      seat.deliberate({
-        question,
-        decisionType,
-        student,
-        context,
-        byok,
-        signal,
-      }).catch((err) => ({
-        role: seat.role,
-        stance: "modify",
-        recommendation: `(${seat.role} errored: ${err.message})`,
-        confidence: 0,
-        citations: [],
-        reasoning: err.stack || err.message,
-        abstained: true,
-      })),
-    ),
-  );
-
-  // 4. Deterministic tally.
-  const envelope = moderate(results);
-
-  // 5. Persist audit trail (Logseq + SQLite). Don't block the response on
-  //    Logseq failures — the SQLite row is the source of truth.
-  const totalTokens = results.reduce((acc, r) => {
-    const u = r.usage || {};
-    return {
-      input: acc.input + (u.input_tokens | 0),
-      output: acc.output + (u.output_tokens | 0),
+  for (const [index, seat] of buildCouncilors(callModel).entries()) {
+    if (signal?.aborted) throw signal.reason || new Error("Council request aborted");
+    const stageInfo = {
+      index,
+      role: seat.role,
+      tier: seat.tier,
+      priorOutputs: outputs,
+      contextChars: context.text.length,
     };
-  }, { input: 0, output: 0 });
+    const approval = beforeStage ? await beforeStage(stageInfo) : { allowed: true };
+    if (approval?.allowed === false) {
+      const error = new Error(approval.reason || "Council stage budget was denied.");
+      error.code = approval.code || "COUNCIL_BUDGET_DENIED";
+      error.stage = seat.role;
+      throw error;
+    }
+    const output = await seat.deliberate({
+      question,
+      decisionType,
+      student,
+      context,
+      priorOutputs: outputs,
+      llm,
+      signal,
+    });
+    outputs.push(output);
+    if (afterStage) await afterStage({ ...stageInfo, output, approval });
+  }
 
-  const convening_id = await recordConvening({
+  const envelope = moderate(outputs);
+  const totalTokens = outputs.reduce((totals, output) => {
+    const usage = output.usage || {};
+    totals.input += Number(usage.input_tokens) || 0;
+    totals.output += Number(usage.output_tokens) || 0;
+    return totals;
+  }, { input: 0, output: 0 });
+  const conveningId = await recordConvening({
     stmts: councilStmts,
     studentId,
-    dataDir,
     decisionType,
     question,
     envelope,
     totalTokens,
-    logseq,
+    triggerSource: opts.triggerSource || "manual",
+    requestId: opts.requestId || null,
   });
 
   return {
-    convening_id,
+    convening_id: conveningId,
     recommendation: envelope.recommendation,
     confidence: envelope.confidence,
     dissent: envelope.dissent,
+    dissents: envelope.dissents,
     citations: envelope.citations,
     council_breakdown: envelope.council_breakdown,
     moderator_rule: envelope.moderator_rule,
     decision_type: decisionType,
     total_tokens: totalTokens,
+    stage_order: COUNCIL_STAGE_ORDER,
+    sequential: true,
   };
 }
 

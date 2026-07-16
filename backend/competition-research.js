@@ -5,31 +5,15 @@
 // of what the student *achieved*, how well-known/selective is the program
 // itself in the eyes of a college admissions reader?
 //
-// Scoring sources in priority order:
-//   1. Cache hit in ec_prestige_cache (30-day TTL).
-//   2. Seeded qualifier_level row in baseline_ec_competitive — if the EC's
-//      activity_id + level match a benchmarked row, we short-circuit with
-//      the seeded prestige_score; no web search fires.
-//   3. Official competition catalog (organizer / primary-source pages).
-//   4. OpenRouter web-plugin research, bounded to an allowlist of official
-//      organizer, .edu host, and government pages (the plugin injects the
-//      retrieved pages into the model's context before it answers).
-//
-// Web research only fires when the student's BYOK provider is OpenRouter.
-// Otherwise prestige silently defaults to 0 with source:"unavailable" so tier
-// labels still compute from the deterministic catalog/benchmark paths.
+// Scores come only from fresh reviewed cache rows, seeded benchmarks, and the
+// packaged official-source catalog. An unknown activity remains unavailable.
 // ═══════════════════════════════════════════════════════════════════════
 
 import crypto from "node:crypto";
-import { callLLM } from "./llm-adapters/index.js";
-
 export const PRESTIGE_TTL_DAYS = 30;
-const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_TOKENS = 800;
 
 // Official organizer / primary-source catalog. This is the zero-API-cost
-// path for known competitions and the source of truth for the web_search
-// allowlist below. Scores are intentionally conservative and represent the
+// path for known competitions. Scores are intentionally conservative and represent the
 // prestige of the competition/level, not the student's personal execution.
 export const OFFICIAL_COMPETITION_SOURCES = Object.freeze([
   {
@@ -279,10 +263,8 @@ const EXTRA_OFFICIAL_DOMAINS = [
   "artandwriting.org",
 ];
 
-// Reputable-source allowlist passed to OpenRouter's web plugin as the
-// search-domain restriction. Only official organizers, official competition
-// infrastructure, government pages, and official school-hosted competition
-// pages belong here.
+// Reviewed organizer, government, and school-hosted domains represented in
+// the packaged catalog. No runtime web search uses this list.
 export const REPUTABLE_DOMAINS = Object.freeze(
   [...new Set([
     ...EXTRA_OFFICIAL_DOMAINS,
@@ -292,22 +274,6 @@ export const REPUTABLE_DOMAINS = Object.freeze(
     ),
   ])].sort(),
 );
-
-const PRESTIGE_SYSTEM_PROMPT = [
-  "You research the competitive prestige of named extracurricular activities for college admissions.",
-  "Output exactly one JSON object {score, rationale, sourcesCited}. No prose outside the JSON.",
-  "score is a number in [0.0, 1.0] per this scale:",
-  "  0.95-1.00: single-digit-percent acceptance at top national finals (IMO/USAMO medal, ISEF Best-in-Category, STS Finalist, Davidson Fellow, Concord Review publication, Breakthrough Junior winner).",
-  "  0.80-0.94: national finalist / top-100 nationally (USAJMO, ISEF category award, NMSF, Presidential Scholar semifinalist, first-team All-National in a major sport/art).",
-  "  0.60-0.79: well-known regional or mid-national (AIME qualifier, state science fair 1st, national debate octofinal, all-state orchestra concertmaster).",
-  "  0.40-0.59: top local or competitive state participation (state science fair participant, regional debate quarterfinal, district champion).",
-  "  0.20-0.39: local participation with some selectivity.",
-  "  0.00-0.19: unverifiable / no national reputation / participation-only.",
-  "Use only official organizer, government, or official school-hosted competition pages. Do not use forums, Wikipedia, admissions consultants, blogs, or prep companies.",
-  "Cite at least one official source for any score, and at least two official sources when available for any score >= 0.60. When uncertain, choose the lower bucket.",
-  "rationale must be <= 40 words. sourcesCited is an array of URL strings actually used.",
-  "Never invent contests or statistics.",
-].join("\n");
 
 export function normalizeActivityName(name) {
   return String(name || "")
@@ -458,48 +424,6 @@ function isExpired(createdAt, ttlDays = PRESTIGE_TTL_DAYS) {
   return ageMs > ttlDays * 24 * 60 * 60 * 1000;
 }
 
-/**
- * Extract the model response into the expected {score, rationale,
- * sourcesCited} JSON payload. Walks the adapter's normalized content array
- * for text blocks (the OpenRouter web plugin injects its search results into
- * the prompt, so the answer comes back as ordinary text, not tool-use blocks).
- */
-function extractJsonFromResponse(resp) {
-  if (!resp || !Array.isArray(resp.content)) return null;
-  const textParts = resp.content
-    .filter((c) => c && c.type === "text" && typeof c.text === "string")
-    .map((c) => c.text)
-    .join("\n");
-  if (!textParts) return null;
-  return parseJsonLoose(textParts);
-}
-
-function parseJsonLoose(raw) {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const start = raw.indexOf("{");
-    if (start < 0) return null;
-    let depth = 0;
-    for (let i = start; i < raw.length; i++) {
-      if (raw[i] === "{") depth += 1;
-      else if (raw[i] === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          const candidate = raw.slice(start, i + 1);
-          try {
-            return JSON.parse(candidate);
-          } catch {
-            return null;
-          }
-        }
-      }
-    }
-    return null;
-  }
-}
-
 function clamp01(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
@@ -536,8 +460,6 @@ export async function researchCompetitionPrestige({
   levelHint = null,
   benchmarkHit = null,
   stmts,
-  adapter = null,
-  options = {},
 }) {
   if (!activityName || !stmts) {
     return { score: 0, source: "invalid_input", cached: false };
@@ -548,14 +470,14 @@ export async function researchCompetitionPrestige({
   // 1. Cache lookup with TTL.
   try {
     const cached = stmts.getPrestigeCache?.get(cacheKey);
-    if (cached && !isExpired(cached.created_at)) {
+    if (cached && ["benchmark", "catalog"].includes(cached.source) && !isExpired(cached.created_at)) {
       return {
         score: Number(cached.score) || 0,
-        source: cached.source || "research",
+        source: cached.source,
         rationale: cached.rationale || null,
         sourcesCited: safeJSON(cached.sources_json) || [],
-        provider: cached.provider || null,
-        model: cached.model || null,
+        provider: null,
+        model: null,
         cached: true,
       };
     }
@@ -636,174 +558,15 @@ export async function researchCompetitionPrestige({
     return result;
   }
 
-  // 4. Web-enriched research via OpenRouter's web plugin. It only fires when
-  // the student's BYOK provider is OpenRouter — the plugin retrieves pages
-  // from the allowlisted official/.edu/.gov sources and injects them into the
-  // model's context before it answers. Any other provider / no key →
-  // deterministic signals only, so prestige is reported "unavailable".
-  if (!adapter || adapter.provider !== "openrouter" || !adapter.apiKey) {
-    return {
-      score: 0,
-      source: "unavailable",
-      rationale: "Web prestige research needs an OpenRouter API key; deterministic signals only.",
-      sourcesCited: [],
-      cached: false,
-    };
-  }
-
-  const timeoutMs = Number(options.timeoutMs || DEFAULT_TIMEOUT_MS);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  const userText = [
-    `Research the competitive prestige of "${activityName}"${levelHint ? ` at the ${levelHint} level` : ""} for U.S. college admissions.`,
-    "Relevant pages from official organizer, government, and school-hosted sources have been retrieved into your context. Cite ONLY those URLs. Then output only:",
-    '{ "score": 0.0-1.0, "rationale": "...", "sourcesCited": ["https://...", "..."] }',
-  ].join("\n");
-
-  let response;
-  try {
-    response = await callLLM({
-      provider: adapter.provider,
-      apiKey: adapter.apiKey,
-      baseUrl: adapter.baseUrl || null,
-      model: adapter.model,
-      system: PRESTIGE_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userText }],
-      maxTokens: MAX_TOKENS,
-      temperature: 0,
-      webPlugin: { enabled: true, allowedDomains: REPUTABLE_DOMAINS },
-      signal: controller.signal,
-      fetchImpl: options.fetchImpl,
-    });
-    // Optional budget accounting — the resolved adapter may carry a usage sink.
-    adapter.recordUsage?.(adapter.model, response?.usage);
-  } catch (err) {
-    clearTimeout(timer);
-    const failScore = 0;
-    const failResult = {
-      score: failScore,
-      source: "research_failed",
-      rationale: `web research failed: ${err?.code || err?.message || "unknown"}`,
-      sourcesCited: [],
-      provider: adapter.provider,
-      model: adapter.model,
-      cached: false,
-    };
-    try {
-      stmts.upsertPrestigeCache?.run(
-        cacheKey,
-        activityName,
-        levelHint || null,
-        failScore,
-        failResult.rationale,
-        JSON.stringify([]),
-        "research_failed",
-        adapter.provider,
-        adapter.model,
-        JSON.stringify(failResult),
-      );
-    } catch {
-      // Non-fatal.
-    }
-    return failResult;
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const parsed = extractJsonFromResponse(response);
-  if (!parsed || typeof parsed !== "object") {
-    const failResult = {
-      score: 0,
-      source: "research_failed",
-      rationale: "Malformed research response",
-      sourcesCited: [],
-      provider: adapter.provider,
-      model: adapter.model,
-      cached: false,
-    };
-    try {
-      stmts.upsertPrestigeCache?.run(
-        cacheKey,
-        activityName,
-        levelHint || null,
-        0,
-        failResult.rationale,
-        JSON.stringify([]),
-        "research_failed",
-        adapter.provider,
-        adapter.model,
-        JSON.stringify(failResult),
-      );
-    } catch {
-      // Non-fatal.
-    }
-    return failResult;
-  }
-
-  const score = clamp01(parsed.score);
-  const rationale = String(parsed.rationale || "").slice(0, 400);
-  const sourcesCited = Array.isArray(parsed.sourcesCited)
-    ? parsed.sourcesCited.filter((s) => typeof s === "string").slice(0, 10)
-    : [];
-  const reputableSources = sourcesCited.filter(isReputableSourceUrl);
-  if (score > 0 && reputableSources.length === 0) {
-    const failResult = {
-      score: 0,
-      source: "research_failed",
-      rationale: "Research response cited no allowed official sources.",
-      sourcesCited: [],
-      provider: adapter.provider,
-      model: adapter.model,
-      cached: false,
-    };
-    try {
-      stmts.upsertPrestigeCache?.run(
-        cacheKey,
-        activityName,
-        levelHint || null,
-        0,
-        failResult.rationale,
-        JSON.stringify([]),
-        "research_failed",
-        adapter.provider,
-        adapter.model,
-        JSON.stringify(failResult),
-      );
-    } catch {
-      // Non-fatal.
-    }
-    return failResult;
-  }
-
-  const result = {
-    score,
-    source: "research",
-    rationale,
-    sourcesCited: reputableSources,
-    provider: adapter.provider,
-    model: adapter.model,
+  return {
+    score: 0,
+    source: "unavailable",
+    rationale: "No reviewed benchmark or official catalog match is available.",
+    sourcesCited: [],
+    provider: null,
+    model: null,
     cached: false,
   };
-
-  try {
-    stmts.upsertPrestigeCache?.run(
-      cacheKey,
-      activityName,
-      levelHint || null,
-      score,
-      rationale,
-      JSON.stringify(reputableSources),
-      "research",
-      adapter.provider,
-      adapter.model,
-      JSON.stringify({ score, rationale, sourcesCited: reputableSources }),
-    );
-  } catch {
-    // Non-fatal.
-  }
-
-  return result;
 }
 
 function safeJSON(s) {

@@ -4,7 +4,7 @@
 // Per-student rebuild rules:
 //
 //   - On vault file change: debounce 90 seconds, then `graphify --update`.
-//     Coalesces editor save-storms (Logseq writes journals every few
+//     Coalesces bursts of explicit evidence and narrative updates
 //     seconds during a writing session) into a single incremental pass.
 //   - Weekly: full `graphify` rebuild (no --update). Picks up any drift
 //     and refreshes community detection from scratch.

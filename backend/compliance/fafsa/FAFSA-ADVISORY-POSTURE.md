@@ -1,57 +1,49 @@
-# FAFSA Advisory-Only Posture
+# FAFSA Advisory Posture
 
-## Classification: REGULATED (T0 deterministic where possible)
+## Scope
 
-## Core Principle
-This system provides **advisory guidance only** for FAFSA-related topics. It does NOT:
-- Accept, store, or transmit FSA IDs or credentials
-- Submit FAFSA forms on behalf of students
-- Impersonate students or act as a preparer
-- Provide binding financial advice
+FAFSA guidance is advisory only. College Counselor does not submit a FAFSA,
+act as a preparer, make an aid determination, or accept FSA IDs, passwords,
+Social Security numbers, tax credentials, or contributor credentials.
 
-## Implementation Controls
+## Safety Controls
 
-### 1. Credential Blocking (content-moderation.js)
-All input is screened for FSA ID patterns, SSN patterns, and password-like strings.
-If detected, the request is **immediately blocked** with an explanation.
+- Credential-like and sensitive identifier input is blocked before advice is
+  generated.
+- Deterministic rules are used where the repository has a current rule.
+- A regulated FAFSA claim requires current, relevant official evidence.
+- When official evidence is missing or stale, the system fails closed and
+  directs the student to Federal Student Aid instead of inventing an answer.
+- AI-generated facts, inferences, and coaching suggestions remain visibly
+  distinct.
+- There is no counselor or human review fallback.
 
-### 2. Deterministic Eligibility Check (rules-engine.js)
-FAFSA eligibility is evaluated via `runFAFSAEligibilityCheck()` using 8 deterministic rules:
-- U.S. citizenship or eligible noncitizen
-- Valid SSN (existence, not stored)
-- Enrolled/accepted at eligible institution
-- High school completion or equivalent
-- Satisfactory academic progress
-- Selective Service registration (if applicable)
-- No drug conviction during aid period (updated 2024: most convictions no longer disqualify)
-- Not in default on federal student loans
+Official FAFSA guidance should be verified at
+https://studentaid.gov/ or through the Federal Student Aid contact channels
+published there. The product must not preserve obsolete eligibility conditions
+merely because they appeared in an earlier award year.
 
-Each rule returns a clear pass/fail/unknown status with the authoritative source URL.
+## Privacy and Processing
 
-### 3. Source Restriction (source-registry.js)
-FAFSA-related answers ONLY cite from:
-- `studentaid.gov`
-- `ed.gov`
-- `fafsa.gov`
+The product runs as a local desktop application with student email/password
+authentication. PII and chat content are encrypted at rest with AES-GCM.
+OpenRouter processing requires explicit consent, and identifying fields are
+redacted before external processing. Students should not enter credentials or
+unnecessary identifying information into free-form advice prompts.
 
-No third-party financial advice sources are trusted for regulated FAFSA content.
+The local secrets administrator manages only the encryption key, OpenRouter
+API key, and official College Scorecard API key and cannot view student
+content. There is no remote dashboard, parent email notification, or human
+review queue.
 
-### 4. AI Disclosure
-Every FAFSA-related response includes:
-- English: "This is AI-generated advisory guidance. For official FAFSA help, visit studentaid.gov or call 1-800-4-FED-AID."
-- Korean: "AI가 생성한 참고용 안내입니다. 공식 FAFSA 도움은 studentaid.gov를 방문하거나 1-800-4-FED-AID로 전화하세요."
+Authenticated students can export and delete their own stored data. Institution
+context, when used, comes from the official College Scorecard source; College
+Scorecard data does not replace Federal Student Aid as the authority for FAFSA
+rules.
 
-### 5. FAFSA Contributor Rules (2024-2025+ cycle)
-The system recognizes the FAFSA Simplification Act changes:
-- Contributors (parents, spouse) must provide consent and tax info via their own FSA ID
-- System explains the contributor process but never collects contributor credentials
-- Consent type `FAFSA_CONTRIBUTOR` tracks that the student was informed
+## Maintenance
 
-## Authoritative Sources
-- Federal Student Aid: https://studentaid.gov
-- FAFSA on the Web: https://fafsa.gov
-- ED.gov Financial Aid: https://www.ed.gov/financial-aid
-
-## Review Triggers
-- Any FAFSA query where no verified source exists triggers human review
-- Low-confidence FAFSA answers (confidence < 0.6) are flagged for counselor review
+FAFSA rules and forms change by award year. Each release must verify rule text,
+deadlines, contributor guidance, contacts, and citations against current
+Federal Student Aid sources. This document is an engineering posture, not
+financial or legal advice and not a compliance certification.

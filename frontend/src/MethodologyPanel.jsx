@@ -1,139 +1,92 @@
 import { useEffect, useState } from "react";
 
-// ═══════════════════════════════════════════════════════════════════════
-// MethodologyPanel — public, read-only transparency page. Fetches the live
-// /api/methodology surface so the in-app explanation always matches the
-// running system (weights, thresholds, data freshness, model migration).
-// ═══════════════════════════════════════════════════════════════════════
-
 const C = {
-  bg: "#0a0e17", card: "rgba(255,255,255,0.04)", border: "rgba(255,255,255,0.10)",
-  text: "#e2e8f0", sub: "#94a3b8", muted: "#64748b",
-  green: "#68d391", orange: "#f6ad55", red: "#f56565", blue: "#63b3ed", purple: "#a78bfa",
+  bg: "#0a0e17", panel: "#171d26", border: "#394453",
+  text: "#edf2f7", sub: "#b4bfcc", muted: "#96a4b5",
+  green: "#9ce5b6", orange: "#ffd28a", blue: "#9ed1ff",
 };
-const box = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, marginBottom: 16 };
-const h2 = { fontSize: 16, fontWeight: 700, marginBottom: 10, color: C.text };
+const box = { background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, marginBottom: 16 };
+const h2 = { fontSize: 17, fontWeight: 700, margin:"0 0 10px", color: C.text };
+const line = { color:C.sub, fontSize:13, lineHeight:1.65 };
 
-function pct(n) { return `${Math.round((n || 0) * 100)}%`; }
+function pct(value) { return `${Math.round((Number(value) || 0) * 100)}%`; }
 
-// `embedded` renders the panel for the in-app modal (no full-screen wrapper);
-// the standalone /methodology.html page renders it full-page by default.
 export default function MethodologyPanel({ embedded = false } = {}) {
-  const [m, setM] = useState(null);
-  const [err, setErr] = useState("");
+  const [methodology, setMethodology] = useState(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/methodology")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(setM)
-      .catch((e) => setErr(e.message));
+    const controller = new AbortController();
+    fetch("/api/methodology", { signal:controller.signal })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then(setMethodology)
+      .catch((reason) => { if (reason.name !== "AbortError") setError(reason.message); });
+    return () => controller.abort();
   }, []);
 
-  const outerStyle = embedded
-    ? { color: C.text }
-    : { minHeight: "100vh", background: C.bg, color: C.text, padding: "32px 16px" };
+  const content = (
+    <div style={{maxWidth:760,margin:"0 auto"}}>
+      <h1 style={{fontSize:26,margin:"0 0 6px",letterSpacing:0}}>How guidance works</h1>
+      <p style={{...line,margin:"0 0 22px"}}>Weights, evidence boundaries, model processing, cost controls, and student rights.</p>
 
-  return (
-    <div style={outerStyle}>
-      <div style={{ maxWidth: 720, margin: "0 auto" }}>
-        <h1 style={{ fontSize: 24, marginBottom: 4 }}>How scoring works</h1>
-        <p style={{ color: C.sub, fontSize: 14, marginBottom: 20 }}>
-          Full transparency on the weights, thresholds, data sources, and model policy behind every recommendation.
-        </p>
+      {error && <p role="alert" style={{...box,borderColor:"#a94d55",color:"#ffb4ba"}}>Methodology is unavailable: {error}</p>}
+      {!methodology && !error && <p role="status" style={{...box,color:C.muted}}>Loading methodology...</p>}
 
-        {err && <div style={{ ...box, borderColor: C.red, color: C.red }}>⚠ Couldn’t load methodology: {err}</div>}
-        {!m && !err && <div style={{ ...box, color: C.muted }}>Loading…</div>}
+      {methodology && (
+        <>
+          <section style={{...box,borderColor:"#3f8a69"}} aria-labelledby="method-summary">
+            <h2 id="method-summary" style={h2}>Rules first, evidence labeled</h2>
+            <p style={line}>{methodology.summary}</p>
+            <p style={line}>Claims are shown as verified official facts, student-provided facts, or coaching suggestions. Missing or expired evidence produces a limitation instead of a guessed answer.</p>
+          </section>
 
-        {m && (
-          <>
-            <div style={{ ...box, borderColor: "rgba(104,211,145,0.3)" }}>
-              <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.6 }}>{m.summary}</div>
-            </div>
-
-            {/* EC weights */}
-            <div style={box}>
-              <div style={h2}>Extracurricular factors &amp; weights</div>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ color: C.muted, textAlign: "left" }}>
-                    <th style={{ padding: "4px 6px" }}>Factor</th>
-                    <th style={{ padding: "4px 6px", width: 70 }}>Weight</th>
-                    <th style={{ padding: "4px 6px" }}>What it measures</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {m.ecScoring.factors.map((f) => (
-                    <tr key={f.factor} style={{ borderTop: `1px solid ${C.border}` }}>
-                      <td style={{ padding: "6px", fontWeight: 600 }}>{f.label}</td>
-                      <td style={{ padding: "6px", color: C.purple, fontWeight: 700 }}>{pct(f.weight)}</td>
-                      <td style={{ padding: "6px", color: C.sub }}>{f.what}</td>
+          {methodology.ecScoring?.factors && (
+            <section style={box} aria-labelledby="method-ec">
+              <h2 id="method-ec" style={h2}>Extracurricular factors and weights</h2>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                  <thead><tr style={{color:C.muted,textAlign:"left"}}><th scope="col" style={{padding:8}}>Factor</th><th scope="col" style={{padding:8}}>Weight</th><th scope="col" style={{padding:8}}>What it measures</th></tr></thead>
+                  <tbody>{methodology.ecScoring.factors.map((factor) => (
+                    <tr key={factor.factor} style={{borderTop:`1px solid ${C.border}`}}>
+                      <th scope="row" style={{padding:8,textAlign:"left"}}>{factor.label}</th>
+                      <td style={{padding:8,color:C.blue,fontWeight:700}}>{pct(factor.weight)}</td>
+                      <td style={{padding:8,color:C.sub}}>{factor.what}</td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div style={{ color: C.muted, fontSize: 12, marginTop: 10 }}>
-                Weights sum to {m.ecScoring.weightsSumTo}. Composite = {m.ecScoring.composite.formula}.
+                  ))}</tbody>
+                </table>
               </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-                {m.ecScoring.composite.thresholds.map((t) => (
-                  <span key={t.label} style={{ fontSize: 12, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 9px" }}>
-                    ≥ {t.atLeast.toFixed(2)} → {t.label}
-                  </span>
-                ))}
-              </div>
-            </div>
+            </section>
+          )}
 
-            {/* Narrative / human oversight */}
-            <div style={box}>
-              <div style={h2}>Narrative, essays &amp; human oversight</div>
-              <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.6 }}>{m.narrativeQuality.explanation}</div>
-              <div style={{ color: C.green, fontSize: 12, marginTop: 8 }}>✓ No ghostwriting — drafts stay in your own voice.</div>
-              <div style={{ color: C.orange, fontSize: 12, marginTop: 8, lineHeight: 1.6 }}>{m.narrativeQuality.humanOversight}</div>
-            </div>
+          <section style={box} aria-labelledby="method-sources">
+            <h2 id="method-sources" style={h2}>Data sources and freshness</h2>
+            {Object.entries(methodology.dataSources || {}).filter(([, value]) => value && typeof value === "object").map(([key, value]) => (
+              <p key={key} style={{...line,margin:"5px 0"}}><strong style={{color:C.text}}>{key}</strong>: {value.source || "Not reported"}{value.year ? ` (${value.year})` : ""}{value.freshness ? `; ${value.freshness}` : ""}</p>
+            ))}
+            {methodology.dataSources?.internationalCaveat && <p style={{...line,color:C.orange}}>{methodology.dataSources.internationalCaveat}</p>}
+          </section>
 
-            {/* Data sources */}
-            <div style={box}>
-              <div style={h2}>Data sources &amp; freshness</div>
-              {Object.entries(m.dataSources).filter(([, v]) => v && typeof v === "object").map(([k, v]) => (
-                <div key={k} style={{ fontSize: 13, color: C.sub, lineHeight: 1.7 }}>
-                  <strong style={{ color: C.text }}>{k}</strong>: {v.source}{v.freshness ? ` — ${v.freshness}` : ""}{v.refresh ? ` — ${v.refresh}` : ""}{v.year ? ` (${v.year})` : ""}{v.latestCycleIngested ? ` — latest cycle: ${v.latestCycleIngested}` : ""}{v.lastRefreshed ? ` — last auto-refresh ${new Date(v.lastRefreshed).toLocaleDateString()}` : ""}
-                </div>
-              ))}
-              <div style={{ color: C.orange, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>{m.dataSources.internationalCaveat}</div>
-            </div>
+          <section style={box} aria-labelledby="method-ai">
+            <h2 id="method-ai" style={h2}>External AI processing and cost</h2>
+            <p style={line}>The device administrator configures one OpenRouter key. Students never enter, receive, or select provider credentials.</p>
+            <p style={line}>Only redacted request context needed for a response is sent to allowlisted OpenRouter models. The app does not use general web search for sourcing.</p>
+            <p style={line}>Paid model use has a hard monthly limit of $10 for grades 9-11 and $15 for grade 12. Unknown-price models are blocked rather than counted as free.</p>
+          </section>
 
-            {/* Model transparency */}
-            <div style={box}>
-              <div style={h2}>Model transparency &amp; freshness</div>
-              <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.6, marginBottom: 8 }}>{m.modelTransparency.whyItMatters}</div>
-              <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.7 }}>
-                <strong style={{ color: C.text }}>Provider</strong>: {m.modelTransparency.provider?.policy}
-                {m.modelTransparency.provider?.catalog && (
-                  <div style={{ color: C.muted, fontSize: 12 }}>
-                    OpenRouter live catalog: {m.modelTransparency.provider.catalog.reachable
-                      ? `${m.modelTransparency.provider.catalog.count} models`
-                      : "unreachable (using fallback list)"}
-                    {m.modelTransparency.provider.catalog.lastFetched ? ` · fetched ${new Date(m.modelTransparency.provider.catalog.lastFetched).toLocaleString()}` : ""}
-                  </div>
-                )}
-                {m.modelTransparency.provider?.status?.openrouter && Array.isArray(m.modelTransparency.provider.status.openrouter.proposals) && m.modelTransparency.provider.status.openrouter.proposals.length > 0 && (
-                  <div style={{ color: C.orange, fontSize: 12 }}>
-                    {m.modelTransparency.provider.status.openrouter.proposals.length} recommended-model update(s) awaiting your approval
-                  </div>
-                )}
-              </div>
-            </div>
+          <section style={box} aria-labelledby="method-review">
+            <h2 id="method-review" style={h2}>Human review is not active</h2>
+            <p style={line}>No counselor or administrator is reviewing responses in this release. Regulated questions without sufficient current evidence must fail closed. AI output is informational and should be checked against official sources.</p>
+          </section>
 
-            {/* Your controls */}
-            <div style={box}>
-              <div style={h2}>Your controls</div>
-              {Object.values(m.yourControls).map((v, i) => (
-                <div key={i} style={{ fontSize: 13, color: C.sub, lineHeight: 1.7 }}>• {v}</div>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
+          <section style={box} aria-labelledby="method-rights">
+            <h2 id="method-rights" style={h2}>Student controls</h2>
+            <p style={line}>Students can export their complete account data, delete the account and associated records, cancel a pending request, and edit generated narrative drafts before saving.</p>
+          </section>
+        </>
+      )}
     </div>
   );
+
+  if (embedded) return <div style={{color:C.text}}>{content}</div>;
+  return <main style={{minHeight:"100dvh",background:C.bg,color:C.text,padding:"32px 16px"}}>{content}</main>;
 }

@@ -49,20 +49,14 @@ const COLLEGE_ALIASES = {
 };
 
 // ─── Model configuration ───
-// Last-resort DEFAULT model ids, used only when neither a per-student BYOK
-// override nor an env override is present. Sourced from the OpenRouter tier
-// table (the default provider after the OpenRouter-only migration) so this
-// registry stays a single source of truth with llm-adapters/tier-defaults and
-// never ships a hard-coded model id that the live catalog no longer serves.
+// Packaged OpenRouter tier defaults. The adapter validates these ids against
+// the release allowlist before sending a request.
 // The MODEL_TIERS.{HAIKU,SONNET,OPUS} keys are legacy tier *labels* (= small/
 // medium/large), not provider model ids — see policy-router.js.
 const DEFAULT_MODELS = {
   [MODEL_TIERS.HAIKU]:  TIER_DEFAULTS.openrouter.small,
   [MODEL_TIERS.SONNET]: TIER_DEFAULTS.openrouter.medium,
   [MODEL_TIERS.OPUS]:   TIER_DEFAULTS.openrouter.large,
-  // Embedded in-process model (Pillar 1/2). Resolved against the embedded
-  // provider's tier table — no remote provider involved.
-  [MODEL_TIERS.EMBEDDED_SMALL]: TIER_DEFAULTS.embedded?.small || "qwen2.5-1.5b-instruct.q4_k_m",
   // Strategy Council (Pillar 9). No single model — the dispatcher reads
   // this tier and routes to council.convene() instead of callLLM.
   [MODEL_TIERS.COUNCIL]: null,
@@ -87,7 +81,6 @@ export function buildOrchestration({
   factStmts,
   evidenceStmts,
   catalog,
-  config = {},
   graphVaultContext = "",
 }) {
   const cleanQuery = (query || "").trim();
@@ -111,7 +104,7 @@ export function buildOrchestration({
   const updatedRouting = routeRequest(cleanQuery, {}, evidence);
 
   // Step 5: Determine execution plan
-  const modelConfig = resolveModelConfig(config);
+  const modelConfig = resolveModelConfig();
   const executionPlan = buildExecutionPlan(updatedRouting, modelConfig, evidence);
 
   // Step 6: Build prompt package (only if model call needed)
@@ -186,25 +179,20 @@ function buildExecutionPlan(routing, modelConfig, evidence) {
   }
 
   const model = modelConfig[modelTier] || DEFAULT_MODELS[modelTier];
-  const isEmbedded = modelTier === MODEL_TIERS.EMBEDDED_SMALL;
 
   return {
     requiresModel: true,
     requiresCouncil: false,
     tier: modelTier,
     model,
-    // Hint to the dispatcher: when isEmbedded, callLLM() should be invoked
-    // with `provider: "embedded"`. Other tiers use the student's BYOK row.
-    provider: isEmbedded ? "embedded" : null,
-    reason: isEmbedded
-      ? `Routine ${classification.topicType} call — running on embedded ${model} (zero cost).`
-      : `${classification.topicType} topic requires ${modelTier}-tier synthesis.`,
+    provider: "openrouter",
+    reason: `${classification.topicType} topic requires ${modelTier}-tier synthesis.`,
     steps: [
       { agent: "retrieval", action: "gather_evidence", evidenceCount: evidence.length },
       { agent: modelTier, action: "grounded_synthesis", model },
       { agent: "answer_composer", action: "compose_three_lane_response" },
     ],
-    promptCacheEligible: classification.subIntent === "fafsa" && !!modelConfig.fafsaCaching && !isEmbedded,
+    promptCacheEligible: classification.subIntent === "fafsa" && !!modelConfig.fafsaCaching,
   };
 }
 
@@ -345,33 +333,20 @@ function resolveCollegeReferences(query) {
   return matched;
 }
 
-// ─── Resolve model configuration from env ───
-// Optionally accepts a `provider` arg so callers from the generalized
-// /api/llm path can get provider-appropriate defaults (gpt-4o-mini for
-// OpenAI, gemini-2.0-flash for Google, etc.). The default provider is
-// OpenRouter after the OpenRouter-only migration — an unknown provider also
-// falls back to the OpenRouter tier table rather than a now-removed Anthropic
-// one (which previously left `tiers` undefined and threw on `tiers.small`).
-function resolveModelConfig(config, provider = "openrouter") {
-  const tiers = TIER_DEFAULTS[provider] || TIER_DEFAULTS.openrouter;
-  const smallEnv  = config.LLM_SMALL_MODEL  || config.ROUTER_MODEL;
-  const mediumEnv = config.LLM_MEDIUM_MODEL || config.STRATEGIST_MODEL;
-  const largeEnv  = config.LLM_LARGE_MODEL;
+// Model selection is packaged with the application. Clients, student records,
+// and environment variables cannot substitute arbitrary model ids.
+function resolveModelConfig() {
   return {
-    [MODEL_TIERS.HAIKU]:  smallEnv  || tiers.small  || DEFAULT_MODELS[MODEL_TIERS.HAIKU],
-    [MODEL_TIERS.SONNET]: mediumEnv || tiers.medium || DEFAULT_MODELS[MODEL_TIERS.SONNET],
-    [MODEL_TIERS.OPUS]:   largeEnv  || tiers.large  || DEFAULT_MODELS[MODEL_TIERS.OPUS],
-    // Anthropic prompt-caching (cache_control) was removed with the migration;
-    // no current provider in this path uses it, so FAFSA prompts are never
-    // flagged cache-eligible here.
+    [MODEL_TIERS.HAIKU]: DEFAULT_MODELS[MODEL_TIERS.HAIKU],
+    [MODEL_TIERS.SONNET]: DEFAULT_MODELS[MODEL_TIERS.SONNET],
+    [MODEL_TIERS.OPUS]: DEFAULT_MODELS[MODEL_TIERS.OPUS],
     fafsaCaching: false,
   };
 }
 
 // ─── Model id guard (shape-only) ───
-// The historic whitelist has been removed — any LLM provider the student
-// brings is fair game. What we still block is injection via the `model`
-// field: non-strings, whitespace, control characters, overlong values.
+// Shape guard retained for compatibility. The adapter applies the stronger
+// packaged OpenRouter allowlist before every network request.
 export function isReasonableModelId(model) {
   return isReasonableModelIdAdapter(model);
 }

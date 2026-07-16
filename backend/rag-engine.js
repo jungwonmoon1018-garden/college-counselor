@@ -3,7 +3,7 @@
 //
 // Changes from original:
 //   - Student PII lives in pii-vault.js, NOT here
-//   - BYOK / API key management moved to pii-vault.js
+//   - Provider credentials are never stored in student records
 //   - Percentile computation delegates to rules-engine.js
 //   - Context assembly returns structured summaries (100-200 tokens)
 //     instead of raw data dumps
@@ -565,11 +565,13 @@ export function prepareRAGStatements(db) {
     deleteThreadMessages: db.prepare(`DELETE FROM chat_messages WHERE thread_id IN (SELECT id FROM chat_threads WHERE id = ? AND student_id = ?)`),
     insertMessage: db.prepare(`INSERT INTO chat_messages (thread_id, role, content, attachment_name) VALUES (?, ?, ?, ?)`),
     listMessages: db.prepare(`SELECT id, role, content, attachment_name, created_at FROM chat_messages WHERE thread_id = ? ORDER BY id ASC LIMIT ?`),
+    // Message bodies are encrypted. Fetch a bounded set of candidates and
+    // decrypt/filter inside chat-history.js instead of applying SQL LIKE.
     searchMessages: db.prepare(`
       SELECT m.id, m.thread_id, m.role, m.content, m.created_at, t.title
       FROM chat_messages m JOIN chat_threads t ON m.thread_id = t.id
-      WHERE t.student_id = ? AND t.archived_at IS NULL AND lower(m.content) LIKE lower(?)
-      ORDER BY m.id DESC LIMIT 30
+      WHERE t.student_id = ? AND t.archived_at IS NULL
+      ORDER BY m.id DESC LIMIT ?
     `),
 
     // ─── College values ───
@@ -672,6 +674,25 @@ export function prepareRAGStatements(db) {
       updateStatus: db.prepare(`UPDATE student_deadlines SET status = ?, updated_at = datetime('now') WHERE id = ? AND student_id = ?`),
       updateFields: db.prepare(`UPDATE student_deadlines SET title = COALESCE(?, title), due_at = COALESCE(?, due_at), category = COALESCE(?, category), notes = COALESCE(?, notes), college_ids_json = COALESCE(?, college_ids_json), updated_at = datetime('now') WHERE id = ? AND student_id = ?`),
       delete: db.prepare(`DELETE FROM student_deadlines WHERE id = ? AND student_id = ?`),
+      // Cascade delete when a university is removed from the college list.
+      // The route escapes the title pattern, and JSON membership is exact so
+      // a short unitId cannot match a different school's longer identifier.
+      deleteBySchool: db.prepare(`
+        DELETE FROM student_deadlines
+        WHERE student_id = ?
+          AND ( LOWER(title) LIKE ? ESCAPE '!'
+             OR (? IS NOT NULL AND EXISTS (
+               SELECT 1
+               FROM json_each(
+                 CASE
+                   WHEN json_valid(student_deadlines.college_ids_json)
+                     THEN student_deadlines.college_ids_json
+                   ELSE '[]'
+                 END
+               )
+               WHERE CAST(json_each.value AS TEXT) = ?
+             )) )
+      `),
       countOpenUpcoming: db.prepare(`SELECT COUNT(*) AS total FROM student_deadlines WHERE student_id = ? AND status = 'open' AND date(due_at) >= date('now')`),
     },
 

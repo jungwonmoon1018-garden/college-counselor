@@ -73,9 +73,34 @@ describe("enforceGates", () => {
   });
 
   it("allows a REGULATED topic once verified evidence exists", () => {
-    const result = enforceGates(TOPIC_TYPES.REGULATED, "fafsa", [{ confidence: "verified" }]);
+    const result = enforceGates(TOPIC_TYPES.REGULATED, "fafsa", [{
+      fact_key: "fafsa_eligibility",
+      confidence: "verified",
+      trust_level: "official",
+      source_url: "https://studentaid.gov/apply-for-aid/fafsa",
+      source_domain: "studentaid.gov",
+      expires_at: "2099-01-01T00:00:00.000Z",
+    }]);
     assert.equal(result.allowed, true);
     assert.ok(result.gates.some((g) => g.gate === "source_verification" && g.passed === true));
+  });
+
+  it("rejects extracted, expired, and irrelevant evidence", () => {
+    const common = {
+      fact_key: "fafsa_eligibility",
+      source_url: "https://studentaid.gov",
+      source_domain: "studentaid.gov",
+      trust_level: "official",
+    };
+    assert.equal(enforceGates(TOPIC_TYPES.REGULATED, "fafsa", [
+      { ...common, confidence: "extracted" },
+    ]).allowed, false);
+    assert.equal(enforceGates(TOPIC_TYPES.REGULATED, "fafsa", [
+      { ...common, confidence: "verified", expires_at: "2000-01-01T00:00:00.000Z" },
+    ]).allowed, false);
+    assert.equal(enforceGates(TOPIC_TYPES.HIGH_STAKES, "deadlines", [
+      { ...common, confidence: "verified", expires_at: "2099-01-01T00:00:00.000Z" },
+    ]).allowed, false);
   });
 });
 
@@ -85,22 +110,29 @@ describe("selectModelTier", () => {
     assert.equal(tier, MODEL_TIERS.NONE);
   });
 
-  it("returns SONNET for general coaching", () => {
+  it("returns the cheapest tier for general coaching", () => {
     const tier = selectModelTier(TOPIC_TYPES.COACHING, "general", "simple");
-    assert.equal(tier, MODEL_TIERS.SONNET);
+    assert.equal(tier, MODEL_TIERS.HAIKU);
   });
 
-  it("convenes the COUNCIL for heavy strategic coaching (essay/ec_strategy)", () => {
-    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex"), MODEL_TIERS.COUNCIL);
-    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "ec_strategy", "simple"), MODEL_TIERS.COUNCIL);
-    // Inside a council-spawned sub-call (allowCouncil:false) it falls back to
-    // OPUS instead of recursing into another council.
-    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex", null, { allowCouncil: false }), MODEL_TIERS.OPUS);
+  it("convenes Council only after an explicit action", () => {
+    assert.equal(selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex"), MODEL_TIERS.SONNET);
+    assert.equal(
+      selectModelTier(TOPIC_TYPES.COACHING, "essay", "complex", null, { explicitCouncil: true }),
+      MODEL_TIERS.COUNCIL,
+    );
   });
 
-  it("escalates a regulated query to OPUS after a low-confidence Sonnet attempt", () => {
+  it("does not escalate cost without a separate budget approval", () => {
     const tier = selectModelTier(TOPIC_TYPES.REGULATED, "fafsa", "complex", { tier: MODEL_TIERS.SONNET, confidence: 0.2 });
-    assert.equal(tier, MODEL_TIERS.OPUS);
+    assert.equal(tier, MODEL_TIERS.SONNET);
+    assert.equal(selectModelTier(
+      TOPIC_TYPES.REGULATED,
+      "fafsa",
+      "complex",
+      { tier: MODEL_TIERS.SONNET, confidence: 0.2 },
+      { allowPaidEscalation: true, budgetApproved: true },
+    ), MODEL_TIERS.OPUS);
   });
 });
 
@@ -123,7 +155,15 @@ describe("routeRequest", () => {
   it("returns a complete routing decision", () => {
     // Pass verified evidence so the regulated gate allows the full decision
     // shape (classification + gateResult + modelTier + isDeterministic).
-    const result = routeRequest("Am I eligible for FAFSA?", {}, [{ confidence: "verified" }]);
+    const result = routeRequest("Am I eligible for FAFSA?", {}, [{
+      fact_key: "fafsa_eligibility",
+      fact_value: "Eligibility depends on federal requirements.",
+      confidence: "verified",
+      trust_level: "official",
+      source_url: "https://studentaid.gov",
+      source_domain: "studentaid.gov",
+      expires_at: "2099-01-01T00:00:00.000Z",
+    }]);
     assert.ok(result.classification.topicType);
     assert.ok(typeof result.isDeterministic === "boolean");
     assert.ok(result.gateResult);

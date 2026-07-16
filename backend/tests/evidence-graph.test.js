@@ -13,6 +13,8 @@ import {
   insertEvidence,
   getEvidenceProfile,
   buildStudentDimensionProfile,
+  searchEvidence,
+  seedCollegeEvidence,
 } from "../evidence-graph.js";
 
 let db, stmts;
@@ -103,6 +105,34 @@ describe("getEvidenceProfile", () => {
   it("returns empty for unknown entity", () => {
     const profile = getEvidenceProfile(stmts, "college", "NONEXISTENT");
     assert.equal(profile.totalCount, 0);
+  });
+});
+
+describe("evidence lifecycle and semantic seeding", () => {
+  it("seeds bundled college evidence idempotently without claiming official provenance", () => {
+    const localDb = new Database(":memory:");
+    initEvidenceGraph(localDb);
+    const localStmts = prepareEvidenceStatements(localDb);
+    const profiles = [{
+      unitId: "100",
+      name: "Example University",
+      dataYear: 2024,
+      topMajors: ["Computer Science"],
+      apCoursesValued: ["Calculus BC"],
+      ecEmphasis: ["Robotics"],
+    }];
+    seedCollegeEvidence(localStmts, profiles, localDb);
+    seedCollegeEvidence(localStmts, profiles, localDb);
+    const rows = localDb.prepare("SELECT * FROM evidence_items").all();
+    assert.equal(rows.length, 3);
+    assert.ok(rows.every((row) => row.trust_level === "inferred"));
+    assert.ok(rows.every((row) => row.provenance_type === "bundled_baseline"));
+    localDb.close();
+  });
+
+  it("uses token search and ignores wildcard-only input", () => {
+    assert.ok(searchEvidence(stmts, "MIT research evidence", 10).length > 0);
+    assert.deepEqual(searchEvidence(stmts, "%_%%", 10), []);
   });
 });
 

@@ -29,6 +29,7 @@ const SUBINTENT_TO_DECISION = {
   college_list: DECISION_TYPES.COLLEGE_LIST,
   ec_strategy: DECISION_TYPES.EC_STRATEGY,
   course_selection: DECISION_TYPES.COURSE_SELECTION,
+  course_planning: DECISION_TYPES.COURSE_SELECTION, // policy-router's course sub-intent
   essay: DECISION_TYPES.NARRATIVE_ARC,
   strategy: DECISION_TYPES.OTHER,
 };

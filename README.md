@@ -1,40 +1,80 @@
-# College Counselor — Monorepo
+# College Counselor
 
-A provider-agnostic (BYOK) AI college-application counselor, built rules-first
-with FAFSA / FERPA / Korea-PIPA compliance, a PII vault (AES-256-GCM), an
-evidence graph, and tiered LLM routing.
+College Counselor is a local desktop application for evidence-grounded college
+application guidance. It combines deterministic FAFSA and deadline rules,
+student-specific planning tools, source-aware AI coaching, and explicit
+uncertainty instead of admissions guarantees.
+
+The supported deployment is a single household on Windows or macOS. Student
+records stay on that computer. OpenRouter receives redacted text only after the
+student grants the external-processing consents.
 
 ## Packages
 
-| Path | Stack | Description |
-|------|-------|-------------|
-| [`backend/`](./backend) | Node/Express + better-sqlite3 (ESM) | API, PII vault, rules/positioning engine, CDS store, BYOK LLM routing, web grounding |
-| [`frontend/`](./frontend) | React + Vite | Single-page counselor UI (chat, College Fit, ECs, courses, deadlines) |
+| Path | Purpose |
+| --- | --- |
+| `desktop/` | Electron host, operating-system secret storage, backend lifecycle, NSIS/DMG packaging |
+| `frontend/` | React student application and separate administrator screen |
+| `backend/` | Local Express API, encrypted PII vault, evidence/rules engines, IPEDS integration |
 
-The frontend has a **Disclosures** button in the chat sidebar that opens a panel
-explaining the tool's AI usage, advisory-only scope, FAFSA status, and
-data/privacy practices.
+The application deliberately has no student BYOK flow, arbitrary LLM endpoint,
+general web-search provider, Logseq integration, remote counselor dashboard, or
+parent-notification email endpoint.
 
-This repo was combined from two previously separate repositories; the full
-commit history of each is preserved under its subdirectory.
+## Trust model
 
-## Quick start (web/dev)
+- The backend binds to a random `127.0.0.1` port and is not a LAN service.
+- Student accounts require email and password; passwords and recovery codes are
+  stored as salted hashes.
+- One localhost-only administrator can configure only the encryption,
+  OpenRouter, and IPEDS/College Scorecard keys.
+- Secret values are encrypted with Windows DPAPI or macOS Keychain through
+  Electron `safeStorage`; they are never returned to the renderer.
+- Student content is encrypted at rest. Export and deletion cover all
+  student-owned records, sessions, attachments, vectors, and cached files.
+- Human review is not available in this release. The UI must never claim that
+  an answer has been reviewed by a counselor.
 
-```bash
-# Backend (http://localhost:3001)
-cd backend && npm install && npm run dev
+## Cost limits
 
-# Frontend (http://localhost:5173, proxies /api to :3001)
-cd frontend && npm install && npm run dev
+Paid model calls are capped per student per calendar month:
+
+- Grades 9-11: USD 10
+- Grade 12: USD 15
+
+The server reserves the worst-case request cost before calling OpenRouter.
+Unknown-price models and calls that would exceed the cap are rejected. Strategy
+Council is explicit-only and shows its estimated maximum cost before starting.
+
+## Development
+
+Node.js 22.12 or newer is required.
+
+```powershell
+cd backend
+npm install
+npm test
+
+cd ..\frontend
+npm install
+npm run build
+
+cd ..\desktop
+npm install
+npm start
 ```
 
-Backend databases live in `backend/data/` and are **gitignored** — they hold
-real student PII and per-student BYOK API keys. Never commit them.
+Development may provide the three server secrets through environment variables.
+Packaged production builds use Electron `safeStorage` instead.
 
-## Native / mobile clients
+## Build installers
 
-See [`docs/SESSION-SUMMARY.md`](./docs/SESSION-SUMMARY.md) for an architecture
-and API orientation aimed at building macOS, Windows, and Android clients
-against this backend.
+```powershell
+cd desktop
+npm run dist:win
+# On macOS:
+npm run dist:mac
+```
 
-Also, set the encryption key and the IPEDS (College Scorecard) API key in your `.env`. An operator LLM key is optional — students bring their own (BYOK); OpenRouter is the default provider. If you do set an operator key for server-side utility calls, use `OPENROUTER_API_KEY` (or `OPENAI_API_KEY` / `GOOGLE_API_KEY`).
+See [backend/SETUP.md](backend/SETUP.md) for administrator setup and
+[backend/DEPLOY.md](backend/DEPLOY.md) for packaging and release requirements.

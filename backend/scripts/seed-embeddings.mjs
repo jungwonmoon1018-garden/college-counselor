@@ -2,10 +2,9 @@
 // ═══════════════════════════════════════════════════════════════════════
 // SEED-EMBEDDINGS — populate vectors.db so RAG semantic search lights up
 // ═══════════════════════════════════════════════════════════════════════
-// Iterates over college profiles, EC exemplars, cached CDS PDFs, and skill
-// documentation; embeds each chunk via the embedded ONNX bge-small model;
-// upserts into the `embeddings` table. Idempotent on content_hash — rerun
-// after content updates and only changed rows pay the embed cost.
+// Iterates over college profiles, EC exemplars, and cached CDS sections;
+// hashes each chunk into a deterministic local feature vector and upserts it
+// into the embeddings table. No model download is required.
 // ═══════════════════════════════════════════════════════════════════════
 
 import path from "node:path";
@@ -64,26 +63,6 @@ async function loadECExemplars() {
   }
 }
 
-async function loadSkillSections() {
-  const skillPath = path.join(BACKEND_ROOT, "skills", "collegeapp-ai", "SKILL.md");
-  if (!fs.existsSync(skillPath)) return [];
-  const raw = await fs.promises.readFile(skillPath, "utf-8");
-  // Split on H2 headings — each section becomes one row.
-  const sections = raw.split(/^##\s+/m).filter(Boolean);
-  return sections.map((s, idx) => {
-    const lines = s.split("\n");
-    const heading = lines[0].trim();
-    const body = lines.slice(1).join("\n").trim();
-    return {
-      source_type: "skill_section",
-      source_id: `skill_${idx}`,
-      source_name: heading,
-      content_text: `${heading}. ${body.slice(0, 1500)}`,
-      metadata: { skill: "collegeapp-ai" },
-    };
-  });
-}
-
 async function loadCdsSections() {
   const parsedDir = path.join(BACKEND_ROOT, "tools", "cds-cache", "parsed");
   if (!fs.existsSync(parsedDir)) return [];
@@ -129,7 +108,6 @@ async function main() {
   const rows = [
     ...(await loadCollegeProfiles()),
     ...(await loadECExemplars()),
-    ...(await loadSkillSections()),
     ...(await loadCdsSections()),
   ];
 

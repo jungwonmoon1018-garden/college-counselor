@@ -124,9 +124,10 @@ async function createStudentSession(overrides = {}) {
     state: overrides.state || "CA",
     schoolDomain: overrides.schoolDomain || "example.edu",
     majorInterest: overrides.majorInterest || "Business/Economics",
+    password: overrides.password || "test password for student account",
   });
 
-  assert.equal(register.status, 200);
+  assert.equal(register.status, 201);
   const token = register.data.token;
   assert.ok(token, "Student registration should return a session token");
 
@@ -172,9 +173,26 @@ describe("GET /api/health", () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// AUDIT ENDPOINT
+// REMOVED PUBLIC SURFACES
 // ═══════════════════════════════════════════════════════════
-describe("POST /api/audit", () => {
+describe("removed public surfaces", () => {
+  for (const [method, endpoint] of [
+    ["POST", "/api/audit"],
+    ["GET", "/api/audit/dashboard"],
+    ["POST", "/api/notify-parent"],
+    ["GET", "/api/credible-sources"],
+    ["POST", "/api/beta-signup"],
+    ["GET", "/api/beta-impact"],
+    ["GET", "/dashboard"],
+  ]) {
+    it(`${method} ${endpoint} is gone`, async () => {
+      const { status } = await req(method, endpoint, method === "POST" ? {} : null);
+      assert.equal(status, 410);
+    });
+  }
+});
+
+describe.skip("POST /api/audit (obsolete behavior)", () => {
   it("stores a valid audit event", async () => {
     const { status, data } = await req("POST", "/api/audit", {
       type: "crisis_detected",
@@ -221,7 +239,7 @@ describe("POST /api/audit", () => {
 // ═══════════════════════════════════════════════════════════
 // AUDIT DASHBOARD
 // ═══════════════════════════════════════════════════════════
-describe("GET /api/audit/dashboard", () => {
+describe.skip("GET /api/audit/dashboard (obsolete behavior)", () => {
   it("rejects unauthenticated requests", async () => {
     const { status } = await req("GET", "/api/audit/dashboard");
     assert.equal(status, 401);
@@ -251,7 +269,7 @@ describe("GET /api/audit/dashboard", () => {
 // ═══════════════════════════════════════════════════════════
 // PARENTAL NOTIFICATION
 // ═══════════════════════════════════════════════════════════
-describe("POST /api/notify-parent", () => {
+describe.skip("POST /api/notify-parent (obsolete behavior)", () => {
   it("queues a valid crisis notification", async () => {
     const { status, data } = await req("POST", "/api/notify-parent", {
       to: "parent@example.com",
@@ -497,7 +515,7 @@ describe("GET /api/baselines/status", () => {
 // ═══════════════════════════════════════════════════════════
 // COUNSELOR DASHBOARD UI
 // ═══════════════════════════════════════════════════════════
-describe("GET /dashboard", () => {
+describe.skip("GET /dashboard (obsolete behavior)", () => {
   it("rejects unauthenticated requests", async () => {
     const res = await fetch(`${BASE}/dashboard`);
     assert.equal(res.status, 401);

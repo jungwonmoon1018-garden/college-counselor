@@ -10,7 +10,7 @@ import { t } from "../i18n.js";
 
 const STATUS_NEXT = { open: "done", done: "open", snoozed: "open" };
 
-export default function DeadlineTracker({ locale = "en-US", compact = false }) {
+export default function DeadlineTracker({ locale = "en-US", compact = false, refreshKey = 0 }) {
   const [list, setList] = useState([]);
   const [summary, setSummary] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -29,7 +29,9 @@ export default function DeadlineTracker({ locale = "en-US", compact = false }) {
     } finally { setBusy(false); }
   }
 
-  useEffect(() => { refresh(); }, []);
+  // Reload on mount and whenever the parent bumps refreshKey (e.g. a school was
+  // removed from the college list and its deadlines were cascade-deleted).
+  useEffect(() => { refresh(); }, [refreshKey]);
 
   async function save() {
     if (!draft.title.trim() || !draft.dueAt) return;

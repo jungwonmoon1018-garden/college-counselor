@@ -29,6 +29,18 @@ import {
   normalizeLocale,
   localizeFriendlyLabels,
 } from "../i18n.js";
+import {
+  CONSENT_TYPES,
+  getOnboardingConsentRequirements,
+} from "../consent.js";
+import {
+  STRINGS as FRONTEND_STRINGS,
+  t as frontendT,
+} from "../../frontend/src/i18n.js";
+import {
+  deadlines as deadlineApi,
+  setLocale as setApiLocale,
+} from "../../frontend/src/api.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -314,76 +326,89 @@ test("context/bundle and /api/ec/strength ship friendlyLegendI18n", () => {
 });
 
 // ─── 7. Skill scripts wire locale ──────────────────────────────────────
-test("register.js loads i18n dynamically and localizes help + errors", () => {
-  const src = fs.readFileSync(
-    path.resolve(__dirname, "../skills/collegeapp-ai/scripts/register.js"),
-    "utf8",
-  );
-  assert.match(src, /loadI18n/, "should load i18n dynamically");
-  assert.match(src, /register\.err\.email_invalid/, "error keys should come from i18n");
-  assert.match(src, /register\.err\.consent_failed/);
-  assert.match(src, /register\.err\.narrative_save_failed/);
-  assert.match(src, /--locale/, "should document --locale flag");
-  assert.match(src, /COLLEGEAPP_LOCALE/, "should honour COLLEGEAPP_LOCALE env var");
+test("frontend API sends the persisted Korean locale on authenticated requests", async (t) => {
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  const storage = new Map();
+  const calls = [];
+
+  globalThis.window = {
+    __CC_SESSION_TOKEN__: "test-session",
+    navigator: { language: "en-US" },
+    localStorage: {
+      getItem: (key) => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, value),
+    },
+  };
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  t.after(() => {
+    globalThis.window = previousWindow;
+    globalThis.fetch = previousFetch;
+  });
+
+  setApiLocale("ko");
+  await deadlineApi.list();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/students/deadlines?locale=ko");
+  assert.equal(calls[0].options.headers["X-CollegeApp-Locale"], "ko");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer test-session");
 });
 
-test("fetch-context.js forwards locale to the backend", () => {
-  const src = fs.readFileSync(
-    path.resolve(__dirname, "../skills/collegeapp-ai/scripts/fetch-context.js"),
-    "utf8",
-  );
-  assert.match(src, /--locale/, "fetch-context should accept --locale");
-  assert.match(src, /X-CollegeApp-Locale/, "fetch-context should send X-CollegeApp-Locale header");
-  assert.match(src, /locale/, "fetch-context should append ?locale=");
+test("student chat transport forwards the active locale to the backend", () => {
+  const src = fs.readFileSync(path.resolve(__dirname, "../../frontend/src/App.jsx"), "utf8");
+  assert.match(src, /CHAT_PATH\}\?locale=\$\{encodeURIComponent\(lang\)\}/);
+  assert.match(src, /"Accept-Language":\s*lang/);
+  assert.match(src, /requestChat\([^)]*locale/);
 });
 
 // ─── 9. Round-5 Jiyeon-audit follow-ups ────────────────────────────────
-test("fetch-context.js routes stdout + stderr through i18n (no hardcoded English)", () => {
-  const src = fs.readFileSync(
-    path.resolve(__dirname, "../skills/collegeapp-ai/scripts/fetch-context.js"),
-    "utf8",
-  );
-  // The dynamic i18n loader is present (same pattern as register.js)
-  assert.match(src, /loadI18n/, "should load i18n dynamically");
-  // Error paths go through t()
-  assert.match(src, /t\("fetch\.err\.no_token"/);
-  assert.match(src, /t\("fetch\.err\.auth_expired"/);
-  assert.match(src, /t\("fetch\.err\.http"/);
-  assert.match(src, /t\("fetch\.err\.unexpected"/);
-  // --help output goes through t() too
-  assert.match(src, /printHelp\(t, locale\)/);
-  // No leftover hardcoded English error: strings
-  assert.doesNotMatch(src, /console\.error\("error: COLLEGEAPP_SESSION_TOKEN/);
-  assert.doesNotMatch(src, /console\.error\(`error: HTTP \$\{resp\.status\}/);
+test("current student UI renders its Korean locale and disclosure labels from i18n", () => {
+  const keys = [
+    "locale.label",
+    "locale.ko",
+    "chat.tools.deadlines",
+    "chat.tools.disclosure",
+    "disclosure.title",
+    "disclosure.privacy.title",
+  ];
+  for (const key of keys) {
+    assert.match(FRONTEND_STRINGS.ko[key], HANGUL, `${key} should have a Korean label`);
+    assert.equal(frontendT("ko", key), FRONTEND_STRINGS.ko[key]);
+  }
 });
 
-test("register.js localizes its final summary nextStep + unknown-flag path", () => {
-  const src = fs.readFileSync(
-    path.resolve(__dirname, "../skills/collegeapp-ai/scripts/register.js"),
-    "utf8",
-  );
-  // nextStep now renders through t() — no more hardcoded English in stdout.
-  assert.match(src, /t\("register\.nextstep\.ready"/);
-  assert.match(src, /t\("register\.nextstep\.no_narrative"/);
-  // Unknown-flag error flows through t() after locale resolution.
-  assert.match(src, /t\("register\.err\.unknown_flag"/);
-  // Top-level catch localizes the message.
-  assert.match(src, /register\.err\.unexpected/);
-  // The old hardcoded nextStep English is gone.
-  assert.doesNotMatch(src, /"export COLLEGEAPP_SESSION_TOKEN and run scripts\/fetch-context\.js"/);
+test("current registration and consent routes request localized consent copy", () => {
+  const src = fs.readFileSync(path.resolve(__dirname, "../server.js"), "utf8");
+  assert.match(src, /getOnboardingConsentRequirements\(true,\s*req\.body\?\.locale\s*\|\|\s*"en-US"\)/);
+  assert.match(src, /getOnboardingConsentRequirements\(isMinor,\s*locale\)/);
+
+  const requirements = getOnboardingConsentRequirements(true, "ko-KR");
+  assert.equal(requirements.length, 3);
+  for (const requirement of requirements) {
+    assert.match(requirement.label, HANGUL, `${requirement.consentType} label should be Korean`);
+    assert.match(requirement.description, HANGUL, `${requirement.consentType} description should be Korean`);
+  }
 });
 
-test("consent.type.* Korean friendly labels exist and register.js uses them", () => {
-  const ko = STRINGS.ko;
-  assert.match(ko["consent.type.data_processing"], /\uac1c\uc778\uc815\ubcf4/); // 개인정보
-  assert.match(ko["consent.type.ai_interaction"], /AI/);
-  assert.match(ko["consent.type.cross_border_transfer"], /\uad6d\uc678/); // 국외
-  const src = fs.readFileSync(
-    path.resolve(__dirname, "../skills/collegeapp-ai/scripts/register.js"),
-    "utf8",
+test("consent.type.* Korean labels cover every current required AI consent", () => {
+  const labels = STRINGS.ko;
+  assert.match(labels["consent.type.data_processing"], /\uac1c\uc778\uc815\ubcf4/); // 개인정보
+  assert.match(labels["consent.type.ai_interaction"], /AI/);
+  assert.match(labels["consent.type.cross_border_transfer"], /\uad6d\uc678/); // 국외
+
+  const requirements = getOnboardingConsentRequirements(true, "ko");
+  assert.deepEqual(
+    requirements.map(({ consentType }) => consentType),
+    [
+      CONSENT_TYPES.DATA_PROCESSING,
+      CONSENT_TYPES.AI_INTERACTION,
+      CONSENT_TYPES.CROSS_BORDER_TRANSFER,
+    ],
   );
-  // register.js should look up consent.type.<enum> before interpolating.
-  assert.match(src, /consent\.type\.\$\{f\.type\}/);
 });
 
 // ─── 8. Register.js help text sanity — Korean round-trip ───────────────

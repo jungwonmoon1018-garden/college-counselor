@@ -52,6 +52,11 @@ export function hashValue(value, salt = "cc_pii_salt") {
   return crypto.createHash("sha256").update(`${salt}:${value}`).digest("hex");
 }
 
+export function hashEmail(email, keyHex) {
+  const normalized = String(email || "").normalize("NFKC").trim().toLowerCase();
+  return crypto.createHmac("sha256", getKey(keyHex)).update(normalized).digest("hex");
+}
+
 // ─── Initialize PII vault database (separate from operational DB) ───
 export function initPIIVault(dataDir, encryptionKey, nodeEnv = "development") {
   const vaultPath = path.join(dataDir, "pii-vault.db");
@@ -112,46 +117,7 @@ export function initPIIVault(dataDir, encryptionKey, nodeEnv = "development") {
     CREATE INDEX IF NOT EXISTS idx_doc_retention ON document_vault(retention_expires_at, auto_delete);
     CREATE INDEX IF NOT EXISTS idx_doc_student ON document_vault(student_id);
 
-    -- API keys (BYOK) — multi-provider.
-    -- Column "provider" is one of: anthropic, openai, openai_compat, google,
-    -- openrouter, deepseek, together, zhipu, ollama, lmstudio.
-    -- Pre-existing rows default to 'anthropic' via the migration below.
-    CREATE TABLE IF NOT EXISTS student_api_keys (
-      student_id TEXT PRIMARY KEY,
-      api_key_encrypted TEXT NOT NULL,
-      key_hint TEXT,
-      subscription_tier TEXT,
-      rate_limit_requests INTEGER,
-      rate_limit_tokens INTEGER,
-      models_available TEXT,
-      subscription_checked_at TEXT,
-      provider TEXT,
-      base_url TEXT,
-      default_small_model TEXT,
-      default_medium_model TEXT,
-      default_large_model TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
   `);
-
-  // In-place migration for installations created before multi-provider.
-  const apiKeyCols = db.prepare(`PRAGMA table_info(student_api_keys)`).all().map(r => r.name);
-  const toAdd = [
-    ["provider", "TEXT"],
-    ["base_url", "TEXT"],
-    ["default_small_model", "TEXT"],
-    ["default_medium_model", "TEXT"],
-    ["default_large_model", "TEXT"],
-  ];
-  for (const [col, type] of toAdd) {
-    if (!apiKeyCols.includes(col)) {
-      db.exec(`ALTER TABLE student_api_keys ADD COLUMN ${col} ${type}`);
-    }
-  }
-  // Existing rows were all Anthropic — stamp them so downstream code has
-  // a definitive provider to route on.
-  db.exec(`UPDATE student_api_keys SET provider = 'anthropic' WHERE provider IS NULL OR provider = ''`);
 
   return { db, vaultPath, encryptionKey };
 }
@@ -175,7 +141,6 @@ export function preparePIIStatements(vault) {
     getStudentPII: db.prepare(`SELECT * FROM students_pii WHERE student_id = ?`),
     getStudentByEmailHash: db.prepare(`SELECT * FROM students_pii WHERE email_hash = ?`),
     deleteStudentPII: db.prepare(`DELETE FROM students_pii WHERE student_id = ?`),
-    isMinor: db.prepare(`SELECT is_minor FROM students_pii WHERE student_id = ?`),
 
     // Consent
     insertConsent: db.prepare(`
@@ -205,69 +170,22 @@ export function preparePIIStatements(vault) {
       DELETE FROM document_vault WHERE auto_delete = 1 AND datetime(retention_expires_at) < datetime('now')
     `),
     deleteStudentDocs: db.prepare(`DELETE FROM document_vault WHERE student_id = ?`),
-
-    // API keys
-    upsertApiKey: db.prepare(`
-      INSERT INTO student_api_keys
-        (student_id, api_key_encrypted, key_hint, provider, base_url,
-         default_small_model, default_medium_model, default_large_model)
-      VALUES (?,?,?,?,?,?,?,?)
-      ON CONFLICT(student_id) DO UPDATE SET
-        api_key_encrypted=excluded.api_key_encrypted,
-        key_hint=excluded.key_hint,
-        provider=excluded.provider,
-        base_url=excluded.base_url,
-        default_small_model=excluded.default_small_model,
-        default_medium_model=excluded.default_medium_model,
-        default_large_model=excluded.default_large_model,
-        updated_at=datetime('now')
-    `),
-    getApiKey: db.prepare(`SELECT * FROM student_api_keys WHERE student_id = ?`),
-    deleteApiKey: db.prepare(`DELETE FROM student_api_keys WHERE student_id = ?`),
-    updateSubscriptionInfo: db.prepare(`
-      UPDATE student_api_keys SET
-        subscription_tier=?, rate_limit_requests=?, rate_limit_tokens=?,
-        models_available=?, subscription_checked_at=datetime('now'), updated_at=datetime('now')
-      WHERE student_id=?
-    `),
   };
-}
-
-// ─── Decrypt+shape a student's BYOK row for LLM dispatch ──────────────
-// Returns null if the row doesn't exist or decryption fails.
-// Intended for internal code paths (narrative-fit shim, /api/llm proxy)
-// that need to spend the student's own budget instead of the operator's.
-export function lookupStudentBYOK(stmts, vault, studentId) {
-  if (!stmts || !studentId) return null;
-  const row = stmts.getApiKey?.get(studentId);
-  if (!row || !row.api_key_encrypted) return null;
-  try {
-    const apiKey = decrypt(row.api_key_encrypted, vault.encryptionKey);
-    return {
-      apiKey,
-      provider: row.provider || "anthropic",
-      baseUrl: row.base_url || null,
-      models: {
-        small: row.default_small_model || null,
-        medium: row.default_medium_model || null,
-        large: row.default_large_model || null,
-      },
-    };
-  } catch {
-    return null;
-  }
 }
 
 // ─── Store student PII ───
 export function storeStudentPII(stmts, vault, studentId, data) {
   const { encryptionKey } = vault;
-  const emailHash = data.emailHash || hashValue(data.email || "", "email_salt_cc");
+  const emailHash = data.emailHash || hashEmail(data.email, encryptionKey);
+  const normalizedEmail = data.email
+    ? String(data.email).normalize("NFKC").trim().toLowerCase()
+    : null;
 
   stmts.upsertStudentPII.run(
     studentId,
     emailHash,
     data.name ? encrypt(data.name, encryptionKey) : null,
-    data.email ? encrypt(data.email.toLowerCase().trim(), encryptionKey) : null,
+    normalizedEmail ? encrypt(normalizedEmail, encryptionKey) : null,
     data.parentEmail ? encrypt(data.parentEmail.toLowerCase().trim(), encryptionKey) : null,
     data.isMinor !== false ? 1 : 0,
   );
@@ -319,7 +237,6 @@ export function storeDocument(stmts, vault, studentId, docType, content, options
 export function deleteAllStudentPII(stmts, studentId) {
   stmts.deleteStudentPII.run(studentId);
   stmts.deleteStudentDocs.run(studentId);
-  stmts.deleteApiKey.run(studentId);
   return { deleted: true, studentId };
 }
 
@@ -356,24 +273,4 @@ function classifyDocument(docType, content) {
 // ─── Generate hashed user ID for sending to model providers ───
 export function hashStudentIdForProvider(studentId, salt = "anthropic_provider_salt") {
   return crypto.createHash("sha256").update(`${salt}:${studentId}`).digest("hex");
-}
-
-// ─── Check if BYOK is allowed for this student ───
-// The defense-in-depth check below only fires for accounts registered
-// WITHOUT the required age/parental-consent attestation (the signup
-// checkbox: "I am a high school student ages 14-18, OR I have parental/
-// guardian consent"). Every account created through the normal flow
-// passes isMinor: false on register, so this guard exists to catch
-// accounts created via direct API calls that bypass the consent UI.
-export function isBYOKAllowed(stmts, studentId) {
-  const row = stmts.isMinor.get(studentId);
-  if (!row) return { allowed: false, reason: "Student not found." };
-  if (row.is_minor === 1) {
-    return {
-      allowed: false,
-      reason: "This account was registered without the parental/guardian consent attestation. Sign out and sign back in (the signup form's age-attestation checkbox covers this), or contact your counselor.",
-      byokBlocked: true,
-    };
-  }
-  return { allowed: true };
 }

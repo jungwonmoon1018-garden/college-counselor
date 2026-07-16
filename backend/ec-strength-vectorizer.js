@@ -263,10 +263,11 @@ export function prepareECStrengthStatements(db) {
  *                                             when absent, we fall back to
  *                                             researchCompetitionPrestige using
  *                                             params.prestigeAdapter.
- * @param {object} [params.prestigeAdapter]  - {provider, apiKey, baseUrl, model}
- *                                             used for web_search research;
- *                                             when null, prestige falls back
- *                                             to benchmark-only.
+ * @param {object} [params.prestigeAdapter]  - Legacy optional compatibility
+ *                                             adapter. Current runtime relies
+ *                                             only on reviewed benchmark and
+ *                                             catalog data; no network lookup
+ *                                             occurs.
  * @param {object} [params.ragStmts]         - rag-engine statements (reads
  *                                             ec_prestige_cache, writes via
  *                                             upsertPrestigeCache + the
@@ -449,9 +450,9 @@ export async function vectorizeECStrength({
   // ─── 4. Prestige ───
   // Draws from:
   //   a) baseline_ec_competitive row when the EC matches a seeded activity
-  //      id + qualifier level (short-circuits web_search),
-  //   b) ec_prestige_cache (30-day TTL) for previously-researched contests,
-  //   c) Anthropic web_search research via competition-research.js.
+  //      id + qualifier level,
+  //   b) reviewed benchmark/catalog rows in ec_prestige_cache,
+  //   c) the packaged official-source competition catalog.
   //
   // When no adapter/stmts are available, prestige defaults to 0 with
   // source="unavailable" so tier labels still compute.
@@ -1022,16 +1023,8 @@ export function applyStrengthOverride(stmts, studentId, ecName, overrides = {}) 
  * Binds the module-level narrative-fit LLM shim to prepared cache
  * statements. Returns an object with shape { call({...}) => Promise }.
  *
- * `options` is forwarded verbatim to callHaikuForNarrativeFit — callers
- * that want narrative-fit to run against the student's BYOK key instead
- * of the operator's server key should pass a `byokLookup` callback:
- *
- *   buildDefaultLLMClient(cacheStmts, {
- *     byokLookup: () => lookupStudentBYOK(piiStmts, studentId),
- *   })
- *
- * The lookup runs lazily per-call so BYOK key rotations take effect
- * without rebuilding the client.
+ * `options` is forwarded to callHaikuForNarrativeFit. The caller may inject
+ * only the administrator-managed OpenRouter configuration.
  */
 export function buildDefaultLLMClient(cacheStmts, options = {}) {
   if (!cacheStmts) return null;

@@ -31,11 +31,57 @@ export const EVIDENCE_DIMENSIONS = [
   "mission_fit",
 ];
 
+function normalizeIdentityPart(value) {
+  return String(value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export function semanticEvidenceKey(evidence) {
+  const identity = [
+    evidence.evidence_type,
+    evidence.entity_type,
+    evidence.entity_id,
+    evidence.claim_category,
+    evidence.dimension,
+    evidence.source_domain,
+    evidence.academic_year,
+    evidence.claim,
+  ].map(normalizeIdentityPart).join("|");
+  return crypto.createHash("sha256").update(identity).digest("hex");
+}
+
+function ensureEvidenceColumn(db, name, definition) {
+  const columns = db.prepare("PRAGMA table_info(evidence_items)").all().map((row) => row.name);
+  if (!columns.includes(name)) db.exec("ALTER TABLE evidence_items ADD COLUMN " + name + " " + definition);
+}
+
+export function deduplicateEvidenceGraph(db) {
+  const rows = db.prepare("SELECT * FROM evidence_items ORDER BY updated_at DESC, created_at DESC").all();
+  const update = db.prepare("UPDATE evidence_items SET semantic_key = ? WHERE id = ?");
+  const remove = db.prepare("DELETE FROM evidence_items WHERE id = ?");
+  const seen = new Map();
+  let removed = 0;
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const key = semanticEvidenceKey(row);
+      if (seen.has(key)) {
+        remove.run(row.id);
+        removed++;
+      } else {
+        seen.set(key, row.id);
+        update.run(key, row.id);
+      }
+    }
+  });
+  tx();
+  return { removed, remaining: seen.size };
+}
+
 // ─── Schema ───
 export function initEvidenceGraph(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS evidence_items (
       id TEXT PRIMARY KEY,
+      semantic_key TEXT,
       evidence_type INTEGER NOT NULL,
       entity_type TEXT NOT NULL,
       entity_id TEXT,
@@ -55,6 +101,8 @@ export function initEvidenceGraph(db) {
       expires_at TEXT,
       superseded_by TEXT,
       academic_year TEXT,
+      provenance_type TEXT NOT NULL DEFAULT 'external_source',
+      seed_version TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -68,6 +116,11 @@ export function initEvidenceGraph(db) {
     CREATE INDEX IF NOT EXISTS idx_evidence_dimension
       ON evidence_items(dimension, evidence_type);
   `);
+  ensureEvidenceColumn(db, "semantic_key", "TEXT");
+  ensureEvidenceColumn(db, "provenance_type", "TEXT NOT NULL DEFAULT 'external_source'");
+  ensureEvidenceColumn(db, "seed_version", "TEXT");
+  deduplicateEvidenceGraph(db);
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_semantic_unique ON evidence_items(semantic_key)");
 }
 
 // ─── Prepared statements ───
@@ -75,30 +128,54 @@ export function prepareEvidenceStatements(db) {
   return {
     insertEvidence: db.prepare(`
       INSERT INTO evidence_items
-        (id, evidence_type, entity_type, entity_id, entity_name, claim, claim_category, dimension,
+        (id, semantic_key, evidence_type, entity_type, entity_id, entity_name, claim, claim_category, dimension,
          source_url, source_domain, source_title, source_accessed_at, source_snapshot_hash,
-         trust_level, confidence, verified_at, verified_by, expires_at, superseded_by, academic_year)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         trust_level, confidence, verified_at, verified_by, expires_at, superseded_by, academic_year,
+         provenance_type, seed_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(semantic_key) DO UPDATE SET
+        entity_name = excluded.entity_name,
+        claim = excluded.claim,
+        source_url = excluded.source_url,
+        source_title = excluded.source_title,
+        source_accessed_at = excluded.source_accessed_at,
+        source_snapshot_hash = excluded.source_snapshot_hash,
+        trust_level = excluded.trust_level,
+        confidence = excluded.confidence,
+        verified_at = excluded.verified_at,
+        verified_by = excluded.verified_by,
+        expires_at = excluded.expires_at,
+        superseded_by = excluded.superseded_by,
+        academic_year = excluded.academic_year,
+        provenance_type = excluded.provenance_type,
+        seed_version = excluded.seed_version,
+        updated_at = CASE WHEN evidence_items.claim != excluded.claim
+          OR COALESCE(evidence_items.source_snapshot_hash, '') != COALESCE(excluded.source_snapshot_hash, '')
+          THEN datetime('now') ELSE evidence_items.updated_at END
     `),
+    getBySemantic: db.prepare(`SELECT * FROM evidence_items WHERE semantic_key = ?`),
 
     getByEntity: db.prepare(`
       SELECT * FROM evidence_items
       WHERE entity_type = ? AND entity_id = ?
-        AND trust_level != 'expired'
+        AND trust_level NOT IN ('expired', 'stale', 'superseded')
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY evidence_type ASC, claim_category ASC
     `),
 
     getByEntityAndType: db.prepare(`
       SELECT * FROM evidence_items
       WHERE entity_type = ? AND entity_id = ? AND evidence_type = ?
-        AND trust_level != 'expired'
+        AND trust_level NOT IN ('expired', 'stale', 'superseded')
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY claim_category ASC
     `),
 
     getByDimension: db.prepare(`
       SELECT * FROM evidence_items
       WHERE dimension = ? AND entity_id = ?
-        AND trust_level != 'expired'
+        AND trust_level NOT IN ('expired', 'stale', 'superseded')
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY evidence_type ASC
     `),
 
@@ -106,13 +183,16 @@ export function prepareEvidenceStatements(db) {
       SELECT * FROM evidence_items
       WHERE evidence_type = 1 AND entity_id = ?
         AND trust_level IN ('official', 'verified')
+        AND verified_at IS NOT NULL
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY claim_category ASC
     `),
 
     searchEvidence: db.prepare(`
       SELECT * FROM evidence_items
-      WHERE (entity_name LIKE ? OR claim LIKE ?)
-        AND trust_level != 'expired'
+      WHERE (instr(lower(COALESCE(entity_name, '')), ?) > 0 OR instr(lower(claim), ?) > 0)
+        AND trust_level NOT IN ('expired', 'stale', 'superseded')
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY evidence_type ASC, confidence DESC
       LIMIT ?
     `),
@@ -141,9 +221,11 @@ export function prepareEvidenceStatements(db) {
 
 // ─── Insert evidence ───
 export function insertEvidence(stmts, evidence) {
-  const id = evidence.id || crypto.randomUUID();
-  stmts.insertEvidence.run(
+  const semanticKey = evidence.semantic_key || semanticEvidenceKey(evidence);
+  const id = evidence.id || "evidence_" + semanticKey.slice(0, 32);
+  const result = stmts.insertEvidence.run(
     id,
+    semanticKey,
     evidence.evidence_type,
     evidence.entity_type,
     evidence.entity_id || null,
@@ -163,8 +245,11 @@ export function insertEvidence(stmts, evidence) {
     evidence.expires_at || null,
     evidence.superseded_by || null,
     evidence.academic_year || null,
+    evidence.provenance_type || "external_source",
+    evidence.seed_version || null,
   );
-  return { id, inserted: true };
+  const stored = stmts.getBySemantic.get(semanticKey);
+  return { id: stored?.id || id, inserted: result.changes > 0, semanticKey };
 }
 
 // ─── Query evidence for a college with type separation ───
@@ -172,12 +257,34 @@ export function getEvidenceProfile(stmts, entityType, entityId) {
   const all = stmts.getByEntity.all(entityType, entityId);
 
   return {
+    items: all,
     official: all.filter((e) => e.evidence_type === EVIDENCE_TYPES.OFFICIAL),
     preparation: all.filter((e) => e.evidence_type === EVIDENCE_TYPES.PREPARATION),
     inferred: all.filter((e) => e.evidence_type === EVIDENCE_TYPES.INFERRED),
     totalCount: all.length,
     disclaimer: "Type 3 (inferred) evidence reflects observed patterns and should never be treated as institutional requirements or official policy.",
   };
+}
+
+export function searchEvidence(stmts, query, limit = 20) {
+  const tokens = [...new Set(
+    String(query || "").normalize("NFKC").toLowerCase()
+      .match(/[a-z0-9][a-z0-9.-]{1,}|[\u3131-\uD79D]{2,}/g) || []
+  )].slice(0, 8);
+  if (!tokens.length) return [];
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
+  const results = new Map();
+  for (const token of tokens) {
+    for (const row of stmts.searchEvidence.all(token, token, safeLimit * 2)) {
+      const current = results.get(row.id) || { row, score: 0 };
+      current.score += 1;
+      results.set(row.id, current);
+    }
+  }
+  return [...results.values()]
+    .sort((left, right) => right.score - left.score || Number(right.row.confidence) - Number(left.row.confidence))
+    .slice(0, safeLimit)
+    .map((entry) => entry.row);
 }
 
 // ─── Build dimension profile for a student ───
@@ -291,41 +398,50 @@ export function seedCollegeEvidence(stmts, collegeProfiles, db) {
       const entityId = c.unitId || c.unit_id;
       const entityName = c.name;
 
-      // Type 1: Official data from CDS / IPEDS
+      // Bundled profiles mix generated IPEDS fields with manual overrides.
+      // Without a field-level source URL they remain inferred baseline data.
       if (c.topMajors || c.top_majors_json) {
         const majors = c.topMajors || safeParseJSON(c.top_majors_json, []);
         if (majors.length > 0) {
           insertEvidence(stmts, {
-            evidence_type: EVIDENCE_TYPES.OFFICIAL,
+            evidence_type: EVIDENCE_TYPES.INFERRED,
             entity_type: "university",
             entity_id: entityId,
             entity_name: entityName,
             claim: `Top majors at ${entityName}: ${majors.join(", ")}.`,
             claim_category: "program_offerings",
-            source_domain: "nces.ed.gov",
-            source_title: "NCES IPEDS",
-            trust_level: "official",
-            confidence: 0.9,
+            source_domain: "bundled-baseline.local",
+            source_title: "Bundled college profile baseline",
+            trust_level: "inferred",
+            confidence: 0.5,
+            source_accessed_at: String(c.dataYear || c.data_year || 1970) + "-12-31T00:00:00.000Z",
+            academic_year: String(c.dataYear || c.data_year || ""),
+            provenance_type: "bundled_baseline",
+            seed_version: "college_evidence_v1",
           });
         }
       }
 
-      // Type 2: AP courses valued (program preparation signal)
+      // Manual AP preference lists are coaching heuristics, not school policy.
       if (c.apCoursesValued || c.ap_courses_valued_json) {
         const apCourses = c.apCoursesValued || safeParseJSON(c.ap_courses_valued_json, []);
         if (apCourses.length > 0) {
           insertEvidence(stmts, {
-            evidence_type: EVIDENCE_TYPES.PREPARATION,
+            evidence_type: EVIDENCE_TYPES.INFERRED,
             entity_type: "university",
             entity_id: entityId,
             entity_name: entityName,
             claim: `AP courses commonly valued by ${entityName} applicants: ${apCourses.join(", ")}.`,
             claim_category: "coursework_preparation",
             dimension: "field_preparation",
-            source_domain: "nces.ed.gov",
-            source_title: "Common Data Set / institutional reports",
-            trust_level: "verified",
-            confidence: 0.75,
+            source_domain: "bundled-baseline.local",
+            source_title: "Bundled college profile baseline",
+            trust_level: "inferred",
+            confidence: 0.5,
+            source_accessed_at: String(c.dataYear || c.data_year || 1970) + "-12-31T00:00:00.000Z",
+            academic_year: String(c.dataYear || c.data_year || ""),
+            provenance_type: "bundled_baseline",
+            seed_version: "college_evidence_v1",
           });
         }
       }
@@ -342,9 +458,13 @@ export function seedCollegeEvidence(stmts, collegeProfiles, db) {
             claim: `Activities commonly associated with successful ${entityName} applicants: ${ecs.join(", ")}. Note: This is an observed pattern, NOT an institutional requirement.`,
             claim_category: "ec_pattern",
             source_domain: "counselor_heuristics",
-            source_title: "Aggregated counselor observations and class profiles",
+            source_title: "Bundled counselor heuristic",
             trust_level: "inferred",
             confidence: 0.5,
+            source_accessed_at: String(c.dataYear || c.data_year || 1970) + "-12-31T00:00:00.000Z",
+            academic_year: String(c.dataYear || c.data_year || ""),
+            provenance_type: "bundled_baseline",
+            seed_version: "college_evidence_v1",
           });
         }
       }

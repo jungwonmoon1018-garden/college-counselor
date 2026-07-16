@@ -10,9 +10,16 @@ import CalibratedFitCard from "./components/CalibratedFitCard.jsx";
 import CourseSequencer from "./components/CourseSequencer.jsx";
 import DisclosurePanel from "./components/DisclosurePanel.jsx";
 import MethodologyPanel from "./MethodologyPanel.jsx";
-import SetupPanel from "./SetupPanel.jsx";
-import { useDraftPersistence, loadDraft, clearDraft } from "./useDraftPersistence.js";
 import { detectLocale, t as tt } from "./i18n.js";
+import {
+  COUNCIL_DECISION_OPTIONS,
+  councilErrorMessage,
+  createCouncilPayload,
+  formatCouncilResult,
+  isAmbiguousCouncilFailure,
+  reconcileCouncilFailureMessages,
+  resolveCouncilRequest,
+} from "./strategy-council.js";
 
 // ═══════════════════════════════════════════════════════════
 // GRADING SCALE — matches the standard A+/A/A-…F table
@@ -136,7 +143,8 @@ function getEmailDomain(email) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ACCOUNT STORAGE (window.storage if available, otherwise localStorage)
+// Encrypted cache storage. Account identity and session metadata are never
+// written here; the local backend is the authority for login and recovery.
 // ═══════════════════════════════════════════════════════════
 const storageApi = {
   async get(key) {
@@ -158,67 +166,28 @@ const storageApi = {
   }
 };
 
-async function loadAccounts() {
-  try {
-    const r = await storageApi.get("cc_accounts_registry");
-    return r?.value ? JSON.parse(r.value) : {};
-  } catch (err) { console.warn("Failed to load accounts:", err?.message); return {}; }
-}
-
-async function saveAccounts(accounts) {
-  try { await storageApi.set("cc_accounts_registry", JSON.stringify(accounts)); } catch (err) { console.warn("Failed to save accounts:", err?.message); }
-}
-
-async function loadSession() {
-  try {
-    const r = await storageApi.get("cc_active_session");
-    return r?.value ? JSON.parse(r.value) : null;
-  } catch { return null; }
-}
-
 // Unicode-safe base64 for storage keys (btoa crashes on non-ASCII)
 function safeBtoa(str) {
   return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))));
 }
 
-function storageKeyFor(email) {
-  return `cv3_${safeBtoa(email).replace(/[^a-zA-Z0-9]/g, "")}`;
-}
-
-// Store only a hashed email hint — passphrase must be re-entered each session for security
 async function hashEmail(email) {
-  const data = te.encode("session_hint:" + email);
+  const data = te.encode("local_vault:" + String(email || "").normalize("NFKC").trim().toLowerCase());
   const hash = await crypto.subtle.digest("SHA-256", data);
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function saveSession(session) {
-  try {
-    const prev = (await loadSession()) || {};
-    const hashed = await hashEmail(session.email);
-    const blob = { ...prev, emailHash: hashed, emailHint: session.email.split("@")[0].slice(0, 2) + "***" };
-    if (session.token) { blob.token = session.token; blob.savedAt = Date.now(); }
-    await storageApi.set("cc_active_session", JSON.stringify(blob));
-  } catch (err) { console.warn("Failed to save session:", err?.message); }
-}
-
-// Persist (or clear, when token is falsy) just the bearer session token in the
-// active-session blob, preserving the email hash/hint. The token is short-
-// lived and server-revocable (7-day TTL, stored hashed in the backend
-// session_tokens table); keeping a copy locally lets a page reload reuse the
-// session instead of stranding the student until a silent re-auth. Same trust
-// tier as the already-locally-stored encrypted vault. NEVER persist the passphrase.
-async function persistSessionToken(token) {
-  try {
-    const blob = (await loadSession()) || {};
-    if (token) { blob.token = token; blob.savedAt = Date.now(); }
-    else { delete blob.token; delete blob.savedAt; }
-    await storageApi.set("cc_active_session", JSON.stringify(blob));
-  } catch (err) { console.warn("Failed to persist session token:", err?.message); }
+async function storageKeyFor(email) {
+  return `cv4_${await hashEmail(email)}`;
 }
 
 async function clearSession() {
-  try { await storageApi.delete("cc_active_session"); } catch {}
+  // Remove legacy identity hints during migration. Current sessions are
+  // memory-only and are revoked at the backend on logout.
+  try {
+    await storageApi.delete("cc_active_session");
+    await storageApi.delete("cc_accounts_registry");
+  } catch {}
 }
 
 // ─── Authoritative server-session establishment ──────────────────────────
@@ -229,42 +198,38 @@ async function clearSession() {
 // backend was unreachable at sign-up/sign-in time).
 //
 // Sets window.__CC_SESSION_TOKEN__ on success. Returns one of:
-//   { offline: true }            — no backend configured (local-only mode)
 //   { ok: true, token, studentId }
 //   { existing: true }           — (create mode) account already exists server-side
-//   { ok: false, reason }        — backend configured but unreachable / failed
-async function establishServerSession({ proxyUrl, email, grade, mode }) {
-  if (!proxyUrl) return { offline: true };
-  const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/, "");
+//   { ok: false, reason }        — backend unreachable or credentials rejected
+async function establishServerSession({ email, password, name, grade, mode }) {
   const post = async (path, body) => {
-    const r = await fetch(`${base}${path}`, {
+    const r = await fetch(`/api${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify(body),
     });
     const d = await r.json().catch(() => ({}));
     return { ok: r.ok, status: r.status, d };
   };
   try {
-    const emailH = await hashEmail(email);
-    const regBody = { email, emailHash: emailH, grade, schoolDomain: getEmailDomain(email), isMinor: false };
+    const gradeNumber = ({ Freshman:9, Sophomore:10, Junior:11, Senior:12 })[grade] || Number(grade);
+    const regBody = { email, password, name, grade: gradeNumber, schoolDomain: getEmailDomain(email) };
 
     if (mode === "create") {
       // New-account signup: register directly. An existing email must NOT
       // silently drop the user into someone else's data — surface it so the
       // caller can route to login.
       const { ok, status, d } = await post("/students/register", regBody);
-      if (d.existing === true || d.registered === false) return { existing: true };
-      if (ok && d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); return { ok: true, token: d.token, studentId: d.studentId }; }
+      if (status === 409 || d.code === "account_exists") return { existing: true };
+      if (ok && d.token) { window.__CC_SESSION_TOKEN__ = d.token; return { ok: true, token: d.token, studentId: d.studentId, recoveryCode: d.recoveryCode || "" }; }
       return { ok: false, reason: d.error || `server returned ${status}` };
     }
 
-    // Login / generic: authenticate, falling back to register so a returning
-    // user whose server account is missing (fresh/restored backend) is healed.
-    let res = await post("/students/auth", { email, emailHash: emailH, isMinor: false });
-    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; await persistSessionToken(res.d.token); return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
-    res = await post("/students/register", regBody);
-    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; await persistSessionToken(res.d.token); return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
+    // Login never falls back to registration. Missing accounts and wrong
+    // passwords receive the backend's same generic error.
+    const res = await post("/students/auth", { email, password });
+    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
     return { ok: false, reason: res.d.error || `server returned ${res.status}` };
   } catch (err) {
     return { ok: false, reason: err?.message || "network error" };
@@ -296,6 +261,41 @@ const IPEDS = [
   { name:"USC",state:"CA",sat25:1400,sat75:1540,accept:9.2,enroll:49318,tuitionIn:66640,tuitionOut:66640,unitId:"123961",majors:["Business","Film","CS","Engineering","Communications"] },
   { name:"Penn State",state:"PA",sat25:1160,sat75:1370,accept:54.0,enroll:88502,tuitionIn:19286,tuitionOut:38824,unitId:"214777",majors:["Engineering","Business","Biology","CS","Education"] },
 ];
+
+const TARGET_UNIT_ID_ALIASES = new Map([
+  ["mit", "166683"],
+  ["stanford", "243744"],
+  ["harvard", "166027"],
+  ["berkeley", "110635"],
+  ["university of california berkeley", "110635"],
+  ["michigan", "170976"],
+  ["university of michigan", "170976"],
+  ["georgia institute of technology", "139755"],
+  ["university of texas at austin", "228778"],
+  ["university of illinois urbana champaign", "145637"],
+  ["university of virginia", "234076"],
+  ["carnegie mellon university", "211440"],
+  ["university of florida", "134130"],
+  ["university of washington", "236948"],
+  ["new york university", "193900"],
+  ["purdue university", "153658"],
+  ["ohio state university", "204796"],
+  ["university of southern california", "123961"],
+]);
+
+function normalizedSchoolKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function resolveTargetUnitId(name) {
+  const key = normalizedSchoolKey(name);
+  const exact = IPEDS.find((school) => normalizedSchoolKey(school.name) === key);
+  return exact?.unitId || TARGET_UNIT_ID_ALIASES.get(key) || null;
+}
 
 // ═══════════════════════════════════════════════════════════
 // AP COURSE RIGOR DATA (Source: CollegeBoard AP Score Distributions 2024)
@@ -490,7 +490,7 @@ function analyzeECStrength(activities, majorInterest, goals) {
   if (!majorInterest || !activities?.length) return { analysis: [], overallScore: 0, gaps: [], recommendations: [] };
 
   // Find best matching major category
-  const majorKey = Object.keys(EC_MAJOR_RELEVANCE).find(k => 
+  const majorKey = Object.keys(EC_MAJOR_RELEVANCE).find(k =>
     majorInterest.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(majorInterest.toLowerCase())
   ) || Object.keys(EC_MAJOR_RELEVANCE).find(k =>
     majorInterest.toLowerCase().split(/\s+/).some(w => k.toLowerCase().includes(w))
@@ -514,12 +514,12 @@ function analyzeECStrength(activities, majorInterest, goals) {
     const isStrong = relevance.strong.some(s => wordMatch(name, s));
     const isGood = relevance.good.some(s => wordMatch(name, s));
     const isSupp = relevance.supplementary.some(s => wordMatch(name, s));
-    
+
     let rel = "general", note = "Not directly mapped to your major — shows breadth", score = 30;
     if (isStrong) { rel = "strong"; note = `Directly relevant to ${majorKey}. Admissions committees look for this.`; score = 100; }
     else if (isGood) { rel = "good"; note = `Supports your ${majorKey} interest. Shows related skills.`; score = 70; }
     else if (isSupp) { rel = "supplementary"; note = `Complements your profile. Shows well-roundedness.`; score = 50; }
-    
+
     // Boost for leadership roles
     const leadershipRoles = ["president","founder","captain","head","director","lead","chief","editor","chair"];
     const hasLeadership = leadershipRoles.some(r => (a.role||"").toLowerCase().includes(r));
@@ -556,7 +556,7 @@ function contextualizeSAT(score, state, region) {
   const national = SAT_REGIONAL["US National"];
   const stateData = state ? SAT_REGIONAL[state] : null;
   const regionData = region ? SAT_REGIONAL[region] : null;
-  
+
   const result = {
     score,
     national: { mean: national.mean, diff: score - national.mean, percentileEstimate: estimatePercentile(score) },
@@ -909,7 +909,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (proxyUrl) {
         try {
-          const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+          const base = proxyUrl.replace(/\/chat\/?$/,"");
           const searchRes = await fetch(`${base}/colleges/search`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(token ? { "Authorization": `Bearer ${token}` } : {}) },
@@ -1018,7 +1018,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { error: "RAG backend not configured", fallback: { profile: data.profile, activities: data.activities } };
       try {
-        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/rag/context"), {
+        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/rag/context"), {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({ agentId: input.agentId || "holistic", queryFocus: input.focus || "holistic" })
@@ -1034,7 +1034,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return execTool("search_colleges", input, stateRef, setData); // fallback to local
       try {
-        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/rag/college-match"), {
+        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/rag/college-match"), {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify(input)
@@ -1050,7 +1050,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { error: "RAG backend not configured", trends: {} };
       try {
-        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/timeline"), {
+        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/students/timeline"), {
           headers: { "Authorization": `Bearer ${token}` }
         });
         if (!r.ok) return { error: `Timeline fetch failed: ${r.status}`, trends: {} };
@@ -1064,7 +1064,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { milestones: [] };
       try {
-        const r = await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/students/milestones"), {
+        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/students/milestones"), {
           headers: { "Authorization": `Bearer ${token}` }
         });
         if (!r.ok) return { milestones: [] };
@@ -1103,147 +1103,69 @@ const SURVEY_YEARS = ["freshman","sophomore","junior","senior"];
 const SUPPORTED_SCHOOL_FILE_TYPES = ["application/pdf","image/png","image/jpeg","image/webp"];
 const MAX_SCHOOL_FILE_SIZE_BYTES = 4 * 1024 * 1024;
 
-// ─── Chat-attachment file support ──────────────────────────────────
-// Distinct from survey-side school-doc uploads (which go through OCR
-// + structured parsers). Chat attachments are read inline so the LLM
-// can see the actual content as part of the next user turn. We accept
-// plaintext-ish formats (read as UTF-8 text → text block) and binary
-// PDFs/images (read as base64 → document/image block).
-const CHAT_TEXT_EXTENSIONS = [
-  "txt","md","markdown","rst","csv","tsv","json","jsonl","yaml","yml",
-  "xml","html","htm","css","scss","sass","less",
-  "py","js","mjs","cjs","jsx","ts","tsx","go","rs","java","kt","c","cc","cpp","h","hpp",
-  "cs","php","rb","swift","sh","bash","zsh","ps1","bat",
-  "sql","r","m","lua","pl","ex","exs","clj","scala","dart","vue","svelte",
-  "log","env","ini","toml","conf","cfg","gitignore","dockerfile",
-];
-// File extensions whose text content is extracted server-side
-// (browser can't read .docx as UTF-8 — it's a zipped XML bundle).
-// We POST the base64 to /api/files/extract-text and treat the
-// returned text the same as a text file from there on.
-const CHAT_EXTRACT_SERVER_EXTENSIONS = ["docx", "doc"];
-const CHAT_BINARY_TYPES = ["application/pdf","image/png","image/jpeg","image/webp","image/gif"];
-const MAX_CHAT_FILES = 50;
-const MAX_CHAT_FILE_BYTES = 1024 * 1024;        // 1 MB per file
+// Chat accepts school documents only. Every format goes through the local
+// extraction endpoint before any extracted text can enter an AI request.
+const CHAT_DOCUMENT_EXTENSIONS = new Set(["pdf", "docx", "txt", "md", "png", "jpg", "jpeg", "webp"]);
+const CHAT_DOCUMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "text/plain",
+  "text/markdown",
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+]);
+const MAX_CHAT_FILES = 5;
+const MAX_CHAT_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_CHAT_TOTAL_BYTES = 4 * 1024 * 1024;   // 4 MB total per turn
 
 function chatFileExt(name) {
   return String(name || "").split(".").pop()?.toLowerCase() || "";
 }
 
-function isChatTextFile(file) {
+function isSupportedChatDocument(file) {
   if (!file) return false;
-  if (CHAT_TEXT_EXTENSIONS.includes(chatFileExt(file.name))) return true;
-  const t = String(file.type || "").toLowerCase();
-  return t.startsWith("text/") || t === "application/json" || t === "application/xml" || t === "application/x-yaml";
+  return CHAT_DOCUMENT_EXTENSIONS.has(chatFileExt(file.name))
+    && (!file.type || CHAT_DOCUMENT_MIME_TYPES.has(String(file.type).toLowerCase()));
 }
 
-function isChatServerExtractFile(file) {
-  if (!file) return false;
-  if (CHAT_EXTRACT_SERVER_EXTENSIONS.includes(chatFileExt(file.name))) return true;
-  const t = String(file.type || "").toLowerCase();
-  return t === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-         t === "application/msword";
-}
-
-function isChatBinaryFile(file) {
-  if (!file) return false;
-  const t = String(file.type || "").toLowerCase();
-  if (CHAT_BINARY_TYPES.includes(t)) return true;
-  const ext = chatFileExt(file.name);
-  return ["pdf","png","jpg","jpeg","webp","gif"].includes(ext);
-}
-
-// Read a single chat-attachment file. Returns one of:
-//   { kind: "text", name, size, path, content }       // utf-8 text
-//   { kind: "binary", name, size, path, mediaType, base64 }  // pdf/img
-//   { kind: "error", name, error }                    // unreadable
-async function readChatFile(file, relativePath = "") {
+async function readChatFile(file) {
   const name = file?.name || "file";
-  const path = relativePath || file?.webkitRelativePath || name;
   try {
     if (file.size > MAX_CHAT_FILE_BYTES) {
       return { kind: "error", name, error: `Too large (${Math.round(file.size/1024)} KB, max ${Math.round(MAX_CHAT_FILE_BYTES/1024)} KB)` };
     }
-    if (isChatTextFile(file)) {
-      const content = await file.text();
-      return { kind: "text", name, path, size: file.size, content };
+    if (!isSupportedChatDocument(file)) {
+      return { kind: "error", name, error: "Unsupported file type. Use PDF, DOCX, TXT, MD, PNG, JPEG, or WebP school documents." };
     }
-    // Word documents — base64 + POST to /api/files/extract-text.
-    // mammoth (server-side) returns plain text; from there we treat
-    // it identically to a text file. The endpoint is auth-gated via
-    // requireStudentAuth — same Bearer-token mechanism every other
-    // /api/* call uses. The token lives on window.__CC_SESSION_TOKEN__
-    // (set at login). Without it the backend returns 401 and the file
-    // disappears silently — which is exactly the bug this comment
-    // exists to prevent recurring.
-    if (isChatServerExtractFile(file)) {
-      try {
-        const buf = await file.arrayBuffer();
-        const bytes = new Uint8Array(buf);
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        const base64 = btoa(binary);
-        const token = (typeof window !== "undefined" && window.__CC_SESSION_TOKEN__) || "";
-        // Derive the API base. window.__CC_PROXY_URL__ is typically
-        // "/api/chat" in dev (Vite proxy) or e.g. "https://api.host.com/chat"
-        // in prod. We want the parent of /chat — i.e. strip the /chat suffix
-        // (legacy "/anthropic" is also accepted) and DON'T also strip /api,
-        // otherwise we double-prefix and hit "/api/api/files/extract-text".
-        const proxyUrl = (typeof window !== "undefined" && window.__CC_PROXY_URL__) || "/api/chat";
-        const apiBase = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"") || "/api";
-        const url = `${apiBase}/files/extract-text`;
-        const headers = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-        const resp = await fetch(url, {
-          method: "POST",
-          headers,
-          credentials: "include",
-          body: JSON.stringify({
-            base64,
-            mimeType: file.type || "",
-            filename: name,
-          }),
-        });
-        if (!resp.ok) {
-          const body = await resp.json().catch(() => ({}));
-          const hint = resp.status === 401 ? " (auth — try signing out & back in)"
-                     : resp.status === 413 ? " (file too large)"
-                     : resp.status === 415 ? " (unsupported format)" : "";
-          return { kind: "error", name, error: `${body?.error || `Extract failed`}${hint} [HTTP ${resp.status}]` };
-        }
-        const data = await resp.json();
-        const note = data?.truncated ? `\n[Note: file truncated to ${Math.round((data.text||"").length/1000)}k chars by the extractor.]` : "";
-        return {
-          kind: "text",
-          name,
-          path,
-          size: file.size,
-          content: (data?.text || "") + note,
-          extractedFrom: chatFileExt(name) || "docx",
-        };
-      } catch (err) {
-        return { kind: "error", name, error: `Word extract failed: ${err?.message || "unknown"}` };
-      }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
     }
-    if (isChatBinaryFile(file)) {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const base64 = btoa(binary);
-      const mediaType = isChatTextFile(file) ? "text/plain" :
-        (file.type && file.type !== "" ? file.type : (
-          chatFileExt(name) === "pdf" ? "application/pdf" :
-          chatFileExt(name) === "png" ? "image/png" :
-          chatFileExt(name) === "webp" ? "image/webp" :
-          chatFileExt(name) === "gif" ? "image/gif" : "image/jpeg"
-        ));
-      return { kind: "binary", name, path, size: file.size, mediaType, base64 };
-    }
-    return { kind: "error", name, error: "Unsupported file type" };
+    const headers = { "Content-Type": "application/json" };
+    if (window.__CC_SESSION_TOKEN__) headers.Authorization = `Bearer ${window.__CC_SESSION_TOKEN__}`;
+    const response = await fetch("/api/files/extract-text", {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body: JSON.stringify({ base64: btoa(binary), mimeType: file.type || "", filename: name }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) return { kind: "error", name, error: body.error || `Extraction failed (HTTP ${response.status})` };
+    const content = String(body.text || "").trim();
+    if (!content) return { kind: "error", name, error: "No readable text was found in this document." };
+    return {
+      kind: "text",
+      name,
+      path: name,
+      size: file.size,
+      content: content + (body.truncated ? "\n[Document text was truncated by the local extractor.]" : ""),
+      extractedFrom: chatFileExt(name),
+    };
   } catch (err) {
-    return { kind: "error", name, error: err?.message || "Read failed" };
+    return { kind: "error", name, error: err?.message || "Document extraction failed" };
   }
 }
 function formatAcademicYearLabel(year) {
@@ -1292,7 +1214,7 @@ function sanitizeInput(text) {
 // Client-side rate limit — burst guard ONLY.
 // Original design (Mar 2026) gated to 15/min + 3/10s when the app
 // proxied through the operator's key and every chat turn
-// cost real money. Now that BYOK is mandatory and the default
+// cost real money. The backend enforces the grade-based monthly budget and
 // OpenRouter tier mix (Gemma 4 26B A4B / 31B / DeepSeek V4 Pro)
 // keeps a typical turn at fractions of a cent, the per-minute cap
 // just frustrates legitimate use. Per-IP backend rate limits
@@ -1308,34 +1230,51 @@ const rateLimiter = { timestamps: [], check() {
 }, reset() { this.timestamps = []; }};
 
 // ═══════════════════════════════════════════════════════════
-// BACKEND CHAT PROXY (provider-neutral, BYOK-first)
+// BACKEND CHAT PROXY (administrator-managed OpenRouter)
 // ═══════════════════════════════════════════════════════════
-// window.__CC_PROXY_URL__ is the chat endpoint (default "/api/chat"). The
-// backend holds each student's encrypted BYOK key server-side and routes to
-// their chosen provider (OpenRouter by default) — the browser NEVER sees a
-// provider key. There is no direct-browser key path.
+// All requests stay on the desktop application's same origin. The renderer
+// cannot redirect credentials or student content to a caller-supplied host.
+const CHAT_PATH = "/api/chat";
 
-function getChatUrl() {
-  return window.__CC_PROXY_URL__ || "/api/chat";
+function formatStructuredChatResponse(body) {
+  const parts = [];
+  if (body.answer) parts.push(String(body.answer).trim());
+  const grouped = { verified:[], student:[], coaching:[] };
+  for (const claim of (Array.isArray(body.claims) ? body.claims : [])) {
+    const lane = claim.lane === "verified" ? "verified" : claim.lane === "student" || claim.lane === "student_provided" ? "student" : "coaching";
+    const text = String(claim.statement || claim.text || claim.claim || "").trim();
+    if (!text) continue;
+    const sources = lane === "verified" && Array.isArray(claim.sourceIds) && claim.sourceIds.length
+      ? ` _(sources: ${claim.sourceIds.join(", ")})_`
+      : "";
+    grouped[lane].push(`- ${text}${sources}`);
+  }
+  if (grouped.verified.length) parts.push("**Verified official facts**", ...grouped.verified);
+  if (grouped.student.length) parts.push("**Student-provided facts**", ...grouped.student);
+  if (grouped.coaching.length) parts.push("**Coaching suggestions**", ...grouped.coaching);
+  if (Array.isArray(body.limitations) && body.limitations.length) parts.push("**Limitations**", ...body.limitations.map((item) => `- ${String(item)}`));
+  if (Array.isArray(body.actions) && body.actions.length) parts.push("**Next actions**", ...body.actions.map((item) => `- ${String(item.label || item.text || item)}`));
+  return parts.filter(Boolean).join("\n\n");
 }
 
-async function requestChat(payload, signal) {
-  const url = getChatUrl();
-  const headers = { "Content-Type": "application/json" };
-  // Send the session token for per-student BYOK routing + usage tracking.
+async function requestChat(payload, signal, locale = "en-US") {
+  const lang = locale === "ko" ? "ko" : "en-US";
+  const url = `${CHAT_PATH}?locale=${encodeURIComponent(lang)}`;
+  const headers = { "Content-Type": "application/json", "Accept-Language": lang };
+  // Send the session token for tenant authorization and usage accounting.
   if (window.__CC_SESSION_TOKEN__) {
     headers["Authorization"] = `Bearer ${window.__CC_SESSION_TOKEN__}`;
   }
 
-  let r = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
+  let r = await fetch(url, { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(payload), signal });
 
   // Auto re-authenticate on 401 (backend may have restarted, clearing in-memory tokens)
   if (r.status === 401) {
     console.warn("[requestChat] 401 — attempting re-authentication…");
-    const refreshed = await _tryReAuth(url);
+    const refreshed = await _tryReAuth();
     if (refreshed) {
       headers["Authorization"] = `Bearer ${window.__CC_SESSION_TOKEN__}`;
-      r = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
+      r = await fetch(url, { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(payload), signal });
     }
   }
 
@@ -1346,7 +1285,15 @@ async function requestChat(payload, signal) {
     throw new Error(errMsg);
   }
 
-  return r.json();
+  const body = await r.json();
+  if (body?.answer) {
+    const expectsJson = /respond\s+(only\s+)?with\s+json|return\s+only\s+json/i.test(String(payload?.system || ""));
+    const text = expectsJson ? String(body.answer) : formatStructuredChatResponse(body);
+    const hasToolUse = Array.isArray(body.content) && body.content.some((block) => block.type === "tool_use");
+    if (!hasToolUse || !Array.isArray(body.content) || body.content.length === 0) body.content = [{ type:"text", text }];
+    body.structuredText = text;
+  }
+  return body;
 }
 
 // Lightweight observability for the otherwise-silent token re-auth. The React
@@ -1354,55 +1301,26 @@ async function requestChat(payload, signal) {
 // "attempting" / "ok" / "failed" so the UI can show a non-blocking toast (and
 // route to sign-in on terminal failure) instead of a confusing dead end.
 let _reauthListener = null;
+let _reauthCredentialProvider = null;
 function setReauthListener(fn) { _reauthListener = fn; }
+function setReauthCredentialProvider(fn) { _reauthCredentialProvider = fn; }
 function notifyReauth(status) { try { _reauthListener?.(status); } catch { /* ignore */ } }
 
-// Attempt to re-authenticate with the backend using saved session email
-async function _tryReAuth(proxyUrl) {
+// Re-authentication uses the password already held in component memory after
+// the student unlocks. Passwords and bearer tokens are never read from or
+// written to browser storage.
+async function _tryReAuth() {
   notifyReauth("attempting");
   try {
-    // Recover the plaintext email for the active session. saveSession
-    // stores only a hashed hint (never plaintext), so match that hash
-    // against the locally-known account emails to find which one it is.
-    // (Previously this checked `session.email`, which was NEVER set —
-    // so re-auth silently failed on every backend restart, forcing a
-    // manual re-login. That was the root cause of "data doesn't
-    // survive restarts": the data was fine, the client just couldn't
-    // get a token to read it.)
-    const session = await loadSession();
-    const accounts = await loadAccounts();
-    let email = null;
-    if (session?.emailHash) {
-      for (const acctEmail of Object.keys(accounts || {})) {
-        if (await hashEmail(acctEmail) === session.emailHash) { email = acctEmail; break; }
-      }
-    }
-    // Fallback: if exactly one local account exists, use it.
-    if (!email) {
-      const emails = Object.keys(accounts || {});
-      if (emails.length === 1) email = emails[0];
-    }
-    if (!email) { notifyReauth("failed"); return false; }
-
-    // Send PLAINTEXT email — the backend re-hashes with its own salt
-    // (the frontend's hashEmail uses a different salt, so sending the
-    // frontend hash would 404).
-    const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
-    let r = await fetch(`${base}/students/auth`, {
+    const credentials = _reauthCredentialProvider?.();
+    if (!credentials?.email || !credentials?.password) { notifyReauth("failed"); return false; }
+    const r = await fetch("/api/students/auth", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, isMinor: false })
+      credentials: "same-origin",
+      body: JSON.stringify({ email: credentials.email, password: credentials.password })
     });
-    let d = await r.json().catch(() => ({}));
-    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); notifyReauth("ok"); console.info("[ReAuth] Session restored via auth"); return true; }
-
-    // Fallback: register (idempotent — backend returns existing if found).
-    const acct = accounts[email] || {};
-    r = await fetch(`${base}/students/register`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, grade: acct.grade, schoolDomain: getEmailDomain(email), isMinor: false })
-    });
-    d = await r.json().catch(() => ({}));
-    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); notifyReauth("ok"); console.info("[ReAuth] Session restored via register"); return true; }
+    const d = await r.json().catch(() => ({}));
+    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; notifyReauth("ok"); console.info("[ReAuth] Session restored via auth"); return true; }
     notifyReauth("failed");
     return false;
   } catch (err) {
@@ -1484,105 +1402,15 @@ When in doubt, REJECT. Student safety is paramount.`,
 // (score-report / transcript readers removed — feature retired)
 
 
-// ═══════════════════════════════════════════════════════════
-// RECOMMENDATION 3: AUDIT LOGGING FOR SAFETY EVENTS
-// ═══════════════════════════════════════════════════════════
-// Logs crisis detections, blocked content, safety screening results,
-// and other safety-relevant events. In production, these should be
-// forwarded to a backend for school counselor review.
-
+// Safety diagnostics keep event codes only. Prompts, crisis text, emails, and
+// model output are never copied into client logs or a public audit endpoint.
 const auditLog = {
   _events: [],
-  _maxEvents: 200, // ring buffer — keep last 200 events
-
-  log(eventType, details, userEmail) {
-    const event = {
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      type: eventType, // "crisis_detected", "essay_blocked", "upload_rejected", "validation_failed", "off_topic_blocked", "parental_notify_sent"
-      userHint: userEmail ? (userEmail.split("@")[0].slice(0, 2) + "***") : "unknown",
-      details: typeof details === "string" ? details : JSON.stringify(details),
-    };
-    this._events.push(event);
-    if (this._events.length > this._maxEvents) this._events.shift();
-
-    // In production: forward to backend for school counselor dashboard
-    // POST /api/audit { event } — the backend stores these securely
-    const proxyUrl = window.__CC_PROXY_URL__;
-    if (proxyUrl) {
-      fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/audit"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(event)
-      }).catch(() => {}); // fire-and-forget — don't block the user
-    }
-
-    // Always log to console for development visibility
-    if (eventType === "crisis_detected") {
-      console.warn(`[AUDIT:CRISIS] ${event.timestamp} — ${event.userHint} — ${event.details}`);
-    } else {
-      console.info(`[AUDIT:${eventType.toUpperCase()}] ${event.timestamp} — ${event.details}`);
-    }
+  log(eventType) {
+    this._events.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), type: String(eventType || "unknown").slice(0, 64) });
+    if (this._events.length > 100) this._events.shift();
   },
-
-  getEvents(type) {
-    return type ? this._events.filter(e => e.type === type) : [...this._events];
-  },
-
-  // Export for school counselor review
-  exportForReview() {
-    return JSON.stringify(this._events, null, 2);
-  }
-};
-
-// ═══════════════════════════════════════════════════════════
-// RECOMMENDATION 4: PARENTAL/GUARDIAN NOTIFICATION SYSTEM
-// ═══════════════════════════════════════════════════════════
-// Optional parent/guardian email for crisis event notifications.
-// Stored encrypted alongside student data. Only triggered on crisis
-// detection — NOT for normal usage. Requires backend proxy for email delivery.
-
-const parentalNotify = {
-  // Check if a parent email is configured for this student
-  async hasParentEmail(data) {
-    return !!(data?.parentGuardian?.email);
-  },
-
-  // Send notification on crisis detection (requires backend)
-  async notifyCrisis(data, crisisContext) {
-    if (!data?.parentGuardian?.email || !data?.parentGuardian?.notifyOnCrisis) return false;
-
-    const proxyUrl = window.__CC_PROXY_URL__;
-    if (!proxyUrl) {
-      console.warn("[PARENTAL] Crisis notification skipped — no backend proxy configured.");
-      auditLog.log("parental_notify_skipped", "No backend proxy for email delivery");
-      return false;
-    }
-
-    try {
-      const notification = {
-        to: data.parentGuardian.email,
-        studentHint: data.parentGuardian.studentName || "Your student",
-        type: "crisis_alert",
-        // NEVER include the student's message — only that a crisis was detected
-        message: `This is an automated notification from the College Counselor app. A message from ${data.parentGuardian.studentName || "your student"} was flagged by our safety system as potentially indicating distress. No message content is shared — this is simply an alert so you can check in with them. If you believe this is an emergency, please call 988 (Suicide & Crisis Lifeline) or 911.`,
-        timestamp: new Date().toISOString()
-      };
-
-      await fetch(proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"/notify-parent"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(notification)
-      });
-
-      auditLog.log("parental_notify_sent", "Crisis alert sent to guardian", null);
-      return true;
-    } catch (err) {
-      console.warn("[PARENTAL] Failed to send crisis notification:", err?.message);
-      auditLog.log("parental_notify_failed", err?.message);
-      return false;
-    }
-  }
+  getEvents(type) { return type ? this._events.filter((event) => event.type === type) : [...this._events]; },
 };
 // Build a message-history array suitable for prepending to a new turn.
 // `history` is the messages[] React state slice; entries with role "user"
@@ -1596,7 +1424,7 @@ function buildHistoryMsgs(history) {
   const tail = history.slice(-HISTORY_TURNS);
   const out = [];
   for (const m of tail) {
-    if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
+    if (!m || m.transient === true || (m.role !== "user" && m.role !== "assistant")) continue;
     const c = m.role === "user" ? (m.modelContent || m.content || "") : (m.content || "");
     if (!c) continue;
     // The backend accepts plain strings in history; tool_use / tool_result
@@ -1771,7 +1599,7 @@ function formatUserFacingError(error) {
   if (msg.includes("api 429") || msg.includes("rate limit")) return "The system is busy right now. Please try again in a minute.";
   if (msg.includes("api 413") || msg.includes("too large")) return "Your message was too long. Try a shorter question or smaller file.";
   if (msg.includes("failed to fetch") || msg.includes("network")) return "Check your internet connection and try again.";
-  if (/no api key|not configured|missing .*api key/i.test(msg)) return "Chat isn't configured yet. Add your API key before sending messages.";
+  if (/no api key|not configured|missing .*api key/i.test(msg)) return "Chat isn't configured yet. Ask this device's administrator to configure OpenRouter.";
   return "Something went wrong while answering that. Please try again.";
 }
 
@@ -1902,6 +1730,7 @@ function formatThreeLaneAnswer(answer) {
   return parts.join("\n");
 }
 
+
 // FIX 1a: Rules-first orchestration — backend handles deterministic topics before any model call
 async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData,history=[]){
   // Skip the quick-query rules engine when:
@@ -1930,7 +1759,7 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
   if (proxyUrl && token && !pendingFileData && !msgHasFilePreface) {
     try {
       setStatus({active:"policy_router",phase:"Checking rules engine..."});
-      const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+      const base = proxyUrl.replace(/\/chat\/?$/,"");
       const orchRes = await fetch(`${base}/agents/orchestrate`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
@@ -1950,6 +1779,7 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
       // Fall through to frontend agent pipeline
     }
   }
+
 
   // ── STEP 1: Gatekeeper classification (Haiku — cheap T1 routing) ──
   // The gatekeeper only needs the student's INTENT — not the full
@@ -1976,8 +1806,7 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
   const CRISIS_KEYWORDS = /\b(suicid|kill\s*myself|hurt\s*myself|self[\s-]?harm|hopeless|don'?t\s*want\s*to\s*live|end\s*it\s*all|wanna\s*die|want\s*to\s*die|cutting\s*myself)\b/i;
   if (CRISIS_KEYWORDS.test(gatekeeperInput)) {
     auditLog.log("crisis_detected", "Crisis keyword matched locally");
-    parentalNotify.notifyCrisis(data, { category: "crisis", reason: "local keyword match" });
-    return { text: CRISIS_RESPONSE, blocked: true };
+    return { text: CRISIS_RESPONSE, blocked: true, crisisSafe: true };
   }
 
   // ── Quick keyword router — SKIPS the LLM gatekeeper entirely ──
@@ -2103,17 +1932,17 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
       const looksLikeCrisis = /\b(suicid|kill\s*myself|hurt\s*myself|self[\s-]?harm|hopeless|don'?t\s*want\s*to\s*live|end\s*it\s*all)\b/i.test(userText);
       const m = msg.match(/"message"\s*:\s*"([^"]+)"/);
       const concise = m ? m[1] : msg.replace(/^Error:\s*/, "").slice(0, 240);
-      const base = `I couldn't reach the model just now. The provider returned:\n\n> ${concise}\n\nTry again, or open **Edit profile → API key** to switch providers or pick a different model.`;
+      const base = `I couldn't reach the model just now. The provider returned:\n\n> ${concise}\n\nTry again. If this continues, ask this device's administrator to check the local service configuration.`;
       return {
         text: looksLikeCrisis ? `${base}\n\n---\n${CRISIS_RESPONSE}` : base,
         blocked: true,
+        crisisSafe: looksLikeCrisis,
       };
     }
   } } // close try/catch + outer `else {`
   if(gate.category==="crisis"){
     auditLog.log("crisis_detected", gate.reason || "Crisis category triggered", data?.parentGuardian?.studentName);
-    parentalNotify.notifyCrisis(data, { category: gate.category, reason: gate.reason });
-    return{text:CRISIS_RESPONSE,blocked:true};
+    return{text:CRISIS_RESPONSE,blocked:true,crisisSafe:true};
   }
   if(gate.category==="essay_writing"){
     auditLog.log("essay_blocked", gate.reason || "Essay writing request blocked");
@@ -2161,15 +1990,9 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
     multimodalContent.push({ type: "text", text: `The student uploaded "${sanitizeFilename(pendingFileData.name)}". Analyze this document and extract academic data (grades, scores, courses, GPA). ${userMsg}` });
   }
 
-  // ── STEP 3: Enrich agent context with backend evidence (if available) ──
-  let evidenceContext = "";
-  if (backendOrch) {
-    const facts = (backendOrch.verifiedFacts || []).map(f => `[VERIFIED] ${f.fact_key}: ${f.fact_value} (Source: ${f.source_domain || "fact store"})`).join("\n");
-    const evidence = (backendOrch.evidence || []).slice(0, 5).map(e => `[EVIDENCE] ${e.dimension}/${e.metric}: ${e.value}`).join("\n");
-    if (facts || evidence) {
-      evidenceContext = `\n\n--- Backend Evidence (use these verified facts in your response) ---\n${facts}\n${evidence}\n--- End Evidence ---`;
-    }
-  }
+  // The backend composer validates claim-level evidence. Raw retrieval rows are
+  // never promoted to VERIFIED or injected into a specialist prompt here.
+  const evidenceContext = "";
 
   // ── STEP 4: Run specialist agents (Sonnet — T2 grounded synthesis) ──
   const results=[];
@@ -2473,12 +2296,12 @@ function renderInlineSafe(text) {
 // ═══════════════════════════════════════════════════════════
 // SHARED STYLES
 // ═══════════════════════════════════════════════════════════
-const FONT = "'DM Sans',system-ui,sans-serif";
+const FONT = "'Segoe UI',system-ui,sans-serif";
 const BG = "#0a0e17";
-const inputStyle = { width:"100%",padding:"13px 16px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)",color:"#e8e6e3",fontSize:15,outline:"none",boxSizing:"border-box",transition:"border-color 0.2s" };
-const labelStyle = { fontSize:11,fontWeight:600,color:"#6a6a7a",display:"block",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em" };
-const btnPrimary = { padding:"14px 0",borderRadius:12,border:"none",background:"linear-gradient(135deg,#378ADD,#667eea)",color:"#fff",fontSize:15,fontWeight:600,cursor:"pointer",width:"100%",transition:"opacity 0.2s" };
-const cardStyle = { width:440,padding:44,borderRadius:24,background:"linear-gradient(145deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))",border:"1px solid rgba(255,255,255,0.06)" };
+const inputStyle = { width:"100%",padding:"12px 14px",minHeight:44,borderRadius:8,border:"1px solid rgba(255,255,255,0.22)",background:"rgba(255,255,255,0.04)",color:"#f1f5f9",fontSize:15,boxSizing:"border-box",transition:"border-color 0.2s" };
+const labelStyle = { fontSize:12,fontWeight:600,color:"#b4bfcc",display:"block",marginBottom:6,letterSpacing:0 };
+const btnPrimary = { padding:"12px 16px",minHeight:44,borderRadius:8,border:"none",background:"#2f86cf",color:"#fff",fontSize:15,fontWeight:700,cursor:"pointer",width:"100%",transition:"opacity 0.2s" };
+const cardStyle = { width:"min(440px, calc(100vw - 32px))",padding:"clamp(24px, 5vw, 40px)",borderRadius:8,background:"#151a23",border:"1px solid rgba(255,255,255,0.16)" };
 const dots = ["#E24B4A","#378ADD","#BA7517","#D4537E","#7F77DD","#1D9E75"];
 
 // ─── Round 1-5 sidebar styles ───────────────────────────────────
@@ -2511,11 +2334,13 @@ const localeBtnActive = {
   borderColor: "rgba(55,138,221,0.3)",
 };
 
-const GLOBAL_CSS = `@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+const GLOBAL_CSS = `html,body,#root{height:100%;margin:0} body{min-width:320px}
 @keyframes pulse2{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 @keyframes spin{to{transform:rotate(360deg)}}
-input::placeholder{color:#444} *{box-sizing:border-box}
+input::placeholder,textarea::placeholder{color:#8b96a5} *{box-sizing:border-box}
+button,input,select,textarea{font-family:inherit} button{min-height:40px}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,a:focus-visible,[role="button"]:focus-visible{outline:3px solid #69b8ff!important;outline-offset:2px!important}
 /* Match every <select> in the app to the dark system theme.
    color-scheme tells Chrome/Firefox/Safari to render the OPEN popup
    list using the dark scheme — the simplest cross-browser dark-mode
@@ -2529,7 +2354,7 @@ select option:hover, select option:focus, select option:checked{background:rgba(
 @media(max-width:768px){
 .cc-create-card{width:100%!important;max-width:440px!important;padding:24px!important}
 .cc-survey-card{width:100%!important;max-width:580px!important;padding:20px!important}
-.cc-sidebar-overlay{position:fixed!important;top:0!important;left:0!important;height:100vh!important;width:min(86vw,280px)!important;z-index:1000!important;background:rgba(10,14,23,0.97)!important;box-shadow:18px 0 40px rgba(0,0,0,0.35)!important;border-right:1px solid rgba(255,255,255,0.06)!important;transition:transform 0.25s ease,opacity 0.25s ease!important}
+.cc-sidebar-overlay{position:fixed!important;top:0!important;left:0!important;height:100dvh!important;width:min(90vw,320px)!important;z-index:1000!important;background:rgba(10,14,23,0.98)!important;box-shadow:18px 0 40px rgba(0,0,0,0.35)!important;border-right:1px solid rgba(255,255,255,0.16)!important;transition:transform 0.25s ease,opacity 0.25s ease!important}
 .cc-sidebar-overlay.is-open{transform:translateX(0)!important;opacity:1!important;pointer-events:auto!important}
 .cc-sidebar-overlay.is-closed{transform:translateX(-105%)!important;opacity:0!important;pointer-events:none!important}
 .cc-chat-main{width:100%!important}
@@ -2538,41 +2363,9 @@ select option:hover, select option:focus, select option:checked{background:rgba(
 }`;
 
 // ═══════════════════════════════════════════════════════════
-// MAIN APP — 4 screens: CREATE ACCOUNT → SURVEY → LOGIN → CHAT
+// MAIN APP — CREATE ACCOUNT → SURVEY → LOGIN → CHAT
 // ═══════════════════════════════════════════════════════════
-const S = { LOADING:0, CREATE:1, LOGIN:2, APIKEY:5, SURVEY:3, CHAT:4, SETUP:6 };
-
-// Per-provider deep-link to the page where the user creates an API key.
-// Opens in a new tab — the student creates a key in their own console,
-// then pastes it back. (No provider exposes an OAuth flow that lets
-// third-party apps mint keys on a user's behalf, so a paste is still
-// required — but the click + auto-detect makes it as close to one-click
-// as the platform allows.)
-const PROVIDER_CONSOLE_URLS = {
-  openrouter:    "https://openrouter.ai/keys",
-  openai:        "https://platform.openai.com/api-keys",
-  openai_compat: "https://platform.openai.com/api-keys",
-  google:        "https://aistudio.google.com/app/apikey",
-  deepseek:      "https://platform.deepseek.com/api_keys",
-  together:      "https://api.together.ai/settings/api-keys",
-  zhipu:         "https://open.bigmodel.cn/usercenter/apikeys",
-  // Local providers don't have a console — the field is hidden gracefully.
-  ollama:        null,
-  lmstudio:      null,
-};
-
-// Detect provider from the key prefix the user pastes — flips the
-// dropdown automatically so the rest of the form (base URL, models)
-// reconfigures itself.
-function detectProviderFromKey(key) {
-  const s = String(key || "").trim();
-  if (s.startsWith("sk-or-"))     return "openrouter";
-  if (s.startsWith("sk-proj-"))   return "openai";
-  if (s.startsWith("sk-"))        return "openai"; // generic openai-style
-  if (/^AIzaSy/.test(s))          return "google";
-  if (s.startsWith("ds-"))        return "deepseek";
-  return null;
-}
+const S = { LOADING:0, CREATE:1, LOGIN:2, SURVEY:3, CHAT:4 };
 
 export default function App() {
   const [screen, setScreen] = useState(S.LOADING);
@@ -2630,73 +2423,39 @@ export default function App() {
   // Goals
   const [sGoals, setSGoals] = useState([]);
   const [sMajorInterest, setsMajorInterest] = useState("");
-  // Parent/guardian contact (optional — Recommendation 4)
-  const [sParentEmail, setSParentEmail] = useState("");
-  const [sParentNotify, setSParentNotify] = useState(false);
-
   // Login fields
   const [lEmail, setLEmail] = useState("");
   const [lPass, setLPass] = useState("");
   const [lError, setLError] = useState("");
   const [showLoginPass, setShowLoginPass] = useState(false);
+  const [studentRecoveryOpen, setStudentRecoveryOpen] = useState(false);
+  const [studentRecoveryInput, setStudentRecoveryInput] = useState("");
+  const [studentRecoveryPassword, setStudentRecoveryPassword] = useState("");
+  const [studentRecoveryBusy, setStudentRecoveryBusy] = useState(false);
+  const [studentRecoveryMessage, setStudentRecoveryMessage] = useState(null);
+  const [studentRecoveryCode, setStudentRecoveryCode] = useState("");
 
   // Chat state
   const [user, setUser] = useState(null); // { name, email, grade }
   const [passphrase, setPassphrase] = useState("");
 
-  // ── Data-saver: auto-persist the in-progress survey so a refresh/crash
-  //    doesn't lose it. Client-side only, scoped to the logged-in account's own
-  //    data (keyed like the vault via safeBtoa) — no browser cache/history is
-  //    ever read. Restored on entering the survey; cleared once it syncs.
-  //    Declared after `user`/`passphrase` since it reads user?.email.
-  const draftKey = user?.email ? `cc_draft_${safeBtoa(user.email).replace(/[^a-zA-Z0-9]/g, "")}` : null;
-  const surveyDraft = {
-    v: 1, surveyStep,
-    sGpaUw, sGpaW, sNoGpaYet,
-    sCourseYear, sCourses,
-    sTests, sNoTestsYet, sAPScores,
-    sECs, sGoals, sMajorInterest,
-    sParentEmail, sParentNotify,
-  };
-  useDraftPersistence(storageApi, draftKey, surveyDraft, { enabled: screen === S.SURVEY && !!draftKey });
-
-  const surveyHydratedRef = useRef(false);
-  useEffect(() => {
-    if (screen !== S.SURVEY || !draftKey || surveyHydratedRef.current) return undefined;
-    // Only restore into a genuinely fresh/interrupted survey — never clobber
-    // data a returning student has already loaded/edited this session.
-    const isEmpty = !sGpaUw && !sGpaW && !sNoGpaYet && sTests.length === 0 &&
-      sAPScores.length === 0 && sECs.length === 0 && sGoals.length === 0 &&
-      !sMajorInterest && !sParentEmail && surveyStep === 0 &&
-      Object.values(sCourses).every((arr) => !arr || arr.length === 0);
-    if (!isEmpty) { surveyHydratedRef.current = true; return undefined; }
-    let cancelled = false;
-    (async () => {
-      const d = await loadDraft(storageApi, draftKey);
-      if (cancelled || !d || d.v !== 1) { surveyHydratedRef.current = true; return; }
-      if (typeof d.sGpaUw === "string") setSGpaUw(d.sGpaUw);
-      if (typeof d.sGpaW === "string") setSGpaW(d.sGpaW);
-      if (typeof d.sNoGpaYet === "boolean") setSNoGpaYet(d.sNoGpaYet);
-      if (typeof d.sCourseYear === "string") setSCourseYear(d.sCourseYear);
-      if (d.sCourses && typeof d.sCourses === "object") setSCourses(d.sCourses);
-      if (Array.isArray(d.sTests)) setSTests(d.sTests);
-      if (typeof d.sNoTestsYet === "boolean") setSNoTestsYet(d.sNoTestsYet);
-      if (Array.isArray(d.sAPScores)) setSAPScores(d.sAPScores);
-      if (Array.isArray(d.sECs)) setSECs(d.sECs);
-      if (Array.isArray(d.sGoals)) setSGoals(d.sGoals);
-      if (typeof d.sMajorInterest === "string") setsMajorInterest(d.sMajorInterest);
-      if (typeof d.sParentEmail === "string") setSParentEmail(d.sParentEmail);
-      if (typeof d.sParentNotify === "boolean") setSParentNotify(d.sParentNotify);
-      if (typeof d.surveyStep === "number") setSurveyStep(d.surveyStep);
-      surveyHydratedRef.current = true;
-    })();
-    return () => { cancelled = true; };
-  }, [screen, draftKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Drafts are intentionally memory-only until encrypted vault persistence is
+  // available. This avoids storing GPA, activities, and family contact data as
+  // plaintext in localStorage.
   const [data, setData] = useState({ profile:null, activities:[], studyNotes:[], documents:[] });
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState({ active:null, phase:"" });
+  const [budgetStatus, setBudgetStatus] = useState(null);
+  // Null means ordinary chat. Any value is a one-message, explicitly selected
+  // Strategy Council mode and is cleared as soon as that request starts.
+  const [councilDecisionType, setCouncilDecisionType] = useState(null);
+  // An ambiguous network/5xx result may arrive after paid work completed.
+  // Reuse its opaque ID only when the student explicitly retries the exact
+  // same question and decision type, preventing accidental double spend.
+  const councilRequestRef = useRef(null);
+  const councilTurnSequenceRef = useRef(0);
 
   // ─── Chat thread history ───
   // threadList = sidebar entries (id, title, updated_at, message_count).
@@ -2717,6 +2476,9 @@ export default function App() {
   // college TYPES, not named schools, so this is where named targets live).
   const [targetSchools, setTargetSchools] = useState([]);
   const [targetSchoolInput, setTargetSchoolInput] = useState("");
+  // Bumped when a school is removed so the Deadline tracker reloads and drops
+  // that school's (now-deleted) deadlines.
+  const [deadlineRefreshKey, setDeadlineRefreshKey] = useState(0);
   // Inline double-click editing in the sidebar: chat-thread rename + profile
   // fields (GPA, test scores, courses). `editingField` is a key like
   // "gpa" | "test:2" | "course:0"; drafts hold the in-progress values.
@@ -2747,6 +2509,7 @@ export default function App() {
   // Holds the (later-defined) deadline creator so addTargetSchool can call it
   // without a forward-reference TDZ in its dependency array.
   const createDeadlinesRef = useRef(null);
+  const authedFetchRef = useRef(null);
   const addTargetSchool = useCallback((name) => {
     const n = String(name || "").trim();
     if (!n) return;
@@ -2770,6 +2533,24 @@ export default function App() {
       saveTargets(next, user?.email);
       return next;
     });
+    // Cascade: delete everything about this school from the schedule/Deadline
+    // tabs (its auto-created EA/ED/RD/aid/commit rows + anything naming it).
+    // Use the re-authenticating request path so a stale desktop session does
+    // not silently leave orphaned deadlines behind.
+    const request = authedFetchRef.current;
+    if (request && name) {
+      const unitId = resolveTargetUnitId(name);
+      request("/api/students/deadlines/by-school", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schoolName: name, ...(unitId ? { unitId } : {}) }),
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          setDeadlineRefreshKey((k) => k + 1);
+        })
+        .catch((err) => console.warn("[targets] deadline cascade failed:", err?.message));
+    }
   }, [user?.email]);
 
   // ─── Auth-resilient fetch ───────────────────────────────────────
@@ -2802,6 +2583,21 @@ export default function App() {
     }
     return r;
   }, []);
+  authedFetchRef.current = authedFetch;
+
+  const refreshBudget = useCallback(async () => {
+    try {
+      const response = await authedFetch("/api/students/budget");
+      if (response.ok) setBudgetStatus(await response.json());
+    } catch { /* budget display is non-blocking */ }
+  }, [authedFetch]);
+
+  useEffect(() => {
+    if (screen !== S.CHAT || !user) return undefined;
+    refreshBudget();
+    const timer = setInterval(refreshBudget, 60000);
+    return () => clearInterval(timer);
+  }, [screen, user, refreshBudget]);
 
   // Fetch the student's threads (called after auth lands).
   const refreshThreadList = useCallback(async () => {
@@ -2816,7 +2612,7 @@ export default function App() {
 
   // Create a new thread server-side and switch to it. Clears current
   // in-memory messages so the new thread starts blank.
-  const newThread = useCallback(async (initialTitle) => {
+  const newThread = useCallback(async (initialTitle, preserveMessages = false) => {
     try {
       const r = await authedFetch("/api/students/threads", {
         method: "POST",
@@ -2826,7 +2622,7 @@ export default function App() {
       if (!r.ok) return null;
       const data = await r.json();
       setActiveThreadId(data.id);
-      setMessages([]);
+      if (!preserveMessages) setMessages([]);
       refreshThreadList();
       return data.id;
     } catch { return null; }
@@ -2853,11 +2649,12 @@ export default function App() {
   const persistTurn = useCallback(async (threadId, role, content, attachmentName = null) => {
     if (!threadId) return;
     try {
-      await authedFetch(`/api/students/threads/${threadId}/messages`, {
+      const response = await authedFetch(`/api/students/threads/${threadId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role, content, attachmentName }),
       });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       // Bump the local list so updated_at reorders the sidebar
       setThreadList(prev => {
         const idx = prev.findIndex(t => t.id === threadId);
@@ -2981,9 +2778,50 @@ export default function App() {
   // the backend (so server-side friendlyMessage / friendlyLegendI18n come
   // back in the right language). Persisted to localStorage so reloads stick.
   const [locale, setLocaleState] = useState(detectLocale());
+  const conveneStrategyCouncil = useCallback(async (question, decisionType, signal) => {
+    const request = resolveCouncilRequest(
+      councilRequestRef.current,
+      question,
+      decisionType,
+      () => globalThis.crypto?.randomUUID?.(),
+    );
+    if (!request.requestId) throw new Error("This browser cannot create a secure Council request ID.");
+    const payload = createCouncilPayload(request.question, request.decisionType, request.requestId);
+    councilRequestRef.current = request;
+    setAgentStatus({
+      active: "strategy_council",
+      phase: locale === "ko"
+        ? "전략 위원회가 결정을 검토하고 있습니다..."
+        : "Strategy Council is reviewing your decision...",
+    });
+    const response = await authedFetch("/api/council/convene", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept-Language": locale,
+        "X-CollegeApp-Locale": locale,
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (!isAmbiguousCouncilFailure(response.status) && councilRequestRef.current?.requestId === request.requestId) {
+        councilRequestRef.current = null;
+      }
+      const error = new Error(councilErrorMessage(response.status, body, locale));
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    const formatted = formatCouncilResult(body, locale);
+    if (councilRequestRef.current?.requestId === request.requestId) councilRequestRef.current = null;
+    return formatted;
+  }, [authedFetch, locale]);
   // Lightweight modal panel selector: "narrative" | "candidates" | "deadlines" | null.
   // The modal renders over CHAT so the student doesn't lose chat context.
   const [activePanel, setActivePanel] = useState(null);
+  const modalRef = useRef(null);
   // Survey step 3 = personal narrative (new). Stored separately from the
   // encrypted blob because the backend owns it and the bundle pulls the
   // active row server-side.
@@ -2999,6 +2837,32 @@ export default function App() {
     setLocaleState(next);
     try { localStorage.setItem("cc_locale", next); } catch { /* ignore */ }
   }, []);
+  useEffect(() => {
+    document.documentElement.lang = locale === "ko" ? "ko" : "en";
+  }, [locale]);
+
+  useEffect(() => {
+    if (!activePanel) return undefined;
+    const previous = document.activeElement;
+    const focusableSelector = "button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])";
+    const focusFirst = () => modalRef.current?.querySelector(focusableSelector)?.focus();
+    const frame = requestAnimationFrame(focusFirst);
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); setActivePanel(null); return; }
+      if (event.key !== "Tab" || !modalRef.current) return;
+      const items = Array.from(modalRef.current.querySelectorAll(focusableSelector));
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+      previous?.focus?.();
+    };
+  }, [activePanel]);
   const chatEnd = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -3007,253 +2871,6 @@ export default function App() {
   const chatTextareaRef = useRef(null);
   const createPassStrength = getPassphraseStrength(cPass);
   const isFreshman = user?.grade === "Freshman";
-
-  // ─── API KEY (BYOK) PREREQUISITE STATE ───
-  // The student must store a personal API key + per-tier model defaults
-  // before the survey can start. On every login we also re-check whether
-  // the provider's recommended default for any tier has changed since the
-  // student last saved their key, and prompt them to update if so.
-  const [apiKeyStatus, setApiKeyStatus] = useState(null);    // { hasPersonalKey, provider, hint, defaults }
-  const [providerCatalog, setProviderCatalog] = useState([]); // from /api/llm/providers
-  const [pendingAfterApiKey, setPendingAfterApiKey] = useState(null); // S.SURVEY | S.CHAT
-  const [modelUpdateInfo, setModelUpdateInfo] = useState(null); // { provider, changes: [{tier, from, to}] }
-  const [akProvider, setAkProvider] = useState("openrouter");
-  const [akApiKey, setAkApiKey] = useState("");
-  const [akBaseUrl, setAkBaseUrl] = useState("");
-  const [akSmall, setAkSmall] = useState("");
-  const [akMedium, setAkMedium] = useState("");
-  const [akLarge, setAkLarge] = useState("");
-  const [akError, setAkError] = useState("");
-  const [akSaving, setAkSaving] = useState(false);
-  // Live OpenRouter model catalog (from /api/llm/openrouter/models). Populates
-  // the model dropdowns with real, currently-served IDs so the student never
-  // picks a model that 404s. [{ id, name, free, pricing }]
-  const [orModels, setOrModels] = useState([]);
-
-  // Fetch current key status + provider catalog. Returns updateInfo (or null)
-  // when a recommended-model change is detected for the student's stored key.
-  const refreshApiKeyState = useCallback(async () => {
-    const token = window.__CC_SESSION_TOKEN__;
-    const proxyBase = (window.__CC_PROXY_URL__ || "/api/chat").replace(/\/(?:chat|anthropic)\/?$/,"");
-    try {
-      // The providers catalog is public (no auth) — always fetch it so the
-      // form has fresh defaults even before the student has a session token
-      // (e.g. immediately post-register, or in odd auth-restore edge cases).
-      // The /students/apikey status fetch is conditional on having a token.
-      const catRes = await fetch(`${proxyBase}/llm/providers`);
-      const catBody = catRes.ok ? await catRes.json() : { providers: [] };
-      const catalog = catBody.providers || [];
-      let status = null;
-      if (token) {
-        const statusRes = await fetch(`${proxyBase}/students/apikey`, { headers: { Authorization: `Bearer ${token}` } });
-        status = statusRes.ok ? await statusRes.json() : null;
-      }
-      setApiKeyStatus(status);
-      setProviderCatalog(catalog);
-
-      // Auto-select the latest models for whichever provider the form is
-      // pointing at. The values track the backend's daily live-refresh of
-      // /api/llm/providers — students never pick them by hand.
-      // Default fresh students to OpenRouter (cheapest + most flexible —
-      // pools credits across providers, has a free tier). Returning
-      // students who already have a stored provider keep theirs.
-      const currentProv = catalog.find(p => p.id === (status?.provider || "openrouter"))
-                       || catalog.find(p => p.id === "openrouter")
-                       || catalog[0];
-      if (currentProv?.defaults) {
-        setAkSmall(currentProv.defaults.small || "");
-        setAkMedium(currentProv.defaults.medium || "");
-        setAkLarge(currentProv.defaults.large || "");
-      }
-
-      let updateInfo = null;
-      if (status?.hasPersonalKey) {
-        const prov = catalog.find(p => p.id === status.provider);
-        const latest = prov?.defaults || {};
-        const changes = [];
-        for (const tier of ["small","medium","large"]) {
-          const have = status.defaults?.[tier];
-          const want = latest[tier];
-          if (want && have && want !== have) changes.push({ tier, from: have, to: want });
-        }
-        if (changes.length) updateInfo = { provider: status.provider, changes };
-        setModelUpdateInfo(updateInfo);
-      } else {
-        setModelUpdateInfo(null);
-      }
-      return { status, catalog, updateInfo };
-    } catch (err) {
-      console.warn("[BYOK] Status fetch failed:", err?.message);
-      return { status: null, catalog: [], updateInfo: null };
-    }
-  }, []);
-
-  // Gate any destination behind the API-key prerequisite.
-  //   gateToScreen(S.SURVEY) → either sets APIKEY (if missing key or stale
-  //   models) or sets the target screen directly.
-  const gateToScreen = useCallback(async (target) => {
-    const { status, catalog, updateInfo } = await refreshApiKeyState();
-    const needsKey = !status || !status.hasPersonalKey;
-    const needsUpdate = !!updateInfo;
-    if (!needsKey && !needsUpdate) {
-      setScreen(target);
-      return;
-    }
-    // Prime the form with what we know
-    const prov = (status?.provider) || "openrouter";
-    setAkProvider(prov);
-    setAkBaseUrl(status?.baseUrl || "");
-    const provMeta = catalog.find(p => p.id === prov);
-    setAkSmall(status?.defaults?.small || provMeta?.defaults?.small || "");
-    setAkMedium(status?.defaults?.medium || provMeta?.defaults?.medium || "");
-    setAkLarge(status?.defaults?.large || provMeta?.defaults?.large || "");
-    setAkApiKey("");
-    setAkError("");
-    setPendingAfterApiKey(target);
-    setScreen(S.APIKEY);
-  }, [refreshApiKeyState]);
-
-  // Apply the latest recommended models for the current provider into the
-  // form fields (used by the "Update models" button when a stale-model
-  // notice is showing).
-  const applyLatestModels = useCallback(() => {
-    const prov = providerCatalog.find(p => p.id === akProvider);
-    if (!prov) return;
-    if (prov.defaults?.small)  setAkSmall(prov.defaults.small);
-    if (prov.defaults?.medium) setAkMedium(prov.defaults.medium);
-    if (prov.defaults?.large)  setAkLarge(prov.defaults.large);
-  }, [providerCatalog, akProvider]);
-
-  // When OpenRouter is the selected provider, pull its LIVE model catalog so
-  // the per-tier dropdowns offer only models that currently exist (sorted
-  // free-first, then cheapest). Falls back to the static knownModels list if
-  // the catalog is empty/unreachable.
-  useEffect(() => {
-    if (akProvider !== "openrouter") { setOrModels([]); return; }
-    let cancelled = false;
-    const proxyBase = (window.__CC_PROXY_URL__ || "/api/chat").replace(/\/(?:chat|anthropic)\/?$/, "");
-    (async () => {
-      try {
-        const r = await fetch(`${proxyBase}/llm/openrouter/models`);
-        if (!r.ok) return;
-        const body = await r.json();
-        if (cancelled || !Array.isArray(body.models)) return;
-        const sorted = body.models.slice().sort((a, b) => {
-          if (a.free !== b.free) return a.free ? -1 : 1;
-          const ap = a.pricing?.inputPerMTok ?? Infinity;
-          const bp = b.pricing?.inputPerMTok ?? Infinity;
-          return ap - bp;
-        });
-        setOrModels(sorted);
-      } catch { /* keep the static fallback */ }
-    })();
-    return () => { cancelled = true; };
-  }, [akProvider]);
-
-  // Save key + tier defaults via PUT /api/students/apikey, then proceed
-  // to whatever screen was pending.
-  const saveApiKey = useCallback(async () => {
-    setAkError("");
-    setAkSaving(true);
-    try {
-      const proxyBase = (window.__CC_PROXY_URL__ || "/api/chat").replace(/\/(?:chat|anthropic)\/?$/,"");
-      // Reusable re-auth: (re-)establish a session token from the saved
-      // email. Handles BOTH a missing token AND a stale one (a token
-      // present in the browser but no longer recognized by the backend
-      // — e.g. after a backend restart). Returns the new token or null.
-      const reauth = async () => {
-        if (!user?.email) return null;
-        try {
-          const emailH = await hashEmail(user.email);
-          let r = await fetch(`${proxyBase}/students/auth`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email: user.email, emailHash: emailH, isMinor: false }),
-          });
-          let d = await r.json().catch(() => ({}));
-          if (!d.token) {
-            r = await fetch(`${proxyBase}/students/register`, {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ email: user.email, emailHash: emailH, grade: user.grade, schoolDomain: getEmailDomain(user.email), isMinor: false }),
-            });
-            d = await r.json().catch(() => ({}));
-          }
-          if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; await persistSessionToken(d.token); return d.token; }
-        } catch (reauthErr) {
-          console.warn("[BYOK] Re-auth failed:", reauthErr?.message);
-        }
-        return null;
-      };
-
-      let token = window.__CC_SESSION_TOKEN__;
-      if (!token) token = await reauth();
-      if (!token) throw new Error("Not authenticated. Please sign out and sign in again.");
-
-      // If we already have a key and the user is here only because models
-      // changed, allow them to update models WITHOUT re-entering the key by
-      // accepting the existing key when the input is left blank.
-      const reusingKey = !akApiKey.trim() && apiKeyStatus?.hasPersonalKey;
-      const payload = {
-        provider: akProvider,
-        baseUrl: akBaseUrl || undefined,
-        defaultModels: {
-          small: akSmall || undefined,
-          medium: akMedium || undefined,
-          large: akLarge || undefined,
-        },
-      };
-      // For a model-only update we PUT a dummy "rotate" using the existing
-      // hint as the apiKey is required server-side. So if the user is just
-      // rotating models, we ask them to re-enter the key (more secure than
-      // having the backend silently reuse an encrypted value).
-      if (reusingKey) {
-        setAkError("Please re-enter your API key to confirm the model update.");
-        setAkSaving(false);
-        return;
-      }
-      payload.apiKey = akApiKey.trim();
-
-      const putKey = (tok) => fetch(`${proxyBase}/students/apikey`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
-        body: JSON.stringify(payload),
-      });
-
-      let r = await putKey(token);
-      // If the token was stale (present in the browser but invalidated
-      // server-side — the classic post-restart "Invalid or expired
-      // session token"), transparently re-auth ONCE and retry. The
-      // student never sees the error.
-      if (r.status === 401) {
-        console.info("[BYOK] Token rejected (401) — re-authenticating and retrying…");
-        const fresh = await reauth();
-        if (fresh) { token = fresh; r = await putKey(token); }
-      }
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setAkError(
-          r.status === 401
-            ? "Your session expired and automatic re-login didn't work. Click Sign out, then sign back in."
-            : (body.error || `Save failed (${r.status})`)
-        );
-        return;
-      }
-      // Dev-mode: if the backend promoted this BYOK to the operator key,
-      // log so the dev knows operator-side paths (orchestrate proxy, the
-      // daily OpenRouter model-catalog refresh) are now using their key too.
-      if (body.promotedToOperatorKey) {
-        console.info("[BYOK] Key promoted to operator slot (NODE_ENV=development). The operator's previously-set provider API key has been overridden in memory until the backend restarts.");
-      }
-      // Refresh and continue
-      await refreshApiKeyState();
-      const next = pendingAfterApiKey || S.SURVEY;
-      setPendingAfterApiKey(null);
-      setScreen(next);
-    } catch (err) {
-      setAkError(err.message || "Save failed.");
-    } finally {
-      setAkSaving(false);
-    }
-  }, [akProvider, akApiKey, akBaseUrl, akSmall, akMedium, akLarge, apiKeyStatus, pendingAfterApiKey, refreshApiKeyState]);
 
   // Hydrate the survey form fields from a `data`-shaped source. Defaults
   // to the live `data` state, but callers can pass an explicit source
@@ -3305,8 +2922,6 @@ export default function App() {
     setSECInput({ name:"", category:"club", role:"", hoursPerWeek:"", weeksPerYear:"", description:"", grades:[], timing:"school_year" });
     setSGoals([...(d.goals || [])]);
     setsMajorInterest(d.majorInterest || d.profile?.majorInterest || "");
-    setSParentEmail(d.parentGuardian?.email || "");
-    setSParentNotify(Boolean(d.parentGuardian?.notifyOnCrisis));
     setSurveyError("");
   }, [data]);
 
@@ -3366,9 +2981,9 @@ export default function App() {
     const merged = await reconcileWithBackendProfile(data);
     hydrateSurveyFromCurrentData(merged);
     setSurveyStep(step);
-    gateToScreen(S.SURVEY);
+    setScreen(S.SURVEY);
     setSidebarOpen(false);
-  }, [reconcileWithBackendProfile, hydrateSurveyFromCurrentData, gateToScreen, data]);
+  }, [reconcileWithBackendProfile, hydrateSurveyFromCurrentData, data]);
 
   // Double-click an EC in the Profile sidebar → open the survey EC
   // step (3) with that activity pre-loaded into the edit form, and
@@ -3393,13 +3008,13 @@ export default function App() {
     // hydrate's setSECs because both are queued in order).
     setSECs(prev => prev.filter(e => key(e) !== target));
     setSurveyStep(3);
-    gateToScreen(S.SURVEY);
+    setScreen(S.SURVEY);
     setSidebarOpen(false);
     setTimeout(() => {
       const el = document.querySelector('input[placeholder="Activity name"]');
       if (el?.scrollIntoView) { el.scrollIntoView({ behavior:"smooth", block:"center" }); try { el.focus(); } catch {} }
     }, 60);
-  }, [hydrateSurveyFromCurrentData, gateToScreen]);
+  }, [hydrateSurveyFromCurrentData]);
 
   // ─── Inline sidebar editing ───
   // Rename a chat thread (double-click its title). Persists via PATCH; the
@@ -3426,6 +3041,7 @@ export default function App() {
   const createDeadlinesForSchool = useCallback(async (school) => {
     const name = String(school || "").trim();
     if (!name) return;
+    const unitId = resolveTargetUnitId(name);
     // Try the calendar/web lookup (advanced model researches real dates), but
     // never block deadline creation on it — fall back to client typical dates
     // so deadlines are added even if the web call is rate-limited/unavailable.
@@ -3463,7 +3079,13 @@ export default function App() {
       const fromWeb = Boolean(webVal && Number.isFinite(Date.parse(webVal)));
       const date = toISO(webVal, typicalVal);
       if (!date) return null;
-      return { title: `${name} — ${round}`, dueAt: date, category, notes: fromWeb ? webNote : typicalNote };
+      return {
+        title: `${name} — ${round}`,
+        dueAt: date,
+        category,
+        notes: fromWeb ? webNote : typicalNote,
+        ...(unitId ? { collegeIds: [unitId] } : {}),
+      };
     };
     const items = [
       mk("Early (EA/ED)", sd.ea || sd.ed, iso.earlyEaEd, "admissions"),
@@ -3601,17 +3223,19 @@ export default function App() {
     return () => setReauthListener(null);
   }, []);
 
+  useEffect(() => {
+    setReauthCredentialProvider(() => user?.email && passphrase
+      ? { email: user.email, password: passphrase }
+      : null);
+    return () => setReauthCredentialProvider(null);
+  }, [user?.email, passphrase]);
+
   // ─── AUTO-LOGIN: check for saved session on mount ───
   useEffect(() => {
     (async () => {
       const accts = await loadAccounts();
       setAccounts(accts);
       const session = await loadSession();
-      // Rehydrate the bearer token from storage so a page reload doesn't start
-      // with an empty window.__CC_SESSION_TOKEN__. It's validated lazily on the
-      // first authed call (authedFetch heals a stale token via _tryReAuth); the
-      // user still re-enters their passphrase below to unlock the local vault.
-      if (session?.token) window.__CC_SESSION_TOKEN__ = session.token;
       if (session?.emailHash) {
         // Match hashed email against known accounts
         for (const email of Object.keys(accts)) {
@@ -3689,7 +3313,7 @@ export default function App() {
 
   // ─── SPONTANEOUS BACKEND → FRONTEND PULL ───
   // Poll /api/students/profile every 30s while on CHAT to surface server-side updates
-  // (percentile recalcs, milestone awards, review queue outcomes, freshly synced metrics).
+  // (percentile recalculations, milestone awards, and freshly synced metrics).
   // Writes to `serverMetrics` — NEVER overwrites local profile to avoid clobbering edits.
   const [serverMetrics, setServerMetrics] = useState(null);
   // One-shot backend-profile recovery per chat-screen entry. If the
@@ -3715,7 +3339,7 @@ export default function App() {
       const token = window.__CC_SESSION_TOKEN__;
       if (!token) return;
       try {
-        const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+        const base = proxyUrl.replace(/\/chat\/?$/,"");
         const r = await fetch(`${base}/students/profile`, {
           headers: { "Authorization": `Bearer ${token}` }
         });
@@ -3770,7 +3394,7 @@ export default function App() {
     if (!cEmail.trim()) { setCError("Email is required"); return; }
     if (!cEmail.includes("@") || !cEmail.includes(".")) { setCError("Please enter a valid email address."); return; }
     if (!cGrade) { setCError("Select your grade"); return; }
-    if (cPass.length < 8) { setCError("Passphrase must be at least 8 characters. We recommend 12+ for stronger protection."); return; }
+    if (cPass.length < 12) { setCError("Passphrase must be at least 12 characters."); return; }
     if (cPass !== cPass2) { setCError("Passphrases don't match"); return; }
     if (!cAgeAttest) { setCError("You must confirm you are a high school student (ages 14-18) or have parental consent"); return; }
     if (!cConsentAI) { setCError("You must acknowledge that this is an AI system before continuing"); return; }
@@ -3784,9 +3408,9 @@ export default function App() {
     //    A silent backend failure here is exactly what used to strand users
     //    on the API-key screen with no session ("Not authenticated").
     const proxyUrl = window.__CC_PROXY_URL__;
-    const sess = await establishServerSession({ proxyUrl, email, grade: cGrade, mode: "create" });
+    const sess = await establishServerSession({ proxyUrl, email, password: cPass, name: cName.trim(), grade: cGrade, mode: "create" });
     // Existing email must not silently drop the user into someone else's
-    // data (their BYOK, profile, chat threads). Route to LOGIN instead.
+    // data (their profile and chat threads). Route to LOGIN instead.
     if (sess.existing) {
       setCError("An account with this email already exists. Sign in instead.");
       setLEmail(email);
@@ -3814,33 +3438,21 @@ export default function App() {
     setUser(u);
     setPassphrase(cPass);
     await saveSession({ email });
+    setStudentRecoveryCode(sess.recoveryCode || "");
 
     // Grant onboarding consents now that we hold a verified server session.
     if (sess.ok && window.__CC_SESSION_TOKEN__) {
-      const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+      const base = proxyUrl.replace(/\/chat\/?$/,"");
       const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
       await Promise.allSettled([
         fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
         fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
-        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "cross_border_transfer", grantedBy: "student" }) }),
       ]);
     }
 
-    // First-run only: if the backend still needs an encryption/IPEDS key
-    // (and we're on the server host, where /api/setup/status answers), route
-    // through the one-time server-setup step. Once configured — or for a
-    // remote backend that 403s the loopback-only status — skip straight to
-    // the API-key prerequisite. The setup step itself hands off to
-    // gateToScreen(S.SURVEY), so the API-key scene always comes next.
     setSurveyStep(0);
-    let needsSetup = false;
-    try {
-      const sres = await fetch("/api/setup/status");
-      if (sres.ok) { const sj = await sres.json(); needsSetup = !!sj.setupAvailable; }
-    } catch { /* no backend / not on host → skip setup */ }
-    if (needsSetup) setScreen(S.SETUP);
-    else gateToScreen(S.SURVEY);
-  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData, accounts, gateToScreen]);
+    setScreen(S.SURVEY);
+  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData, accounts]);
 
   // ─── LOGIN ───
   const [loginAttempts, setLoginAttempts] = useState({});
@@ -3893,7 +3505,7 @@ export default function App() {
     //    register, heals a returning user whose server account is missing
     //    (e.g. a fresh or restored backend).
     const proxyUrl = window.__CC_PROXY_URL__;
-    const sess = await establishServerSession({ proxyUrl, email, grade: acct.grade, mode: "login" });
+    const sess = await establishServerSession({ proxyUrl, email, password: lPass, grade: acct.grade, mode: "login" });
     // Offline-first: the vault already decrypted locally above, so a down/
     // unreachable backend must NOT lock the student out of their own on-device
     // data (that made it look like the account was wiped). Enter in a degraded
@@ -3908,18 +3520,6 @@ export default function App() {
     setPassphrase(lPass);
     await saveSession({ email });
 
-    // Re-grant consents on every login (backend is idempotent) — covers
-    // upgraded backends that added new required consent types.
-    if (sess.ok && window.__CC_SESSION_TOKEN__) {
-      const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
-      const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
-      await Promise.allSettled([
-        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
-        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
-        fetch(`${base}/consent/grant`, { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "cross_border_transfer", grantedBy: "student" }) }),
-      ]);
-    }
-
     // ─── Backend profile recovery ───
     // The backend DB is the durable source of truth for grades/GPA/ECs.
     // If the local vault is empty/sparse (vault reset, new browser, or a
@@ -3929,7 +3529,7 @@ export default function App() {
     let backendHasProfile = false;
     if (window.__CC_SESSION_TOKEN__ && proxyUrl) {
       try {
-        const base = proxyUrl.replace(/\/(?:chat|anthropic)\/?$/,"");
+        const base = proxyUrl.replace(/\/chat\/?$/,"");
         const pr = await fetch(`${base}/students/profile`, { headers: { Authorization: `Bearer ${window.__CC_SESSION_TOKEN__}` } });
         if (pr.ok) {
           const pb = await pr.json();
@@ -3983,17 +3583,48 @@ export default function App() {
     // local surveyCompleted flag.
     if (!backendHasProfile && !acct.surveyCompleted) {
       setSurveyStep(0);
-      gateToScreen(S.SURVEY);
+      setScreen(S.SURVEY);
       return;
     }
 
     setMessages([{ role:"assistant", content:`Hey ${acct.name}! What would you like to work on?` }]);
-    // Even returning students get re-checked for newer recommended models.
-    gateToScreen(S.CHAT);
-  }, [lEmail, lPass, accounts, loginAttempts, gateToScreen]);
+    setScreen(S.CHAT);
+  }, [lEmail, lPass, accounts, loginAttempts]);
+
+  const handleStudentRecovery = useCallback(async (event) => {
+    event.preventDefault();
+    setStudentRecoveryMessage(null);
+    const email = lEmail.toLowerCase().trim();
+    if (!email || !studentRecoveryInput.trim()) { setStudentRecoveryMessage({ type:"error", text:"Enter your email and recovery code." }); return; }
+    if (studentRecoveryPassword.length < 12) { setStudentRecoveryMessage({ type:"error", text:"New passphrase must be at least 12 characters." }); return; }
+    setStudentRecoveryBusy(true);
+    try {
+      const response = await fetch("/api/students/recover", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({ email, recoveryCode:studentRecoveryInput.trim(), newPassword:studentRecoveryPassword }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Recovery failed.");
+      // The old local vault cannot be decrypted without its passphrase. Start
+      // a new encrypted verifier; server-synced profile data is restored after
+      // the next successful login.
+      await storageApi.set(storageKeyFor(email), await encrypt({ _verifier:true }, studentRecoveryPassword, email));
+      setLPass(studentRecoveryPassword);
+      setStudentRecoveryInput("");
+      setStudentRecoveryPassword("");
+      setStudentRecoveryOpen(false);
+      setStudentRecoveryMessage({ type:"success", text:"Passphrase reset. Sign in to restore server-synced data." });
+    } catch (error) {
+      setStudentRecoveryMessage({ type:"error", text:error?.message || "Recovery failed." });
+    } finally {
+      setStudentRecoveryBusy(false);
+    }
+  }, [lEmail, studentRecoveryInput, studentRecoveryPassword]);
 
   // ─── LOGOUT ───
   const handleLogout = useCallback(async () => {
+    try { await authedFetch("/api/students/logout", { method: "POST" }); } catch { /* local logout still proceeds */ }
     await clearSession();
     sessionTimer.clear();
     rateLimiter.reset();
@@ -4003,7 +3634,51 @@ export default function App() {
     setData({ profile:null, activities:[], studyNotes:[], documents:[] });
     setMessages([]);
     setScreen(S.LOGIN);
-  }, []);
+  }, [authedFetch]);
+
+  const handleExportData = useCallback(async () => {
+    try {
+      const response = await authedFetch("/api/students/export");
+      if (!response.ok) throw new Error("Export failed");
+      const body = await response.json();
+      const url = URL.createObjectURL(new Blob([JSON.stringify(body, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = makeExportFilename(user);
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      window.alert(error?.message || "Export failed. Please try again.");
+    }
+  }, [authedFetch, user]);
+
+  const handleDeleteAccount = useCallback(async () => {
+    if (!window.confirm("Delete your account and all local and server data? This cannot be undone.")) return;
+    const email = user?.email;
+    if (!email) return;
+    try {
+      const response = await authedFetch("/api/students", { method: "DELETE" });
+      if (!response.ok) throw new Error("The server did not confirm complete deletion.");
+      await storageApi.delete(storageKeyFor(email));
+      await storageApi.delete(`cc_draft_${safeBtoa(email).replace(/[^a-zA-Z0-9]/g, "")}`);
+      try { localStorage.removeItem(`cc_targets_${email}`); } catch {}
+      const updated = { ...accounts };
+      delete updated[email];
+      setAccounts(updated);
+      await saveAccounts(updated);
+      await clearSession();
+      sessionTimer.clear();
+      rateLimiter.reset();
+      window.__CC_SESSION_TOKEN__ = null;
+      setUser(null);
+      setPassphrase("");
+      setData({ profile:null, activities:[], studyNotes:[], documents:[] });
+      setMessages([]);
+      setScreen(S.CREATE);
+    } catch (error) {
+      window.alert(error?.message || "Deletion failed. No local data was removed.");
+    }
+  }, [accounts, authedFetch, user?.email]);
 
   // ─── COMPLETE SURVEY → build profile → go to chat ───
   const handleSurveyComplete = useCallback(async () => {
@@ -4026,7 +3701,6 @@ export default function App() {
     setData(prev => ({
       ...prev, profile, activities, surveyCompleted: true, goals: sGoals, majorInterest: sMajorInterest,
       documents: (prev.documents || []).filter(doc => doc?.source !== "survey_transcript"),
-      parentGuardian: sParentEmail.trim() ? { email: sParentEmail.trim(), notifyOnCrisis: sParentNotify, studentName: user?.name || "" } : undefined
     }));
 
     const sum = [];
@@ -4059,16 +3733,6 @@ export default function App() {
         setSurveyError("Couldn't save your profile to your counselor — check your connection and try again.");
         return; // stay on the survey; do NOT enter a chat the backend can't back
       }
-      // Confirm the AI session is actually usable (BYOK key on file). If not,
-      // route to the API-key step first and come back to chat afterwards.
-      try {
-        const { status } = await refreshApiKeyState();
-        if (status && status.hasPersonalKey === false) {
-          setPendingAfterApiKey(S.CHAT);
-          setScreen(S.APIKEY);
-          return;
-        }
-      } catch { /* non-fatal — proceed to chat */ }
     }
 
     // FIX P2: Only reset messages on FIRST setup. If editing from chat, append an update
@@ -4097,15 +3761,34 @@ export default function App() {
       try { localStorage.setItem("cc_narrative_pending_" + user.email, "1"); } catch { /* ignore */ }
       // Survey is committed — drop the interrupted-draft autosave so it can't
       // rehydrate stale entries next time.
-      clearDraft(storageApi, `cc_draft_${safeBtoa(user.email).replace(/[^a-zA-Z0-9]/g, "")}`);
+      storageApi.delete(`cc_draft_${safeBtoa(user.email).replace(/[^a-zA-Z0-9]/g, "")}`);
     }
 
     setScreen(S.CHAT);
-  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, sParentEmail, sParentNotify, user, accounts, messages, authedFetch, refreshApiKeyState]);
+  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, user, accounts, messages, authedFetch]);
 
   // ─── SEND MESSAGE ───
   const send = useCallback(async () => {
     if ((!input.trim() && !pendingFile && chatFiles.length === 0) || loading) return;
+    const councilTypeForTurn = councilDecisionType;
+    if (councilTypeForTurn && (pendingFile || chatFiles.length > 0)) {
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: locale === "ko"
+          ? "전략 위원회 질문에는 첨부 파일을 사용할 수 없습니다. 파일을 제거하거나 일반 채팅을 사용해 주세요."
+          : "Strategy Council cannot accept attachments. Remove them or use ordinary chat.",
+      }]);
+      return;
+    }
+    if (councilTypeForTurn && input.trim().length > 2000) {
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: locale === "ko"
+          ? "전략 위원회 질문은 2,000자 이하여야 합니다."
+          : "Strategy Council questions are limited to 2,000 characters.",
+      }]);
+      return;
+    }
 
     // Burst guard only (3 requests / 10s). Catches stuck-button
     // double-fires; not a per-minute cost cap.
@@ -4113,6 +3796,10 @@ export default function App() {
       setMessages(prev => [...prev, { role:"assistant", content:"Three messages in 10 seconds — give it a beat. (This is just a burst guard against accidental double-clicks; there's no per-minute cap.)" }]);
       return;
     }
+    if (councilTypeForTurn) setCouncilDecisionType(null);
+    const councilClientTurnId = councilTypeForTurn
+      ? `council-turn-${++councilTurnSequenceRef.current}`
+      : null;
 
     // ─── Chat-file marshalling ───
     // Text files: serialize all of them into a fenced context block
@@ -4178,31 +3865,24 @@ export default function App() {
       attachment: allAttachmentsForBubble.length === 1
         ? allAttachmentsForBubble[0]
         : (allAttachmentsForBubble.length > 1 ? { name: `${allAttachmentsForBubble.length} files`, list: allAttachmentsForBubble.map(a => a.name) } : null),
+      ...(councilClientTurnId ? { clientTurnId: councilClientTurnId } : {}),
     }]);
     setLoading(true);
     abortRef.current = new AbortController();
 
-    // ─── Ensure an active thread, then persist the user turn ───
+    // Ensure an active thread, but do not persist raw input until moderation
+    // and orchestration have accepted the turn.
     // If there's no active thread (fresh chat session), create one now.
     // The thread auto-titles itself from this first user message.
     let threadIdForTurn = activeThreadId;
-    if (!threadIdForTurn) {
-      threadIdForTurn = await newThread();
+    const isNewThread = !threadIdForTurn;
+    if (!threadIdForTurn && !councilTypeForTurn) {
+      threadIdForTurn = await newThread(undefined, true);
     }
-    if (threadIdForTurn) {
-      // Persist the DISPLAY text (baseMsg), NEVER the file-preface
-      // dump (`msg`). Otherwise reloading the thread renders all the
-      // attached file contents inline in the chat bubble. The
-      // attachment label captures what was attached so the reloaded
-      // bubble still shows a "📎 …" marker.
-      const attachLabel = allAttachmentsForBubble.length === 1
-        ? allAttachmentsForBubble[0].name
-        : allAttachmentsForBubble.length > 1
-          ? `${allAttachmentsForBubble.length} files`
-          : null;
-      const persistedContent = baseMsg || (attachLabel ? `📎 ${attachLabel}` : "");
-      persistTurn(threadIdForTurn, "user", persistedContent, attachLabel);
-    }
+    const attachLabel = allAttachmentsForBubble.length === 1
+      ? allAttachmentsForBubble[0].name
+      : allAttachmentsForBubble.length > 1 ? `${allAttachmentsForBubble.length} files` : null;
+    const persistedContent = baseMsg || (attachLabel ? `Attachment: ${attachLabel}` : "");
 
     // FIX P2: File metadata is saved to documents ONLY after orchestrate succeeds
     // and the file passes safety screening inside orchestrate(). If the upload is
@@ -4220,9 +3900,46 @@ export default function App() {
       // stale "today"; re-injected fresh every turn.
       const calPreamble = buildCalendarPreamble(calendarCtx, targetSchools);
       const modelMsg = calPreamble ? `${msg}\n\n${calPreamble}` : msg;
-      const result = await orchestrate(modelMsg, requestData, setData, setAgentStatus, abortRef.current.signal, attachment || null, messages);
+      const result = councilTypeForTurn
+        ? await conveneStrategyCouncil(baseMsg, councilTypeForTurn, abortRef.current.signal)
+        : await orchestrate(modelMsg, requestData, setData, setAgentStatus, abortRef.current.signal, attachment || null, messages);
+      if (!threadIdForTurn && councilTypeForTurn) {
+        threadIdForTurn = await newThread(undefined, true);
+      }
       setMessages(prev => [...prev, { role:"assistant", content:result.text }]);
-      if (threadIdForTurn && result?.text) persistTurn(threadIdForTurn, "assistant", result.text);
+      refreshBudget();
+      if (threadIdForTurn && !result.blocked && !result.uploadRejected) {
+        await persistTurn(threadIdForTurn, "user", persistedContent, attachLabel);
+      }
+      if (threadIdForTurn && result?.text) {
+        await persistTurn(threadIdForTurn, "assistant", result.text);
+      }
+      // Auto-name a brand-new conversation from its first message (LLM, small
+      // tier, crisis-safe server-side). Best-effort; the first-line title stays
+      // if it fails. Refresh the sidebar so the generated name shows.
+      if (
+        isNewThread &&
+        threadIdForTurn &&
+        result?.text &&
+        (result.crisisSafe || !result.blocked)
+      ) {
+        try {
+          const fixedTitle = result.threadTitle || (result.crisisSafe ? "Support resources" : null);
+          const response = fixedTitle
+            ? await authedFetch(`/api/students/threads/${threadIdForTurn}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title: fixedTitle }),
+            })
+            : await authedFetch(`/api/students/threads/${threadIdForTurn}/autoname`, {
+              method: "POST",
+            });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        } catch (err) {
+          console.warn("[CHAT] auto-name failed:", err?.message);
+        }
+        await refreshThreadList();
+      }
 
       // FIX P2: Only persist file metadata AFTER successful processing (not rejected/cancelled)
       if (attachment && !result.blocked && !result.uploadRejected) {
@@ -4243,20 +3960,21 @@ export default function App() {
       }
     } catch (err) {
       // FIX P2: On cancel/error, no file metadata is saved
-      if (err.name === "AbortError") {
-        const text = "Cancelled. You can send a new question whenever you're ready.";
-        setMessages(prev => [...prev, { role:"assistant", content: text }]);
-        if (threadIdForTurn) persistTurn(threadIdForTurn, "assistant", text);
+      const text = err.name === "AbortError"
+        ? "Cancelled. You can send a new question whenever you're ready."
+        : formatUserFacingError(err);
+      if (councilTypeForTurn) {
+        setInput(baseMsg);
+        setMessages((prev) => reconcileCouncilFailureMessages(prev, councilClientTurnId, text));
       } else {
-        const text = formatUserFacingError(err);
         setMessages(prev => [...prev, { role:"assistant", content: text }]);
-        if (threadIdForTurn) persistTurn(threadIdForTurn, "assistant", text);
+        if (threadIdForTurn) await persistTurn(threadIdForTurn, "assistant", text);
       }
     }
     setLoading(false);
     setAgentStatus({ active:null, phase:"" });
     setTimeout(() => (chatTextareaRef.current||inputRef.current)?.focus(), 100);
-  }, [input, loading, data, pendingFile, chatFiles, messages, activeThreadId, newThread, persistTurn, calendarCtx, targetSchools]);
+  }, [input, loading, data, pendingFile, chatFiles, messages, activeThreadId, newThread, persistTurn, calendarCtx, targetSchools, refreshBudget, authedFetch, refreshThreadList, councilDecisionType, conveneStrategyCouncil, locale]);
 
   const profile = data.profile || {};
   const activities = data.activities || [];
@@ -4266,7 +3984,7 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   if (screen === S.LOADING) {
     return (
-      <div style={{ minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT }}>
+      <main style={{ minHeight:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT,padding:"20px 0" }}>
         <div style={{ textAlign:"center" }}>
           <div style={{ display:"flex",justifyContent:"center",gap:6,marginBottom:16 }}>
             {dots.map((c,i)=>(<div key={i} style={{width:10,height:10,borderRadius:"50%",background:c,animation:`pulse2 1.4s ease-in-out ${i*0.12}s infinite`}} />))}
@@ -4274,7 +3992,7 @@ export default function App() {
           <div style={{ fontSize:14,color:"#6a6a7a" }}>Loading your vault...</div>
         </div>
         <style>{GLOBAL_CSS}</style>
-      </div>
+      </main>
     );
   }
 
@@ -4283,7 +4001,7 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   if (screen === S.CREATE) {
     return (
-      <div style={{ minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT }}>
+      <main style={{ minHeight:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT,padding:"20px 0" }}>
         <div className="cc-create-card" style={cardStyle}>
           <div style={{ textAlign:"center",marginBottom:32 }}>
             <div style={{ display:"flex",justifyContent:"center",gap:6,marginBottom:14 }}>
@@ -4293,22 +4011,22 @@ export default function App() {
             <p style={{ fontSize:13,color:"#6a6a7a",marginTop:8 }}>Email required · data encrypted on your device</p>
           </div>
 
-          <div style={{ display:"flex",flexDirection:"column",gap:14 }}>
+          <form onSubmit={(event)=>{event.preventDefault();handleCreate();}} style={{ display:"flex",flexDirection:"column",gap:14 }}>
             <div style={{ display:"flex",gap:10 }}>
               <div style={{ flex:1 }}>
-                <label style={labelStyle}>First name</label>
-                <input value={cFirst} onChange={e=>setCFirst(e.target.value)} placeholder="Alex"
+                <label htmlFor="create-first" style={labelStyle}>First name</label>
+                <input id="create-first" value={cFirst} onChange={e=>setCFirst(e.target.value)} placeholder="Alex"
                        name="given-name" autoComplete="given-name" autoCapitalize="words" style={inputStyle} />
               </div>
               <div style={{ flex:1 }}>
-                <label style={labelStyle}>Last name</label>
-                <input value={cLast} onChange={e=>setCLast(e.target.value)} placeholder="Kim"
+                <label htmlFor="create-last" style={labelStyle}>Last name</label>
+                <input id="create-last" value={cLast} onChange={e=>setCLast(e.target.value)} placeholder="Kim"
                        name="family-name" autoComplete="family-name" autoCapitalize="words" style={inputStyle} />
               </div>
             </div>
             <div>
-              <label style={labelStyle}>School or organizational email</label>
-              <input type="email" value={cEmail} onChange={e=>setCEmail(e.target.value)} placeholder="alex.kim@school.edu" style={inputStyle} />
+              <label htmlFor="create-email" style={labelStyle}>School or organizational email</label>
+              <input id="create-email" type="email" autoComplete="email" value={cEmail} onChange={e=>setCEmail(e.target.value)} placeholder="alex.kim@school.edu" style={inputStyle} />
               {cEmail && cEmail.includes("@") && isSchoolEmail(cEmail) && (
                 <div style={{ fontSize:11,color:"#68d391",marginTop:4 }}>
                   ✓ {getEmailDomain(cEmail)} recognized as a school domain
@@ -4320,39 +4038,39 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div>
-              <label style={labelStyle}>Grade level</label>
+            <fieldset style={{border:0,padding:0,margin:0}}>
+              <legend style={labelStyle}>Grade level</legend>
               <div style={{ display:"flex",gap:8 }}>
                 {["Freshman","Sophomore","Junior","Senior"].map(g=>(
-                  <button key={g} onClick={()=>setCGrade(g)} style={{
+                  <button type="button" key={g} aria-pressed={cGrade===g} onClick={()=>setCGrade(g)} style={{
                     flex:1,padding:"10px 0",borderRadius:10,border:`1px solid ${cGrade===g?"rgba(55,138,221,0.5)":"rgba(255,255,255,0.08)"}`,
                     background:cGrade===g?"rgba(55,138,221,0.12)":"rgba(255,255,255,0.02)",
                     color:cGrade===g?"#63b3ed":"#8a8a9a",fontSize:12,fontWeight:cGrade===g?600:400,cursor:"pointer",transition:"all 0.15s"
                   }}>{g}</button>
                 ))}
               </div>
-            </div>
+            </fieldset>
             <div>
-              <label style={labelStyle}>Passphrase (encrypts your vault)</label>
+              <label htmlFor="create-passphrase" style={labelStyle}>Passphrase (encrypts your vault and signs you in)</label>
               <div style={{display:"flex",gap:8}}>
-                <input type={showCreatePass ? "text" : "password"} value={cPass} onChange={e=>setCPass(e.target.value)} placeholder="At least 8 characters (12+ recommended)" style={{...inputStyle,flex:1}} />
+                <input id="create-passphrase" type={showCreatePass ? "text" : "password"} autoComplete="new-password" value={cPass} onChange={e=>setCPass(e.target.value)} placeholder="At least 12 characters" minLength={12} style={{...inputStyle,flex:1}} />
                 <button onClick={()=>setShowCreatePass(v=>!v)} type="button" style={{padding:"0 14px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",cursor:"pointer"}}>{showCreatePass ? "Hide" : "Show"}</button>
               </div>
               <div style={{marginTop:8}}>
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#8a8a9a",marginBottom:6}}>
-                  <span>Use a memorable phrase, like “my dog spot ate homework”.</span>
+                  <span>Use a long, memorable phrase.</span>
                   <span>{cPass.length} chars</span>
                 </div>
                 <div style={{height:6,borderRadius:999,background:"rgba(255,255,255,0.06)",overflow:"hidden"}}>
                   <div style={{height:"100%",width:createPassStrength.fill,background:createPassStrength.color,transition:"width 0.2s ease"}} />
                 </div>
-                <div style={{fontSize:11,color:createPassStrength.color,marginTop:6}}>{createPassStrength.label} · Minimum 8, recommended 12+</div>
+                <div style={{fontSize:12,color:createPassStrength.color,marginTop:6}}>{createPassStrength.label} · Minimum 12 characters</div>
               </div>
             </div>
             <div>
-              <label style={labelStyle}>Confirm passphrase</label>
+              <label htmlFor="create-confirm" style={labelStyle}>Confirm passphrase</label>
               <div style={{display:"flex",gap:8}}>
-                <input type={showCreatePass2 ? "text" : "password"} value={cPass2} onChange={e=>setCPass2(e.target.value)} placeholder="Type it again" onKeyDown={e=>e.key==="Enter"&&handleCreate()} style={{...inputStyle,flex:1}} />
+                <input id="create-confirm" type={showCreatePass2 ? "text" : "password"} autoComplete="new-password" value={cPass2} onChange={e=>setCPass2(e.target.value)} placeholder="Type it again" minLength={12} style={{...inputStyle,flex:1}} />
                 <button onClick={()=>setShowCreatePass2(v=>!v)} type="button" style={{padding:"0 14px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",cursor:"pointer"}}>{showCreatePass2 ? "Hide" : "Show"}</button>
               </div>
             </div>
@@ -4373,10 +4091,10 @@ export default function App() {
               </div>
             </div>
 
-            {cError && <div style={{ fontSize:13,color:"#f56565",background:"rgba(245,101,101,0.08)",padding:"10px 14px",borderRadius:10,animation:"fadeIn 0.2s ease" }}>{cError}</div>}
+            {cError && <div role="alert" style={{ fontSize:13,color:"#ffb4ba",background:"rgba(245,101,101,0.12)",padding:"10px 14px",borderRadius:8,animation:"fadeIn 0.2s ease" }}>{cError}</div>}
 
-            <button onClick={handleCreate} style={{...btnPrimary,marginTop:4}}>Create account</button>
-          </div>
+            <button type="submit" style={{...btnPrimary,marginTop:4}}>Create account</button>
+          </form>
 
           <div style={{ textAlign:"center",marginTop:20 }}>
             <button onClick={()=>{setScreen(S.LOGIN);setCError("");}} style={{ background:"none",border:"none",color:"#6a6a7a",fontSize:13,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:3 }}>
@@ -4384,240 +4102,17 @@ export default function App() {
             </button>
           </div>
 
+          <div style={{textAlign:"center",marginTop:10}}><a href="/admin.html" style={{color:"#9ed1ff",fontSize:13}}>Device administrator</a></div>
+
           <p style={{ fontSize:10,color:"#333",textAlign:"center",marginTop:16,lineHeight:1.6 }}>
             Your data is AES-256-GCM encrypted with your passphrase and never leaves your device unencrypted. We cannot recover your passphrase.
           </p>
         </div>
         <style>{GLOBAL_CSS}</style>
-      </div>
+      </main>
     );
   }
 
-
-  // ═══════════════════════════════════════════════════════════
-  // FIRST-RUN SERVER SETUP SCREEN (encryption key + IPEDS)
-  // ═══════════════════════════════════════════════════════════
-  // Reached only right after registration when /api/setup/status reports the
-  // backend still needs an encryption/IPEDS key (i.e. first run on the server
-  // host). The embedded SetupPanel hands off to the API-key scene via
-  // onComplete, so "API key comes next" once .env is saved.
-  if (screen === S.SETUP) {
-    return (
-      <>
-        <SetupPanel embedded onComplete={() => gateToScreen(S.SURVEY)} />
-        <style>{GLOBAL_CSS}</style>
-      </>
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // SURVEY SCREEN
-  // ═══════════════════════════════════════════════════════════
-  // API KEY (BYOK) PREREQUISITE SCREEN
-  // ═══════════════════════════════════════════════════════════
-  if (screen === S.APIKEY) {
-    const provMeta = providerCatalog.find(p => p.id === akProvider);
-    const provLabel = provMeta?.label || akProvider;
-    const baseUrlOptional = !!provMeta?.baseUrlOptional;
-    const inputStyle = { width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid rgba(255,255,255,0.08)", background:"rgba(255,255,255,0.02)", color:"#e8e6e3", fontSize:13, outline:"none" };
-    const labelStyle = { fontSize:11, color:"#8a8a9a", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6, display:"block" };
-
-    return (
-      <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT}}>
-        <div style={{width:580,maxHeight:"92vh",padding:36,borderRadius:24,background:"linear-gradient(145deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))",border:"1px solid rgba(255,255,255,0.06)",overflowY:"auto"}}>
-          <div style={{fontSize:11,color:"#555",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4}}>Prerequisite {"·"} {user?.name || ""}</div>
-          <h2 style={{fontSize:22,fontWeight:700,color:"#e8e6e3",margin:"0 0 4px"}}>{apiKeyStatus?.hasPersonalKey ? "Update your API key & models" : "Connect your LLM API key"}</h2>
-          <p style={{fontSize:13,color:"#8a8a9a",marginBottom:18}}>
-            {modelUpdateInfo
-              ? `A newer recommended model is available for ${provLabel}. Re-enter your API key and confirm the model selection to update.`
-              : "The counselor runs on your own LLM key. The key is encrypted server-side; we never see it in plaintext. Required before the survey starts."}
-          </p>
-
-          {modelUpdateInfo && (
-            <div style={{marginBottom:14,padding:12,borderRadius:10,background:"rgba(246,173,85,0.08)",border:"1px solid rgba(246,173,85,0.25)",fontSize:12,color:"#f6ad55"}}>
-              <div style={{fontWeight:600,marginBottom:6}}>Model updates available</div>
-              {modelUpdateInfo.changes.map(c => (
-                <div key={c.tier} style={{margin:"2px 0"}}>
-                  <code style={{color:"#e8e6e3"}}>{c.tier}</code>: <span style={{color:"#aaa"}}>{c.from}</span> → <span style={{color:"#68d391"}}>{c.to}</span>
-                </div>
-              ))}
-              <button onClick={applyLatestModels} style={{marginTop:8,padding:"6px 10px",borderRadius:8,border:"none",background:"rgba(246,173,85,0.2)",color:"#fff",fontSize:11,fontWeight:600,cursor:"pointer"}}>Apply latest models</button>
-            </div>
-          )}
-
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <div>
-              <label style={labelStyle}>Provider</label>
-              <select value={akProvider} onChange={e=>{
-                const id = e.target.value;
-                setAkProvider(id);
-                const meta = providerCatalog.find(p=>p.id===id);
-                setAkSmall(meta?.defaults?.small || "");
-                setAkMedium(meta?.defaults?.medium || "");
-                setAkLarge(meta?.defaults?.large || "");
-                setAkBaseUrl("");
-              }} style={{...inputStyle, cursor:"pointer"}}>
-                {/* OpenRouter is the default — show it as the fallback option
-                    while the provider catalog loads. */}
-                {providerCatalog.length === 0 && <option value="openrouter">OpenRouter</option>}
-                {providerCatalog.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label style={labelStyle}>
-                API Key {apiKeyStatus?.hasPersonalKey && <span style={{color:"#6a6a7a",textTransform:"none",letterSpacing:0}}>({apiKeyStatus.hint} on file — re-enter to confirm)</span>}
-              </label>
-              {/* One-click open to the provider's API-key console. Auto-detects the
-                  provider from the prefix the moment the user pastes the key back. */}
-              <div style={{display:"flex",gap:8,marginBottom:6}}>
-                <input
-                  type="password"
-                  value={akApiKey}
-                  onChange={e => setAkApiKey(e.target.value)}
-                  onPaste={e => {
-                    const pasted = (e.clipboardData?.getData("text") || "").trim();
-                    const detected = detectProviderFromKey(pasted);
-                    if (detected && detected !== akProvider && providerCatalog.find(p => p.id === detected)) {
-                      setAkProvider(detected);
-                      const meta = providerCatalog.find(p => p.id === detected);
-                      setAkSmall(meta?.defaults?.small || "");
-                      setAkMedium(meta?.defaults?.medium || "");
-                      setAkLarge(meta?.defaults?.large || "");
-                    }
-                  }}
-                  placeholder={provMeta?.keyPrefix ? `${provMeta.keyPrefix}…  (paste here)` : "sk-…  (paste here)"}
-                  style={{...inputStyle, flex: 1}}
-                  autoComplete="off"
-                />
-                <a
-                  href={PROVIDER_CONSOLE_URLS[akProvider] || "#"}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,
-                    padding:"0 14px",borderRadius:10,
-                    background:"rgba(55,138,221,0.12)",border:"1px solid rgba(55,138,221,0.25)",
-                    color:"#63b3ed",fontSize:12,fontWeight:600,textDecoration:"none",
-                    whiteSpace:"nowrap",cursor: PROVIDER_CONSOLE_URLS[akProvider] ? "pointer" : "default",
-                    opacity: PROVIDER_CONSOLE_URLS[akProvider] ? 1 : 0.4,
-                  }}
-                  onClick={e => { if (!PROVIDER_CONSOLE_URLS[akProvider]) e.preventDefault(); }}
-                  title={PROVIDER_CONSOLE_URLS[akProvider] ? `Opens ${provLabel}'s API keys page in a new tab` : "No console link for this provider"}
-                >
-                  {"↗"} Open {provLabel} console
-                </a>
-              </div>
-              <div style={{fontSize:10,color:"#6a6a7a"}}>
-                {PROVIDER_CONSOLE_URLS[akProvider]
-                  ? `Click → sign in to your ${provLabel} account → create or copy a key → paste it back here. (Providers don't support one-click key issuance to third-party apps, so a paste is still required.) Encrypted at rest (AES-256-GCM).`
-                  : "Encrypted at rest (AES-256-GCM in PII vault). Never transmitted to the browser after save."}
-              </div>
-            </div>
-
-            {baseUrlOptional && (
-              <div>
-                <label style={labelStyle}>Base URL (optional)</label>
-                <input value={akBaseUrl} onChange={e=>setAkBaseUrl(e.target.value)} placeholder={provMeta?.baseUrl || "https://api.example.com/v1"} style={inputStyle} />
-              </div>
-            )}
-
-            {/* Per-tier model selectors. For OpenRouter the options come from
-                its LIVE /models catalog (sorted free-first, then cheapest), so
-                the list only ever shows currently-served IDs. Other providers
-                use their static knownModels list. The student can override any
-                tier; the choice is sent to the backend and used for every chat
-                turn until they change it. */}
-            <div>
-              <label style={labelStyle}>Models</label>
-              <div style={{display:"flex",gap:8}}>
-                {["small","medium","large"].map(tier => {
-                  const label = tier === "small" ? "Small" : tier === "medium" ? "Medium" : "Large";
-                  const value = tier === "small" ? akSmall : tier === "medium" ? akMedium : akLarge;
-                  const setter = tier === "small" ? setAkSmall : tier === "medium" ? setAkMedium : setAkLarge;
-                  // OpenRouter: prefer the live catalog (real IDs, ordered
-                  // free→cheap). Other providers: the static knownModels pool.
-                  // The same pool applies to all three tiers. Empty list (LM
-                  // Studio, openai_compat) → free-text input below.
-                  const known = (akProvider === "openrouter" && orModels.length)
-                    ? orModels.map(m => m.id)
-                    : (Array.isArray(provMeta?.knownModels)
-                        ? provMeta.knownModels
-                        : (provMeta?.knownModels?.[tier] || []));
-                  // Make sure the currently-selected value is always
-                  // present in the dropdown options (covers custom IDs
-                  // the student typed previously or models the catalog
-                  // hasn't been updated to know about yet).
-                  const options = known.includes(value) || !value ? known : [value, ...known];
-                  return (
-                    <div key={tier} style={{flex:1, minWidth:0}}>
-                      <div style={{fontSize:9,color:"#6a6a7a",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4}}>{label}</div>
-                      {options.length > 0 ? (
-                        <select
-                          value={value || ""}
-                          onChange={e => setter(e.target.value)}
-                          style={{
-                            width:"100%",padding:"8px 10px",borderRadius:8,
-                            border:"1px solid rgba(255,255,255,0.08)",
-                            background:"rgba(255,255,255,0.02)",color:"#e8e6e3",
-                            fontSize:11,fontFamily:"ui-monospace,Menlo,Consolas,monospace",
-                            cursor:"pointer",outline:"none",
-                          }}
-                        >
-                          {options.map(m => <option key={m} value={m}>{m}</option>)}
-                        </select>
-                      ) : (
-                        <input
-                          value={value || ""}
-                          onChange={e => setter(e.target.value)}
-                          placeholder={tier === "small" ? "e.g. google/gemma-4-26b-a4b-it" : tier === "medium" ? "e.g. google/gemma-4-31b-it" : "e.g. deepseek/deepseek-v4-pro"}
-                          style={{
-                            width:"100%",boxSizing:"border-box",padding:"8px 10px",borderRadius:8,
-                            border:"1px solid rgba(255,255,255,0.08)",
-                            background:"rgba(255,255,255,0.02)",color:"#e8e6e3",
-                            fontSize:11,fontFamily:"ui-monospace,Menlo,Consolas,monospace",outline:"none",
-                          }}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,gap:8,flexWrap:"wrap"}}>
-                <div style={{fontSize:10,color:"#6a6a7a"}}>
-                  Small = routing / classification {"·"} Medium = synthesis / coaching {"·"} Large = essay critique / hard reasoning.
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!provMeta) return;
-                    setAkSmall(provMeta.defaults?.small || "");
-                    setAkMedium(provMeta.defaults?.medium || "");
-                    setAkLarge(provMeta.defaults?.large || "");
-                  }}
-                  title={`Reset to ${provLabel}'s current recommended models`}
-                  style={{padding:"4px 8px",borderRadius:6,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}
-                >
-                  ↺ Reset to latest
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {akError && <div style={{marginTop:12,padding:"8px 12px",borderRadius:8,background:"rgba(245,101,101,0.1)",color:"#fc8181",fontSize:12}}>{akError}</div>}
-
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:18}}>
-            <button onClick={()=>{ setScreen(S.LOGIN); }} style={{background:"none",border:"none",color:"#6a6a7a",fontSize:13,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:3}}>Sign out</button>
-            <button onClick={saveApiKey} disabled={akSaving || !akApiKey.trim()} style={{padding:"10px 20px",borderRadius:10,border:"none",background:(akSaving||!akApiKey.trim())?"rgba(255,255,255,0.06)":"linear-gradient(135deg,#378ADD,#667eea)",color:(akSaving||!akApiKey.trim())?"#666":"#fff",fontSize:13,fontWeight:600,cursor:(akSaving||!akApiKey.trim())?"default":"pointer"}}>
-              {akSaving ? "Saving…" : (apiKeyStatus?.hasPersonalKey ? "Update & continue" : "Save & continue")}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
   if (screen === S.SURVEY) {
     const STEPS = [
       { title:"GPA", sub:"What\'s your current GPA?", req:true },
@@ -4625,7 +4120,6 @@ export default function App() {
       { title:"Test scores & AP exams", sub:"Standardized tests and AP exam scores", req:true },
       { title:"Extracurriculars", sub:"Clubs, sports, volunteering, work, research", req:false },
       { title:"Goals", sub:"What are you aiming for?", req:true },
-      { title:"Parent/Guardian contact", sub:"Optional — if set, a parent/guardian will be notified if the safety system detects a crisis-level message (no message content is ever shared)", req:false },
     ];
     const st = STEPS[surveyStep]||STEPS[0];
     const total = STEPS.length;
@@ -4733,8 +4227,15 @@ export default function App() {
     const tab = (a,fn,l,cnt) => (<button key={typeof l === "string" ? l : undefined} onClick={fn} style={{padding:"8px 14px",borderRadius:"8px 8px 0 0",border:"none",borderBottom:a?"2px solid #378ADD":"2px solid transparent",background:a?"rgba(55,138,221,0.08)":"transparent",color:a?"#63b3ed":"#6a6a7a",fontSize:12,fontWeight:a?600:400,cursor:"pointer"}}>{l}{cnt!==undefined?` (${cnt})`:""}</button>);
 
     return (
-      <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT}}>
-        <div className="cc-survey-card" style={{width:580,maxHeight:"92vh",padding:36,borderRadius:24,background:"linear-gradient(145deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))",border:"1px solid rgba(255,255,255,0.06)",overflowY:"auto"}}>
+      <main style={{minHeight:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT,padding:16}}>
+        <div className="cc-survey-card" style={{width:"min(680px, 100%)",maxHeight:"calc(100dvh - 32px)",padding:"clamp(20px, 4vw, 36px)",borderRadius:8,background:"#151a23",border:"1px solid rgba(255,255,255,0.16)",overflowY:"auto"}}>
+          {studentRecoveryCode && (
+            <div role="status" style={{marginBottom:18,padding:14,borderRadius:8,border:"1px solid rgba(246,173,85,0.55)",background:"rgba(246,173,85,0.10)",color:"#ffe0a3",fontSize:13,lineHeight:1.5}}>
+              <strong>Save your one-time account recovery code offline.</strong>
+              <code style={{display:"block",marginTop:8,overflowWrap:"anywhere",userSelect:"all"}}>{studentRecoveryCode}</code>
+              <button type="button" onClick={()=>setStudentRecoveryCode("")} style={{marginTop:10,padding:"8px 12px",borderRadius:6,border:"1px solid rgba(246,173,85,0.45)",background:"transparent",color:"#ffe0a3",cursor:"pointer"}}>I saved it</button>
+            </div>
+          )}
           <div style={{display:"flex",gap:4,marginBottom:22}}>{STEPS.map((_,i)=>(<div key={i} style={{flex:1,height:3,borderRadius:2,background:i<=surveyStep?"#378ADD":"rgba(255,255,255,0.06)",transition:"background 0.3s"}} />))}</div>
           <div style={{fontSize:11,color:"#555",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4,display:"flex",justifyContent:"space-between"}}>
             <span>Step {surveyStep+1}/{total} {"\u00b7"} {user?.name}</span>
@@ -5041,27 +4542,6 @@ export default function App() {
             <div><label style={labelStyle}>What matters most?</label><div style={{display:"flex",flexWrap:"wrap",gap:8}}>{["Strong academics","Campus life","Financial aid","Location","Research","Diversity","Athletics","Small classes"].map(g=>chip(sGoals.includes(g),()=>setSGoals(p=>p.includes(g)?p.filter(x=>x!==g):[...p,g]),g))}</div></div>
           </div>)}
 
-          {/* STEP 5: PARENT/GUARDIAN CONTACT (optional) */}
-          {surveyStep===5 && (<div style={{display:"flex",flexDirection:"column",gap:16}}>
-            <div style={{fontSize:12,color:"#68d391",marginBottom:4,padding:"10px 14px",borderRadius:10,background:"rgba(104,211,145,0.06)",border:"1px solid rgba(104,211,145,0.12)",lineHeight:1.6}}>
-              This step is <strong>completely optional</strong>. If you provide a parent or guardian's email, they will ONLY be contacted if our safety system detects a crisis-level message (such as self-harm or abuse). <strong>Your message content is never shared</strong> — only a notification that you may need support.
-            </div>
-            <div>
-              <label style={labelStyle}>Parent/Guardian email (optional)</label>
-              <input type="email" value={sParentEmail} onChange={e=>setSParentEmail(e.target.value)} placeholder="parent@example.com" style={inputStyle} />
-            </div>
-            {sParentEmail.trim() && (
-              <div style={{ display:"flex",alignItems:"flex-start",gap:8 }}>
-                <input type="checkbox" id="parentNotify" checked={sParentNotify} onChange={e=>setSParentNotify(e.target.checked)} style={{ marginTop:3,accentColor:"#378ADD" }} />
-                <label htmlFor="parentNotify" style={{ fontSize:12,color:"#8a8a9a",lineHeight:1.5,cursor:"pointer" }}>
-                  I consent to my parent/guardian being notified if the safety system detects a crisis. I understand that my message content will <strong>never</strong> be shared — only that I may need support.
-                </label>
-              </div>
-            )}
-            <div style={{fontSize:10,color:"#555",padding:10,borderRadius:8,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.04)",lineHeight:1.6}}>
-              Why offer this? Research shows that early intervention saves lives. This feature exists so a trusted adult can check in on you during difficult moments. You can remove this contact at any time by updating your profile.
-            </div>
-          </div>)}
 
           {surveyError && <div style={{marginTop:14,fontSize:13,color:"#f56565",background:"rgba(245,101,101,0.08)",padding:"10px 14px",borderRadius:10}}>{surveyError}</div>}
 
@@ -5074,7 +4554,7 @@ export default function App() {
           <p style={{fontSize:10,color:"#333",textAlign:"center",marginTop:14}}>You can update this later by chatting with your counselor.</p>
         </div>
         <style>{GLOBAL_CSS}</style>
-      </div>
+      </main>
     );
   }
 
@@ -5083,7 +4563,7 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   if (screen === S.LOGIN) {
     return (
-      <div style={{ minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT }}>
+      <main style={{ minHeight:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT,padding:"20px 0" }}>
         <div style={cardStyle}>
           <div style={{ textAlign:"center",marginBottom:32 }}>
             <div style={{ display:"flex",justifyContent:"center",gap:6,marginBottom:14 }}>
@@ -5093,22 +4573,43 @@ export default function App() {
             <p style={{ fontSize:13,color:"#6a6a7a",marginTop:8 }}>Sign in to your encrypted vault</p>
           </div>
 
-          <div style={{ display:"flex",flexDirection:"column",gap:14 }}>
+          <form onSubmit={(event)=>{event.preventDefault();handleLogin();}} style={{ display:"flex",flexDirection:"column",gap:14 }}>
             <div>
-              <label style={labelStyle}>School email</label>
-              <input type="email" value={lEmail} onChange={e=>setLEmail(e.target.value)} placeholder="alex.kim@school.edu" onKeyDown={e=>e.key==="Enter"&&handleLogin()} style={inputStyle} />
+              <label htmlFor="login-email" style={labelStyle}>Email</label>
+              <input id="login-email" type="email" autoComplete="email" value={lEmail} onChange={e=>setLEmail(e.target.value)} placeholder="alex.kim@school.edu" style={inputStyle} />
             </div>
             <div>
-              <label style={labelStyle}>Passphrase</label>
+              <label htmlFor="login-passphrase" style={labelStyle}>Passphrase</label>
               <div style={{display:"flex",gap:8}}>
-                <input type={showLoginPass ? "text" : "password"} value={lPass} onChange={e=>setLPass(e.target.value)} placeholder="Your vault passphrase" onKeyDown={e=>e.key==="Enter"&&handleLogin()} style={{...inputStyle,flex:1}} />
+                <input id="login-passphrase" type={showLoginPass ? "text" : "password"} autoComplete="current-password" value={lPass} onChange={e=>setLPass(e.target.value)} placeholder="Your vault passphrase" style={{...inputStyle,flex:1}} />
                 <button onClick={()=>setShowLoginPass(v=>!v)} type="button" style={{padding:"0 14px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",cursor:"pointer"}}>{showLoginPass ? "Hide" : "Show"}</button>
               </div>
             </div>
 
-            {lError && <div style={{ fontSize:13,color:"#f56565",background:"rgba(245,101,101,0.08)",padding:"10px 14px",borderRadius:10,animation:"fadeIn 0.2s ease" }}>{lError}</div>}
+            {lError && <div role="alert" style={{ fontSize:13,color:"#ffb4ba",background:"rgba(245,101,101,0.12)",padding:"10px 14px",borderRadius:8,animation:"fadeIn 0.2s ease" }}>{lError}</div>}
 
-            <button onClick={handleLogin} style={{...btnPrimary,marginTop:4}}>Sign in</button>
+            <button type="submit" style={{...btnPrimary,marginTop:4}}>Sign in</button>
+          </form>
+
+          <div style={{marginTop:14}}>
+            <button type="button" onClick={()=>{setStudentRecoveryOpen((value)=>!value);setStudentRecoveryMessage(null);}} style={{width:"100%",padding:"9px 12px",borderRadius:6,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#b7c1ce",cursor:"pointer"}}>
+              {studentRecoveryOpen ? "Cancel recovery" : "Recover account"}
+            </button>
+            {studentRecoveryOpen && (
+              <form onSubmit={handleStudentRecovery} style={{display:"grid",gap:12,marginTop:12,padding:14,border:"1px solid rgba(255,255,255,0.14)",borderRadius:8}}>
+                <p style={{fontSize:12,color:"#b7c1ce",lineHeight:1.5,margin:0}}>Recovery replaces the unreadable local vault. Data previously synced to this device's service will be restored after sign-in.</p>
+                <div>
+                  <label htmlFor="student-recovery-code" style={labelStyle}>Recovery code</label>
+                  <input id="student-recovery-code" value={studentRecoveryInput} onChange={(event)=>setStudentRecoveryInput(event.target.value)} autoComplete="off" style={inputStyle} required />
+                </div>
+                <div>
+                  <label htmlFor="student-recovery-password" style={labelStyle}>New passphrase</label>
+                  <input id="student-recovery-password" type="password" value={studentRecoveryPassword} onChange={(event)=>setStudentRecoveryPassword(event.target.value)} autoComplete="new-password" minLength={12} style={inputStyle} required />
+                </div>
+                <button type="submit" disabled={studentRecoveryBusy} style={btnPrimary}>{studentRecoveryBusy ? "Resetting..." : "Reset passphrase"}</button>
+              </form>
+            )}
+            {studentRecoveryMessage && <p role={studentRecoveryMessage.type==="error"?"alert":"status"} style={{fontSize:13,color:studentRecoveryMessage.type==="error"?"#ffb4ba":"#a9edce"}}>{studentRecoveryMessage.text}</p>}
           </div>
 
           {/* Show registered accounts as quick-pick — mask emails for privacy on shared devices */}
@@ -5140,9 +4641,10 @@ export default function App() {
               New student? Create account
             </button>
           </div>
+          <div style={{textAlign:"center",marginTop:10}}><a href="/admin.html" style={{color:"#9ed1ff",fontSize:13}}>Device administrator</a></div>
         </div>
         <style>{GLOBAL_CSS}</style>
-      </div>
+      </main>
     );
   }
 
@@ -5150,10 +4652,10 @@ export default function App() {
   // CHAT SCREEN
   // ═══════════════════════════════════════════════════════════
   return (
-    <div style={{ display:"flex",height:"100vh",fontFamily:FONT,background:BG,color:"#e8e6e3" }}>
+    <div style={{ display:"flex",height:"100dvh",fontFamily:FONT,background:BG,color:"#e8e6e3" }}>
       {/* Non-blocking session-health toast (offline / re-auth / background-sync status) */}
       {(offlineMode || reauthStatus === "attempting" || reauthStatus === "failed" || syncStatus === "failed") && (
-        <div style={{
+        <div role="status" aria-live="polite" style={{
           position:"fixed", top:12, left:"50%", transform:"translateX(-50%)", zIndex:9999,
           padding:"8px 14px", borderRadius:10, fontSize:12, fontWeight:600, boxShadow:"0 4px 16px rgba(0,0,0,0.3)",
           background: reauthStatus==="failed" ? "rgba(245,101,101,0.15)" : (offlineMode || syncStatus==="failed") ? "rgba(246,173,85,0.15)" : "rgba(99,179,237,0.15)",
@@ -5167,16 +4669,24 @@ export default function App() {
         </div>
       )}
       {/* Sidebar */}
-      <div className={`cc-sidebar-overlay ${sidebarOpen ? "is-open" : "is-closed"}`} style={{ width:sidebarOpen?280:0,overflow:"hidden",transition:"width 0.25s ease",borderRight:sidebarOpen?"1px solid rgba(255,255,255,0.05)":"none",background:"rgba(255,255,255,0.015)",flexShrink:0 }}>
+      <aside aria-label="Student profile and planning tools" className={`cc-sidebar-overlay ${sidebarOpen ? "is-open" : "is-closed"}`} style={{ width:sidebarOpen?280:0,overflow:"hidden",transition:"width 0.25s ease",borderRight:sidebarOpen?"1px solid rgba(255,255,255,0.05)":"none",background:"rgba(255,255,255,0.015)",flexShrink:0 }}>
         <div style={{ padding:18,overflowY:"auto",height:"100%",width:280,boxSizing:"border-box" }}>
-          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16 }}>
-            <div>
+          <div style={{ display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8,marginBottom:12 }}>
+            <div style={{minWidth:0,flex:1}}>
               <div style={{ fontSize:14,fontWeight:600 }}>{user?.name}</div>
-              <div style={{ fontSize:10,color:"#555" }}>{user?.email ? (user.email.split("@")[0].slice(0,2) + "***@" + user.email.split("@")[1]) : ""} · {user?.grade}</div>
+              <div style={{ fontSize:12,color:"#a8b3c1",overflowWrap:"anywhere" }}>{user?.email ? (user.email.split("@")[0].slice(0,2) + "***@" + user.email.split("@")[1]) : ""} · {user?.grade}</div>
             </div>
-            <button onClick={handleLogout} style={{ padding:"4px 8px",borderRadius:6,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:"#6a6a7a",fontSize:10,cursor:"pointer" }}>Log out</button>
-            <button onClick={async()=>{if(!confirm("Delete your account and ALL encrypted data? This cannot be undone."))return;const email=user?.email;if(!email)return;const storageKey=storageKeyFor(email);await storageApi.delete(storageKey);const updated={...accounts};delete updated[email];setAccounts(updated);await saveAccounts(updated);await clearSession();sessionTimer.clear();rateLimiter.reset();setUser(null);setPassphrase("");setData({profile:null,activities:[],studyNotes:[],documents:[]});setMessages([]);setScreen(S.CREATE);}} style={{ padding:"4px 8px",borderRadius:6,border:"1px solid rgba(245,101,101,0.2)",background:"transparent",color:"#f56565",fontSize:10,cursor:"pointer" }}>Delete account</button>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <button onClick={handleLogout} style={{ padding:"7px 9px",borderRadius:6,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#b7c1ce",fontSize:11,cursor:"pointer" }}>Log out</button>
+              <button onClick={handleDeleteAccount} style={{ padding:"7px 9px",borderRadius:6,border:"1px solid rgba(245,101,101,0.35)",background:"transparent",color:"#ff9da5",fontSize:11,cursor:"pointer" }}>Delete</button>
+            </div>
           </div>
+          {budgetStatus?.capUsd != null && (
+            <div aria-label={`Monthly AI budget: $${budgetStatus.committedUsd.toFixed(2)} used of $${budgetStatus.capUsd.toFixed(2)}`} style={{marginBottom:16,padding:10,borderRadius:8,border:"1px solid rgba(255,255,255,0.14)",background:"rgba(255,255,255,0.025)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:12,color:"#b7c1ce"}}><span>AI budget</span><span>${budgetStatus.remainingUsd.toFixed(2)} left</span></div>
+              <div style={{height:6,marginTop:7,borderRadius:3,background:"rgba(255,255,255,0.10)",overflow:"hidden"}}><div style={{height:"100%",width:`${Math.min(100,(budgetStatus.committedUsd/budgetStatus.capUsd)*100)}%`,background:budgetStatus.remainingUsd>0?"#3f9c72":"#c85c64"}} /></div>
+            </div>
+          )}
 
           {/* ─── Chat history (multi-thread) ─────────────────────────── */}
           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8 }}>
@@ -5330,22 +4840,6 @@ export default function App() {
           <div style={{ fontSize:11,fontWeight:600,color:"#6a6a7a",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10 }}>Profile</div>
           <div style={{display:"flex",gap:8,marginBottom:12}}>
             <button onClick={()=>openProfileEditor(0)} style={{padding:"7px 10px",borderRadius:8,border:"1px solid rgba(55,138,221,0.18)",background:"rgba(55,138,221,0.08)",color:"#63b3ed",fontSize:11,cursor:"pointer"}}>Edit profile</button>
-            {/* Direct route to the API-key screen — bypasses gateToScreen's
-                "only if missing/stale" check so the student can swap
-                providers (OpenRouter → OpenAI → Google, etc.) or rotate
-                keys whenever they want. */}
-            <button
-              onClick={() => {
-                setPendingAfterApiKey(S.CHAT);
-                setScreen(S.APIKEY);
-                refreshApiKeyState();
-                setSidebarOpen(false);
-              }}
-              title="Switch provider or rotate API key"
-              style={{padding:"7px 10px",borderRadius:8,border:"1px solid rgba(104,211,145,0.20)",background:"rgba(104,211,145,0.08)",color:"#68d391",fontSize:11,cursor:"pointer"}}
-            >
-              API key
-            </button>
             {/* Transparency: weights, thresholds, and live "data as of"
                 freshness (models + college data). Opens the methodology as an
                 in-app popup (same overlay as Disclosures). */}
@@ -5552,10 +5046,10 @@ export default function App() {
           </div>
 
         </div>
-      </div>
+      </aside>
 
       {/* Main */}
-      <div className="cc-chat-main" style={{ flex:1,display:"flex",flexDirection:"column",minWidth:0 }}>
+      <main className="cc-chat-main" style={{ flex:1,display:"flex",flexDirection:"column",minWidth:0 }}>
         <div style={{ padding:"10px 18px",borderBottom:"1px solid rgba(255,255,255,0.05)",display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.015)",flexShrink:0 }}>
           <button onClick={()=>setSidebarOpen(!sidebarOpen)} style={{background:"none",border:"none",color:"#6a6a7a",cursor:"pointer",fontSize:16,padding:"4px 6px",borderRadius:6}}>{sidebarOpen?"◀":"▶"}</button>
           <span style={{ fontSize:16 }}>🎓</span>
@@ -5563,7 +5057,7 @@ export default function App() {
             <span style={{fontSize:14,fontWeight:600}}>College Counselor</span>
             <span style={{fontSize:12,color:"#6a6a7a",marginLeft:8}}>{user?.name}</span>
           </div>
-          <button onClick={async()=>{const e=await encrypt(data,passphrase,user?.email);const blob=URL.createObjectURL(new Blob([e],{type:"application/json"}));const a=document.createElement("a");a.href=blob;a.download=makeExportFilename(user);a.click();setTimeout(()=>URL.revokeObjectURL(blob),1000);}} style={{padding:"5px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:"#6a6a7a",fontSize:11,cursor:"pointer"}}>Export</button>
+          <button onClick={handleExportData} style={{padding:"8px 12px",minHeight:36,borderRadius:8,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#b7c1ce",fontSize:11,cursor:"pointer"}}>Export</button>
         </div>
 
         <div style={{ padding:"6px 18px",background:"rgba(55,138,221,0.04)",borderBottom:"1px solid rgba(55,138,221,0.08)",fontSize:10,color:"#6a8ab5",display:"flex",alignItems:"center",gap:6,flexShrink:0 }}>
@@ -5578,10 +5072,10 @@ export default function App() {
         {/* is nothing to surface, so the chat top stays clean for new students. */}
         <div style={{ padding:"8px 18px",display:"flex",gap:10,flexWrap:"wrap",flexShrink:0,alignItems:"center" }}>
           <DriftBanner locale={locale} onReview={() => openTool("candidates")} />
-          <DeadlineTracker locale={locale} compact />
+          <DeadlineTracker locale={locale} compact refreshKey={deadlineRefreshKey} />
         </div>
 
-        <div style={{ flex:1,overflowY:"auto",padding:"16px 18px 0" }}>
+        <div role="log" aria-live="polite" aria-relevant="additions" style={{ flex:1,overflowY:"auto",padding:"16px 18px 0" }}>
           {messages.map((m,i)=>{
             // Inline tool cards (Edit story / Rank ECs / Spike Finder /
             // Course plan). Ephemeral, full-width, never sent to the model.
@@ -5684,7 +5178,9 @@ export default function App() {
               <div style={{padding:"12px 16px",borderRadius:"14px 14px 14px 4px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.05)",fontSize:13,color:"#6a6a7a",display:"flex",alignItems:"center",gap:8}}>
                 <span>{agentStatus.phase || "Thinking..."}</span>
                 <span style={{display:"inline-flex",gap:3}}>{[0,1,2].map(j=>(<span key={j} style={{width:5,height:5,borderRadius:"50%",background:"#63b3ed",animation:`pulse2 1.2s ease-in-out ${j*0.2}s infinite`}} />))}</span>
-                <button onClick={cancelPendingRequest} style={{marginLeft:"auto",padding:"4px 12px",borderRadius:8,border:"1px solid rgba(245,101,101,0.3)",background:"transparent",color:"#f56565",fontSize:11,cursor:"pointer",transition:"all 0.15s"}}>Cancel</button>
+                {agentStatus.active !== "strategy_council" && (
+                  <button onClick={cancelPendingRequest} style={{marginLeft:"auto",padding:"4px 12px",borderRadius:8,border:"1px solid rgba(245,101,101,0.3)",background:"transparent",color:"#f56565",fontSize:11,cursor:"pointer",transition:"all 0.15s"}}>Cancel</button>
+                )}
               </div>
             </div>
           )}
@@ -5826,13 +5322,63 @@ export default function App() {
         })()}
 
         <div style={{padding:"14px 18px",borderTop:"1px solid rgba(255,255,255,0.05)",flexShrink:0}}>
+          {councilDecisionType && (
+            <div role="status" style={{
+              marginBottom:10,
+              padding:"10px 12px",
+              borderRadius:10,
+              border:"1px solid rgba(167,139,250,0.35)",
+              background:"rgba(167,139,250,0.08)",
+              color:"#d8ccff",
+              fontSize:11,
+              lineHeight:1.55,
+            }}>
+              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:6}}>
+                <strong>{locale === "ko" ? "전략 위원회 - 다음 메시지 1회" : "Strategy Council - next message only"}</strong>
+                <select
+                  aria-label={locale === "ko" ? "전략 결정 유형" : "Strategy decision type"}
+                  value={councilDecisionType}
+                  onChange={(event) => setCouncilDecisionType(event.target.value)}
+                  style={{padding:"5px 30px 5px 9px",borderRadius:7,border:"1px solid rgba(167,139,250,0.35)",backgroundColor:"#17132a",color:"#e8e2ff",fontSize:11}}
+                >
+                  {COUNCIL_DECISION_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {locale === "ko" ? option.labelKo : option.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setCouncilDecisionType(null)}
+                  style={{marginLeft:"auto",padding:"4px 9px",borderRadius:7,border:"1px solid rgba(167,139,250,0.25)",background:"transparent",color:"#c4b5fd",fontSize:10,cursor:"pointer"}}
+                >
+                  {locale === "ko" ? "취소" : "Cancel mode"}
+                </button>
+              </div>
+              <div>
+                {locale === "ko"
+                  ? "4개의 AI 검토 단계와 결정론적 조정자를 실행합니다. 일반 채팅보다 느리며 월간 AI 예산을 사용합니다."
+                  : "Runs four AI review stages plus a deterministic moderator. It is slower than ordinary chat and uses your monthly AI budget."}
+                {budgetStatus?.remainingUsd != null
+                  ? (locale === "ko"
+                    ? ` 남은 예산: $${Number(budgetStatus.remainingUsd).toFixed(2)}.`
+                    : ` $${Number(budgetStatus.remainingUsd).toFixed(2)} remains.`)
+                  : ""}
+              </div>
+              <div style={{marginTop:4,color:"#aa9ed3"}}>
+                {locale === "ko"
+                  ? `첨부 파일은 사용할 수 없습니다. ${input.length.toLocaleString()}/2,000자`
+                  : `Attachments are unavailable. ${input.length.toLocaleString()}/2,000 characters.`}
+              </div>
+            </div>
+          )}
           <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
             {/* File upload (single, legacy + multi via attribute) */}
             <input type="file" ref={fileInputRef} multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.htm,.css,.scss,.py,.js,.mjs,.cjs,.jsx,.ts,.tsx,.go,.rs,.java,.kt,.c,.cc,.cpp,.h,.hpp,.cs,.php,.rb,.swift,.sh,.bash,.zsh,.ps1,.sql,.r,.lua,.dart,.vue,.svelte,.log,.env,.ini,.toml,.conf,.cfg,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword" onChange={handleChatFilesSelect} style={{display:"none"}} />
-            <button onClick={()=>fileInputRef.current?.click()} disabled={loading} title="Attach files (PDF, image, text, code) — multiple allowed" style={{padding:"10px 12px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:(pendingFile||chatFiles.length>0)?"#63b3ed":"#6a6a7a",fontSize:16,cursor:loading?"default":"pointer",flexShrink:0,transition:"all 0.15s",alignSelf:"flex-end",height:42}}>📎</button>
+            <button onClick={()=>fileInputRef.current?.click()} disabled={loading||Boolean(councilDecisionType)} title={councilDecisionType ? "Attachments are unavailable in Strategy Council mode" : "Attach files (PDF, image, text, code) — multiple allowed"} style={{padding:"10px 12px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:(pendingFile||chatFiles.length>0)?"#63b3ed":"#6a6a7a",fontSize:16,cursor:loading||councilDecisionType?"default":"pointer",flexShrink:0,transition:"all 0.15s",alignSelf:"flex-end",height:42}}>📎</button>
             {/* Folder upload — second button per user request */}
             <input type="file" ref={folderInputRef} webkitdirectory="" directory="" multiple onChange={handleChatFilesSelect} style={{display:"none"}} />
-            <button onClick={()=>folderInputRef.current?.click()} disabled={loading} title="Attach an entire folder — text/code files included" style={{padding:"10px 12px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:chatFiles.some(f=>f.path&&f.path.includes("/"))?"#9ce5b6":"#6a6a7a",fontSize:16,cursor:loading?"default":"pointer",flexShrink:0,transition:"all 0.15s",alignSelf:"flex-end",height:42}}>📁</button>
+            <button onClick={()=>folderInputRef.current?.click()} disabled={loading||Boolean(councilDecisionType)} title={councilDecisionType ? "Attachments are unavailable in Strategy Council mode" : "Attach an entire folder — text/code files included"} style={{padding:"10px 12px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:chatFiles.some(f=>f.path&&f.path.includes("/"))?"#9ce5b6":"#6a6a7a",fontSize:16,cursor:loading||councilDecisionType?"default":"pointer",flexShrink:0,transition:"all 0.15s",alignSelf:"flex-end",height:42}}>📁</button>
             {/* Auto-extending textarea. Grows vertically on input up to
                 ~40 vh; the outer flex container handles word-wrap and
                 screen-width responsiveness automatically. Enter sends;
@@ -5852,8 +5398,11 @@ export default function App() {
               onKeyDown={e => {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
               }}
-              placeholder={(pendingFile||chatFiles.length>0) ? "Ask the model about the attached file(s)…" : "Ask about academics, ECs, colleges, or strategy… (Shift+Enter for newline)"}
+              placeholder={councilDecisionType
+                ? (locale === "ko" ? "위원회가 검토할 독립적인 질문을 입력하세요..." : "Enter one self-contained decision question for the Council...")
+                : (pendingFile||chatFiles.length>0) ? "Ask the model about the attached file(s)…" : "Ask about academics, ECs, colleges, or strategy… (Shift+Enter for newline)"}
               disabled={loading}
+              maxLength={councilDecisionType ? 2000 : undefined}
               rows={1}
               style={{
                 flex:1, minHeight:42, maxHeight:"40vh",
@@ -5866,13 +5415,40 @@ export default function App() {
                 width:"100%",
               }}
             />
-            <button onClick={send} disabled={loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)} style={{padding:"12px 20px",borderRadius:12,border:"none",background:loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)?"rgba(255,255,255,0.03)":"linear-gradient(135deg,#378ADD,#667eea)",color:loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)?"#444":"#fff",fontSize:14,fontWeight:600,cursor:loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)?"default":"pointer",alignSelf:"flex-end",height:42}}>Send</button>
+            <button onClick={send} disabled={loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)} style={{padding:"12px 20px",borderRadius:12,border:"none",background:loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)?"rgba(255,255,255,0.03)":councilDecisionType?"linear-gradient(135deg,#7F77DD,#a855f7)":"linear-gradient(135deg,#378ADD,#667eea)",color:loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)?"#444":"#fff",fontSize:14,fontWeight:600,cursor:loading||(!input.trim()&&!pendingFile&&chatFiles.length===0)?"default":"pointer",alignSelf:"flex-end",height:42,whiteSpace:"nowrap"}}>{councilDecisionType ? (locale === "ko" ? "위원회 소집" : "Convene Council") : "Send"}</button>
           </div>
           {/* ─── Inline tool launchers ─── */}
           {/* Open each tool as an inline card in the conversation. These   */}
           {/* live here (per chat), not in the sidebar, per the inline-tools */}
           {/* design. openTool appends an ephemeral role:"tool" message.    */}
           <div className="cc-quick-actions" style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
+            <button
+              type="button"
+              onClick={() => setCouncilDecisionType((current) => {
+                if (current) return null;
+                return councilRequestRef.current?.question === input.trim()
+                  ? councilRequestRef.current.decisionType
+                  : "course-selection";
+              })}
+              disabled={loading || Boolean(pendingFile) || chatFiles.length > 0}
+              title={(pendingFile || chatFiles.length > 0)
+                ? "Remove attachments before enabling Strategy Council"
+                : "Explicitly use four AI reviewers plus a deterministic moderator for your next decision question"}
+              aria-pressed={Boolean(councilDecisionType)}
+              style={{
+                padding:"5px 11px",
+                borderRadius:8,
+                border:`1px solid ${councilDecisionType ? "rgba(167,139,250,0.65)" : "rgba(167,139,250,0.25)"}`,
+                background:councilDecisionType ? "rgba(167,139,250,0.18)" : "rgba(167,139,250,0.06)",
+                color:councilDecisionType ? "#e8e2ff" : "#c4b5fd",
+                fontSize:11,
+                fontWeight:700,
+                cursor:loading || pendingFile || chatFiles.length > 0 ? "default" : "pointer",
+                opacity:loading || pendingFile || chatFiles.length > 0 ? 0.5 : 1,
+              }}
+            >
+              {locale === "ko" ? "전략 위원회" : "Strategy Council"}
+            </button>
             {[
               {tool:"narrative",  key:"chat.tools.narrative"},
               {tool:"candidates", key:"chat.tools.candidates"},
@@ -5894,7 +5470,7 @@ export default function App() {
             ))}
           </div>
         </div>
-      </div>
+      </main>
 
       {/* ─── Round 1-5 modal panels ───────────────────────────────────── */}
       {/* Single overlay slot rendered when activePanel is set. The panel  */}
@@ -5911,7 +5487,7 @@ export default function App() {
             padding:20,
           }}
         >
-          <div style={{
+          <div ref={modalRef} role="dialog" aria-modal="true" aria-label={activePanel} style={{
             width:"min(720px, 100%)",
             maxHeight:"min(86vh, 900px)",
             overflowY:"auto",
@@ -5932,7 +5508,7 @@ export default function App() {
             {/* narrative / candidates / spike / courses now render INLINE in */}
             {/* the chat (role:"tool" cards). Only deadlines here. */}
             {activePanel === "deadlines" && (
-              <DeadlineTracker locale={locale} />
+              <DeadlineTracker locale={locale} refreshKey={deadlineRefreshKey} />
             )}
             {activePanel === "disclosure" && (
               <DisclosurePanel locale={locale} />
