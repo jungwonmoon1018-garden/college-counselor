@@ -1,4 +1,36 @@
-// Deterministic final Council stage. Role identity alone never acts as a veto.
+// Deterministic final Council stage. Role identity alone never acts as a veto,
+// with one exception preserved from the original harness: a Compliance Reviewer
+// "oppose" is a HARD veto (the council must not ship a non-compliant plan).
+
+const STRONG_CONFIDENCE = 0.7;
+// An ungrounded "support" is clamped here — below STRONG_CONFIDENCE so a
+// rubber-stamp can't count toward consensus on volume alone.
+const SYCOPHANCY_CAP = 0.6;
+
+function clamp01(n) {
+  if (!Number.isFinite(n)) return 0;
+  return n < 0 ? 0 : n > 1 ? 1 : n;
+}
+
+// Anti-sycophancy + anti-hallucination calibration, applied to every seat
+// before the tally. A seat that votes "support" with high confidence but cites
+// nothing is an ungrounded rubber-stamp: agreement not backed by the shared
+// context. Clamp its confidence so it cannot manufacture consensus, and flag it
+// so the breakdown/audit trail shows why. The seat prompts ask for the same
+// discipline; this is the deterministic backstop. `grounded` reflects raw
+// citation presence — the councilor's separate validation layer still governs
+// which citations are surfaced as evidence.
+function calibrateSeat(seat) {
+  const citations = Array.isArray(seat.citations) ? seat.citations : [];
+  const grounded = citations.length > 0;
+  let confidence = clamp01(Number(seat.confidence));
+  let calibrated = null;
+  if (seat.stance === "support" && !grounded && confidence >= STRONG_CONFIDENCE) {
+    confidence = SYCOPHANCY_CAP;
+    calibrated = "ungrounded_support_clamped";
+  }
+  return { ...seat, confidence, grounded, calibrated };
+}
 
 function average(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
@@ -37,16 +69,40 @@ function summarizeSeats(seats) {
     provider: seat.provider,
     abstained: Boolean(seat.abstained),
     citation_validation: seat.citation_validation || { valid: 0, invalid: 0 },
+    // Grounding transparency: did the seat cite anything, and was its
+    // confidence clamped for ungrounded agreement (anti-sycophancy)?
+    grounded: Boolean(seat.grounded),
+    calibrated: seat.calibrated || null,
   }));
 }
 
 export function moderate(councilorEnvelopes) {
-  const seats = (councilorEnvelopes || []).filter(Boolean);
+  // Calibrate first; every rule below reads the calibrated confidences.
+  const seats = (councilorEnvelopes || []).filter(Boolean).map(calibrateSeat);
   const active = seats.filter((seat) => !seat.abstained);
   const strategist = seats.find((seat) => seat.role === "Strategist");
   const dataChecker = seats.find((seat) => seat.role === "Data Checker");
+  const compliance = seats.find((seat) => seat.role === "Compliance Reviewer");
   const citations = validatedCitations(seats);
   const breakdown = summarizeSeats(seats);
+
+  // Rule 1 (hard veto, highest priority): a Compliance "oppose" means the
+  // council cannot ship the recommendation as advice. Preserved from the
+  // original harness — role identity is never otherwise a veto.
+  if (compliance && compliance.stance === "oppose") {
+    return {
+      recommendation:
+        "The Compliance Reviewer flagged this recommendation as non-compliant. " +
+        "We can't surface it as advice. Consider consulting a human counselor or " +
+        "rephrasing your question without the constraint that triggered the flag.",
+      confidence: 0.95,
+      dissent: dissentFrom(compliance),
+      dissents: [dissentFrom(compliance)],
+      citations,
+      moderator_rule: "compliance_veto",
+      council_breakdown: breakdown,
+    };
+  }
 
   if (!strategist || strategist.abstained || !strategist.recommendation) {
     return {

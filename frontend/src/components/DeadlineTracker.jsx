@@ -97,6 +97,19 @@ export default function DeadlineTracker({ locale = "en-US", compact = false, ref
     return Math.round(ms / (1000 * 60 * 60 * 24));
   }
 
+  function formatDue(dueAt) {
+    const d = new Date(dueAt);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleDateString(locale, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  // Surface the most urgent first: overdue/soonest at the top, completed last.
+  const sorted = [...list].sort((a, b) => {
+    const aDone = a.status === "done", bDone = b.status === "done";
+    if (aDone !== bDone) return aDone ? 1 : -1;
+    return new Date(a.dueAt || a.due_at).getTime() - new Date(b.dueAt || b.due_at).getTime();
+  });
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
@@ -123,24 +136,28 @@ export default function DeadlineTracker({ locale = "en-US", compact = false, ref
             value={draft.title}
             onChange={(e) => setDraft((p) => ({ ...p, title: e.target.value }))}
             placeholder={t(locale, "deadlines.title_field")}
+            aria-label={t(locale, "deadlines.title_field")}
             style={inp}
           />
           <input
             type="date"
             value={draft.dueAt}
             onChange={(e) => setDraft((p) => ({ ...p, dueAt: e.target.value }))}
+            aria-label={t(locale, "deadlines.title")}
             style={inp}
           />
           <input
             value={draft.category}
             onChange={(e) => setDraft((p) => ({ ...p, category: e.target.value }))}
             placeholder={t(locale, "deadlines.category_field")}
+            aria-label={t(locale, "deadlines.category_field")}
             style={inp}
           />
           <input
             value={draft.notes}
             onChange={(e) => setDraft((p) => ({ ...p, notes: e.target.value }))}
             placeholder={t(locale, "deadlines.notes_field")}
+            aria-label={t(locale, "deadlines.notes_field")}
             style={inp}
           />
           <div style={{ display: "flex", gap: 8 }}>
@@ -158,16 +175,20 @@ export default function DeadlineTracker({ locale = "en-US", compact = false, ref
           </div>
         </div>
       )}
-      {err && <div style={{ fontSize: 13, color: "#f56565" }}>{err}</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#f56565" }}>{err}</div>}
+      {busy && list.length === 0 && (
+        <div aria-live="polite" style={{ fontSize: 13, color: "#8a8a9a", padding: "12px 14px" }}>…</div>
+      )}
       {list.length === 0 && !busy && (
         <div style={{ fontSize: 13, color: "#8a8a9a", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
           {t(locale, "deadlines.empty")}
         </div>
       )}
-      {list.map((d) => {
+      {sorted.map((d) => {
         const days = dayDelta(d.dueAt || d.due_at);
         const overdue = days < 0;
         const isDone = d.status === "done";
+        const dueLabel = formatDue(d.dueAt || d.due_at);
         return (
           <div key={d.id} style={{
             padding: "12px 14px", borderRadius: 10,
@@ -189,6 +210,12 @@ export default function DeadlineTracker({ locale = "en-US", compact = false, ref
                 {overdue ? t(locale, "deadlines.overdue_chip") : t(locale, "deadlines.due_chip", { days })}
               </span>
             </div>
+            {(dueLabel || d.category) && (
+              <div style={{ fontSize: 11, color: "#8a8a9a", marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {dueLabel && <span>{dueLabel}</span>}
+                {d.category && <span style={{ opacity: 0.7 }}>· {d.category}</span>}
+              </div>
+            )}
             {d.notes && (
               <div style={{ fontSize: 12, color: "#8a8a9a", marginTop: 6 }}>{d.notes}</div>
             )}

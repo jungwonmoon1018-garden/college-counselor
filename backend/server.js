@@ -998,7 +998,14 @@ function resolveTargetSchools(studentId, requested) {
     const fallbackRows = goalUnitIds
       .map((u) => db.prepare("SELECT unit_id, name FROM baseline_colleges WHERE unit_id = ?").get(u))
       .filter(Boolean);
-    return extractTargetSchoolNames(goals, fallbackRows).slice(0, 6);
+    // extractTargetSchoolNames returns {unitId, schoolName} objects; callers
+    // (calendar/context, getSchoolPriorities) expect plain strings like the
+    // requested-path branch above. Map to the name so this always returns
+    // string[] — otherwise s.toLowerCase() downstream throws on the objects.
+    return extractTargetSchoolNames(goals, fallbackRows)
+      .map((t) => String(t?.schoolName || t?.name || t || "").trim())
+      .filter(Boolean)
+      .slice(0, 6);
   } catch {
     return [];
   }
