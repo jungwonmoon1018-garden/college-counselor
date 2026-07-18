@@ -355,7 +355,7 @@ function resolveTargetUnitId(name) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// AP COURSE RIGOR DATA (Source: CollegeBoard AP Score Distributions 2024)
+// AP COURSE RIGOR DATA (Source: CollegeBoard AP Score Distributions 2026 (preliminary))
 // Difficulty tier based on % scoring 5 and mean score — lower pass rate = harder
 // ═══════════════════════════════════════════════════════════
 // Common App's 30-category Activities taxonomy (verbatim from the official
@@ -413,46 +413,46 @@ function ecCategoryLabel(value) {
 }
 
 const AP_RIGOR = {
-  "Physics C: E&M":       {tier:1,label:"Extremely Hard",pct5:30.3,pct3plus:65.1,meanScore:3.3,note:"Calculus-based E&M. Smallest exam population, self-selected."},
-  "Physics C: Mechanics":  {tier:1,label:"Extremely Hard",pct5:28.1,pct3plus:68.2,meanScore:3.4,note:"Calculus-based mechanics. Strong math prerequisite."},
-  "Calculus BC":           {tier:1,label:"Extremely Hard",pct5:41.1,pct3plus:78.4,meanScore:3.8,note:"High pass rate reflects self-selection; content is very rigorous."},
-  "Chemistry":             {tier:2,label:"Very Hard",pct5:13.9,pct3plus:53.3,meanScore:2.8,note:"Heavy lab component + conceptual depth."},
-  "Physics 1":             {tier:2,label:"Very Hard",pct5:8.8,pct3plus:43.2,meanScore:2.5,note:"Algebra-based but conceptually demanding. Lowest pass rate."},
-  "Physics 2":             {tier:2,label:"Very Hard",pct5:14.2,pct3plus:62.4,meanScore:3.0,note:"Fluids, thermo, optics, nuclear. Small test population."},
-  "US History":            {tier:2,label:"Very Hard",pct5:12.1,pct3plus:48.4,meanScore:2.7,note:"Massive content scope. DBQ + LEQ essays."},
-  "European History":      {tier:2,label:"Very Hard",pct5:12.4,pct3plus:51.5,meanScore:2.8,note:"Broad chronological range. Heavy essay component."},
-  "English Literature":    {tier:2,label:"Very Hard",pct5:7.2,pct3plus:43.6,meanScore:2.6,note:"Poetry analysis and literary argument under time pressure."},
-  "Biology":               {tier:3,label:"Hard",pct5:14.0,pct3plus:64.4,meanScore:3.0,note:"Content-heavy with lab skills and data analysis."},
-  "Calculus AB":           {tier:3,label:"Hard",pct5:22.4,pct3plus:58.4,meanScore:3.1,note:"Foundation of college math. Requires strong algebra/precalc."},
-  "Statistics":            {tier:3,label:"Hard",pct5:16.1,pct3plus:58.3,meanScore:3.0,note:"Conceptual probability + inference. Less pure math."},
-  "English Language":      {tier:3,label:"Hard",pct5:10.4,pct3plus:56.1,meanScore:2.8,note:"Rhetorical analysis and argument essays."},
-  "World History":         {tier:3,label:"Hard",pct5:14.6,pct3plus:53.2,meanScore:2.8,note:"Global scope. Comparison + causation essays."},
-  "Computer Science A":    {tier:3,label:"Hard",pct5:25.6,pct3plus:66.4,meanScore:3.3,note:"Java programming. Strong analytical thinking required."},
-  "Macroeconomics":        {tier:4,label:"Moderate",pct5:19.1,pct3plus:55.0,meanScore:2.9,note:"Conceptual models + graphs. One semester of content."},
-  "Microeconomics":        {tier:4,label:"Moderate",pct5:22.1,pct3plus:63.5,meanScore:3.1,note:"Supply/demand, market structures. One semester."},
-  "US Government":         {tier:4,label:"Moderate",pct5:13.5,pct3plus:48.2,meanScore:2.7,note:"Shorter content scope but requires civic depth."},
-  "Psychology":            {tier:4,label:"Moderate",pct5:22.4,pct3plus:59.6,meanScore:3.1,note:"Content memorization heavy. Highest enrollment."},
-  "Environmental Science": {tier:4,label:"Moderate",pct5:9.4,pct3plus:49.2,meanScore:2.7,note:"Interdisciplinary. Broad but not as deep."},
-  "Human Geography":       {tier:5,label:"Introductory",pct5:15.8,pct3plus:53.0,meanScore:2.9,note:"Often taken freshman year. Good AP entry point."},
-  "Computer Science Principles":{tier:5,label:"Introductory",pct5:23.0,pct3plus:67.1,meanScore:3.2,note:"Broader computing concepts. No Java required."},
-  "Precalculus":           {tier:4,label:"Moderate",pct5:12.0,pct3plus:46.0,meanScore:2.6,note:"New exam (2023). Bridges to Calculus."},
-  "Seminar":               {tier:4,label:"Moderate",pct5:12.9,pct3plus:80.5,meanScore:3.4,note:"Research + presentation. Part of AP Capstone."},
-  "Research":              {tier:3,label:"Hard",pct5:14.1,pct3plus:82.3,meanScore:3.6,note:"Independent research paper. Requires Seminar first."},
-  "Art History":           {tier:3,label:"Hard",pct5:15.2,pct3plus:54.3,meanScore:2.9,note:"250 works to know. Visual analysis essays."},
-  "Music Theory":          {tier:3,label:"Hard",pct5:22.0,pct3plus:61.0,meanScore:3.1,note:"Requires prior music literacy. Sight-singing + composition."},
-  "Spanish Language":      {tier:4,label:"Moderate",pct5:26.1,pct3plus:88.7,meanScore:3.8,note:"Heritage speakers inflate stats. Non-heritage is harder."},
-  "Spanish Literature":    {tier:2,label:"Very Hard",pct5:9.8,pct3plus:55.2,meanScore:2.9,note:"Literary analysis in Spanish. Advanced fluency required."},
-  "French Language":       {tier:4,label:"Moderate",pct5:18.8,pct3plus:74.3,meanScore:3.3,note:"Speaking + writing in French."},
-  "Chinese Language":      {tier:4,label:"Moderate",pct5:50.0,pct3plus:88.2,meanScore:4.1,note:"Heritage speakers dominate. Non-heritage is tier 2."},
-  "Japanese Language":     {tier:4,label:"Moderate",pct5:44.0,pct3plus:75.5,meanScore:3.7,note:"Small exam population. Heritage speaker effect."},
-  "Latin":                 {tier:3,label:"Hard",pct5:14.2,pct3plus:55.5,meanScore:2.9,note:"Translation of Caesar and Vergil. Dead language rigor."},
-  "German Language":       {tier:4,label:"Moderate",pct5:20.1,pct3plus:65.0,meanScore:3.1,note:"Smaller test population."},
-  "Italian Language":      {tier:4,label:"Moderate",pct5:22.3,pct3plus:71.0,meanScore:3.3,note:"Small exam. Heritage advantage."},
-  "Comparative Government":{tier:4,label:"Moderate",pct5:19.3,pct3plus:55.6,meanScore:2.9,note:"Six countries' political systems."},
-  "African American Studies":{tier:4,label:"Moderate",pct5:11.0,pct3plus:58.0,meanScore:2.8,note:"New exam (2024). Interdisciplinary approach."},
-  "Studio Art: 2-D":       {tier:4,label:"Moderate",pct5:17.3,pct3plus:83.0,meanScore:3.4,note:"Portfolio submission. Subjective grading."},
-  "Studio Art: 3-D":       {tier:4,label:"Moderate",pct5:12.0,pct3plus:79.0,meanScore:3.3,note:"Sculptural portfolio. Smallest art exam."},
-  "Studio Art: Drawing":   {tier:4,label:"Moderate",pct5:19.4,pct3plus:86.1,meanScore:3.6,note:"Drawing portfolio. Most popular art AP."},
+  "Physics C: E&M":       {tier:1,label:"Extremely Hard",pct5:24,pct3plus:75,meanScore:3.39,note:"Calculus-based E&M. Smallest exam population, self-selected."},
+  "Physics C: Mechanics":  {tier:1,label:"Extremely Hard",pct5:20,pct3plus:72,meanScore:3.26,note:"Calculus-based mechanics. Strong math prerequisite."},
+  "Calculus BC":           {tier:1,label:"Extremely Hard",pct5:46,pct3plus:82,meanScore:3.92,note:"High pass rate reflects self-selection; content is very rigorous."},
+  "Chemistry":             {tier:2,label:"Very Hard",pct5:15,pct3plus:76,meanScore:3.31,note:"Heavy lab component + conceptual depth."},
+  "Physics 1":             {tier:2,label:"Very Hard",pct5:19,pct3plus:68,meanScore:3.13,note:"Algebra-based but conceptually demanding. Lowest pass rate."},
+  "Physics 2":             {tier:2,label:"Very Hard",pct5:20,pct3plus:72,meanScore:3.34,note:"Fluids, thermo, optics, nuclear. Small test population."},
+  "US History":            {tier:2,label:"Very Hard",pct5:14,pct3plus:74,meanScore:3.31,note:"Massive content scope. DBQ + LEQ essays."},
+  "European History":      {tier:2,label:"Very Hard",pct5:16,pct3plus:74,meanScore:3.31,note:"Broad chronological range. Heavy essay component."},
+  "English Literature":    {tier:2,label:"Very Hard",pct5:16,pct3plus:73,meanScore:3.2,note:"Poetry analysis and literary argument under time pressure."},
+  "Biology":               {tier:3,label:"Hard",pct5:15,pct3plus:71,meanScore:3.18,note:"Content-heavy with lab skills and data analysis."},
+  "Calculus AB":           {tier:3,label:"Hard",pct5:20,pct3plus:65,meanScore:3.22,note:"Foundation of college math. Requires strong algebra/precalc."},
+  "Statistics":            {tier:3,label:"Hard",pct5:17,pct3plus:62,meanScore:2.98,note:"Conceptual probability + inference. Less pure math."},
+  "English Language":      {tier:3,label:"Hard",pct5:15,pct3plus:75,meanScore:3.23,note:"Rhetorical analysis and argument essays."},
+  "World History":         {tier:3,label:"Hard",pct5:14,pct3plus:66,meanScore:3.22,note:"Global scope. Comparison + causation essays."},
+  "Computer Science A":    {tier:3,label:"Hard",pct5:25,pct3plus:66,meanScore:3.19,note:"Java programming. Strong analytical thinking required."},
+  "Macroeconomics":        {tier:4,label:"Moderate",pct5:19,pct3plus:66,meanScore:3.12,note:"Conceptual models + graphs. One semester of content."},
+  "Microeconomics":        {tier:4,label:"Moderate",pct5:19,pct3plus:68,meanScore:3.2,note:"Supply/demand, market structures. One semester."},
+  "US Government":         {tier:4,label:"Moderate",pct5:23,pct3plus:76,meanScore:3.42,note:"Shorter content scope but requires civic depth."},
+  "Psychology":            {tier:4,label:"Moderate",pct5:15,pct3plus:74,meanScore:3.31,note:"Content memorization heavy. Highest enrollment."},
+  "Environmental Science": {tier:4,label:"Moderate",pct5:13,pct3plus:69,meanScore:3.08,note:"Interdisciplinary. Broad but not as deep."},
+  "Human Geography":       {tier:5,label:"Introductory",pct5:19,pct3plus:66,meanScore:3.2,note:"Often taken freshman year. Good AP entry point."},
+  "Computer Science Principles":{tier:5,label:"Introductory",pct5:10,pct3plus:63,meanScore:2.9,note:"Broader computing concepts. No Java required."},
+  "Precalculus":           {tier:4,label:"Moderate",pct5:29,pct3plus:82,meanScore:3.62,note:"New exam (2023). Bridges to Calculus."},
+  "Seminar":               {tier:4,label:"Moderate",pct5:10,pct3plus:88,meanScore:3.27,note:"Research + presentation. Part of AP Capstone."},
+  "Research":              {tier:3,label:"Hard",pct5:17,pct3plus:90,meanScore:3.53,note:"Independent research paper. Requires Seminar first."},
+  "Art History":           {tier:3,label:"Hard",pct5:15,pct3plus:67,meanScore:3.13,note:"250 works to know. Visual analysis essays."},
+  "Music Theory":          {tier:3,label:"Hard",pct5:18,pct3plus:59,meanScore:2.97,note:"Requires prior music literacy. Sight-singing + composition."},
+  "Spanish Language":      {tier:4,label:"Moderate",pct5:21,pct3plus:83,meanScore:3.53,note:"Heritage speakers inflate stats. Non-heritage is harder."},
+  "Spanish Literature":    {tier:2,label:"Very Hard",pct5:20,pct3plus:71,meanScore:3.25,note:"Literary analysis in Spanish. Advanced fluency required."},
+  "French Language":       {tier:4,label:"Moderate",pct5:15,pct3plus:71,meanScore:3.18,note:"Speaking + writing in French."},
+  "Chinese Language":      {tier:4,label:"Moderate",pct5:48,pct3plus:85,meanScore:3.91,note:"Heritage speakers dominate. Non-heritage is tier 2."},
+  "Japanese Language":     {tier:4,label:"Moderate",pct5:47,pct3plus:72,meanScore:3.55,note:"Small exam population. Heritage speaker effect."},
+  "Latin":                 {tier:3,label:"Hard",pct5:20,pct3plus:73,meanScore:3.32,note:"Translation of Caesar and Vergil. Dead language rigor."},
+  "German Language":       {tier:4,label:"Moderate",pct5:24,pct3plus:68,meanScore:3.23,note:"Smaller test population."},
+  "Italian Language":      {tier:4,label:"Moderate",pct5:19,pct3plus:69,meanScore:3.18,note:"Small exam. Heritage advantage."},
+  "Comparative Government":{tier:4,label:"Moderate",pct5:15,pct3plus:70,meanScore:3.1,note:"Six countries' political systems."},
+  "African American Studies":{tier:4,label:"Moderate",pct5:20,pct3plus:77,meanScore:3.41,note:"New exam (2024). Interdisciplinary approach."},
+  "Studio Art: 2-D":       {tier:4,label:"Moderate",pct5:12,pct3plus:85,meanScore:3.42,note:"Portfolio submission. Subjective grading."},
+  "Studio Art: 3-D":       {tier:4,label:"Moderate",pct5:7,pct3plus:75,meanScore:3.12,note:"Sculptural portfolio. Smallest art exam."},
+  "Studio Art: Drawing":   {tier:4,label:"Moderate",pct5:16,pct3plus:83,meanScore:3.43,note:"Drawing portfolio. Most popular art AP."},
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -1048,12 +1048,12 @@ async function execTool(name, input, stateRef, setData) {
         const key = exactKey || partialKeys[0] || null;
         if (!key) return { course: c, found: false, note: "Not found in CollegeBoard database" };
         const d = AP_RIGOR[key];
-        return { course: key, found: true, tier: d.tier, label: d.label, pct5: d.pct5, pct3plus: d.pct3plus, meanScore: d.meanScore, note: d.note, source: "CollegeBoard AP Score Distributions 2024" };
+        return { course: key, found: true, tier: d.tier, label: d.label, pct5: d.pct5, pct3plus: d.pct3plus, meanScore: d.meanScore, note: d.note, source: "CollegeBoard AP Score Distributions 2026 (preliminary)" };
       });
       // Sort by tier (hardest first) for comparison
       results.sort((a, b) => (a.tier || 99) - (b.tier || 99));
       const tierExplain = { 1:"Extremely Hard — few students score 5. Strongest signal of rigor.", 2:"Very Hard — challenging for most students. Strong rigor signal.", 3:"Hard — significant preparation needed. Good rigor signal.", 4:"Moderate — accessible with effort. Standard AP rigor.", 5:"Introductory — good entry to AP. Less weight in rigor evaluation." };
-      return { results, tierScale: tierExplain, source: "CollegeBoard AP Score Distributions 2024", note: "Tier rankings based on % scoring 5 and mean scores. Self-selection effects noted where relevant." };
+      return { results, tierScale: tierExplain, source: "CollegeBoard AP Score Distributions 2026 (preliminary)", note: "Tier rankings based on % scoring 5 and mean scores. Self-selection effects noted where relevant." };
     }
 
     case "get_sat_context": {
