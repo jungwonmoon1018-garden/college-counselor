@@ -6,10 +6,9 @@
 // 400 lines of inline fetch() boilerplate.
 //
 // Locale plumbing: every request appends ?locale=ko (or whatever the
-// student picked) AND sends X-CollegeApp-Locale header — same contract as
-// the skill scripts at skills/collegeapp-ai/scripts/. The server's i18n
-// layer translates friendlyMessage / friendlyLegendI18n on the wire so the
-// UI can render server text verbatim.
+// student picked) AND sends X-CollegeApp-Locale. The server's i18n layer
+// translates friendlyMessage / friendlyLegendI18n on the wire so the UI can
+// render server text verbatim.
 //
 // Auth: reads window.__CC_SESSION_TOKEN__ at call time (App.jsx writes it
 // after register/login). No state subscription — the token is a mutable
@@ -21,9 +20,9 @@ const HANGUL_RE = /^ko/i;
 export function getApiBase() {
   // App.jsx convention: window.__CC_PROXY_URL__ is the chat endpoint
   // ("/api/chat" by default). The other endpoints share the same prefix
-  // minus "/chat". The legacy "/anthropic" suffix is still accepted.
+  // minus "/chat".
   const proxyUrl = (typeof window !== "undefined" && window.__CC_PROXY_URL__) || "/api/chat";
-  return proxyUrl.replace(/\/(?:chat|anthropic)\/?$/, "");
+  return proxyUrl.replace(/\/chat\/?$/, "");
 }
 
 export function getSessionToken() {
@@ -214,9 +213,16 @@ export const deadlines = {
       method: "DELETE",
     });
   },
+  // Cascade: remove every deadline tied to a school when it leaves the list.
+  async deleteBySchool({ schoolName, unitId } = {}) {
+    return ccFetch(`/api/students/deadlines/by-school`, {
+      method: "DELETE",
+      body: { schoolName, unitId },
+    });
+  },
 };
 
-// ─── Bundle (used by skill + can hydrate a quick dashboard) ──────────────
+// Context bundle used to hydrate student views.
 export const context = {
   async bundle({ narrativeText = false } = {}) {
     const params = new URLSearchParams({ friendly: "1" });

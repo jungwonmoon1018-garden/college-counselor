@@ -127,7 +127,7 @@ export function buildMethodology(status = {}) {
     },
     modelTransparency: {
       whyItMatters:
-        "Free-text guidance quality depends on the LLM behind your BYOK key. A weak or outdated model can produce generic or hallucinated suggestions. We surface newer recommended models and tell you when yours is behind.",
+        "Free-text guidance quality depends on the administrator-managed OpenRouter model. Model output can still be incomplete or wrong, so factual claims are separated from coaching and linked to current evidence.",
       provider: {
         policy: "The counselor runs on your own OpenRouter (or other OpenAI-compatible) key. The model dropdown is built from OpenRouter's live catalog, so it only ever offers models that currently exist. Newer recommended defaults are detected and PROPOSED — migration happens only with your explicit approval, never silently.",
         status: providerMigration,

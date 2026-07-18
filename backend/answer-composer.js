@@ -1,235 +1,327 @@
-// ═══════════════════════════════════════════════════════════════════════
-// ANSWER COMPOSER — Three-lane output + AI disclosure + citations
-// ═══════════════════════════════════════════════════════════════════════
-// Every response must separate:
-//   1. verified_facts:      From canonical_facts with confidence='verified'
-//   2. model_inferences:    Model-generated, must reference evidence objects
-//   3. coaching_suggestions: Non-binding guidance with coaching label
-//
-// For regulated/high_stakes topics:
-//   - verified_facts can ONLY come from fact store
-//   - If no verified source → return "no verified answer available"
-//   - Model cannot add claims to verified_facts lane
-//
-// Every response includes session-level AI disclosure.
-// ═══════════════════════════════════════════════════════════════════════
+// Claim-level answer composition. No model text is promoted to a verified fact.
 
 import crypto from "node:crypto";
-import { TOPIC_TYPES } from "./policy-router.js";
+import {
+  TOPIC_TYPES,
+  isVerifiedEvidenceForTopic,
+} from "./policy-router.js";
 
-// Map internal tier labels (legacy haiku/sonnet/opus + the small/medium/large
-// aliases) to provider-neutral words for the user-facing AI disclosure. The
-// actual model id is the student's own BYOK choice, so the disclosure names a
-// reasoning tier, not a vendor model.
+export const CLAIM_LANES = Object.freeze({
+  VERIFIED: "verified_fact",
+  STUDENT: "student_provided_fact",
+  COACHING: "coaching_suggestion",
+});
+
 const TIER_DISCLOSURE_LABELS = {
-  haiku: "small", sonnet: "medium", opus: "large",
-  small: "small", medium: "medium", large: "large",
-  embedded_small: "embedded (zero-cost)",
-  council: "strategy council (5 seats)",
+  haiku: "small",
+  sonnet: "medium",
+  opus: "large",
+  small: "small",
+  medium: "medium",
+  large: "large",
+  council: "strategy council",
 };
 
-// ─── Council answer lane (Pillar 9) ────────────────────────────────────
-// Renders a council envelope as the primary answer + a clearly-labeled
-// dissent block + clickable citations. Distinct from the 3-lane regulated
-// answer because the council output is fundamentally advisory and the
-// dissent is part of the deliverable, not an afterthought.
-export function composeCouncilAnswer({ envelope, locale = "en-US" } = {}) {
-  if (!envelope) return null;
-  const lines = [];
-  lines.push(envelope.recommendation || "(no recommendation)");
-  if (envelope.dissent && envelope.dissent.text) {
-    lines.push("");
-    lines.push(`> **${envelope.dissent.from} flagged:** ${envelope.dissent.text}`);
+function normalizeTopicType(value) {
+  return String(value || "").toLowerCase();
+}
+
+function normalizeSubIntent(value) {
+  const intent = String(value || "").toLowerCase();
+  if (intent.includes("fafsa")) return "fafsa";
+  if (intent.includes("deadline")) return "deadlines";
+  return intent;
+}
+
+function sourceDomain(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
   }
-  if (envelope.citations && envelope.citations.length) {
-    lines.push("");
-    lines.push(
-      "_Citations: " +
-      envelope.citations.slice(0, 8).map((c) => `[[${c.type}:${c.id}]]`).join(" ") +
-      "_",
-    );
-  }
+}
+
+function evidenceStatement(evidence) {
+  return String(
+    evidence?.fact_value ??
+    evidence?.claim ??
+    evidence?.statement ??
+    ""
+  ).trim();
+}
+
+function evidenceId(evidence) {
+  return evidence?.id || evidence?.fact_id || null;
+}
+
+function sourceFromEvidence(evidence) {
+  const url = evidence?.source_url || evidence?.source || null;
   return {
-    lane: "council",
-    body: lines.join("\n"),
-    confidence: envelope.confidence,
-    moderator_rule: envelope.moderator_rule,
-    council_breakdown: envelope.council_breakdown,
-    ai_disclosure: buildAIDisclosure("council", locale),
+    id: evidenceId(evidence),
+    url,
+    domain: evidence?.source_domain || sourceDomain(url),
+    title: evidence?.source_title || null,
+    accessedAt: evidence?.extracted_at || evidence?.source_accessed_at || null,
+    expiresAt: evidence?.expires_at || evidence?.expiresAt || null,
+    academicYear: evidence?.academic_year || evidence?.academicYear || null,
   };
 }
 
-// ─── Build AI disclosure block ───
-function buildAIDisclosure(modelUsed, locale = "en-US") {
-  const disclosures = {
-    "en-US": {
-      session: "This response was generated with AI assistance. Verified facts are sourced from official publications. Inferences and suggestions are AI-generated and should not be treated as professional advice.",
-      advisory: "This tool provides informational guidance only. It is not a substitute for professional college counseling, financial advice, or official determinations by educational institutions or government agencies.",
-      fafsa: "This is NOT an official FAFSA tool and does not replace StudentAid.gov. Only the U.S. Department of Education can make official financial aid determinations.",
-    },
-    ko: {
-      session: "이 응답은 AI 지원으로 생성되었습니다. 확인된 사실은 공식 출판물에서 가져왔습니다. 추론 및 제안은 AI가 생성한 것이며 전문적인 조언으로 취급해서는 안 됩니다.",
-      advisory: "이 도구는 정보 안내만 제공합니다. 전문 대학 상담, 재정 조언 또는 교육 기관이나 정부 기관의 공식 결정을 대체하지 않습니다.",
-      fafsa: "이것은 공식 FAFSA 도구가 아니며 StudentAid.gov를 대체하지 않습니다.",
-    },
-  };
+function isStudentProvidedEvidence(evidence) {
+  const trust = String(evidence?.trust_level || "").toLowerCase();
+  return trust === "student_provided" ||
+    trust === "student" ||
+    String(evidence?.entity_type || "").toLowerCase() === "student" ||
+    evidence?.evidence_type === 2 && !evidence?.source_url;
+}
 
-  const strings = disclosures[locale] || disclosures["en-US"];
-
+function makeClaim({ lane, statement, source = null, basis = null, origin = null }) {
+  const sourceIds = source?.id ? [source.id] : [];
   return {
-    session_disclosure: strings.session,
-    advisory_disclosure: strings.advisory,
-    model_disclosure: modelUsed && modelUsed !== "none"
-      ? `AI reasoning tier: ${TIER_DISCLOSURE_LABELS[modelUsed] || modelUsed} — served through your own provider API key.`
-      : "No AI model was used for this response.",
-    generated_by: modelUsed && modelUsed !== "none" ? "ai" : "rules_engine",
+    id: crypto.randomUUID(),
+    lane,
+    statement: String(statement || "").trim(),
+    sourceIds,
+    source,
+    basis,
+    origin,
   };
 }
 
-// ─── Build response for regulated topics with no-source-no-answer ───
-function composeRegulatedAnswer(classification, verifiedEvidence, modelOutput, locale) {
-  const { subIntent } = classification;
-
-  // Filter to only verified evidence from trusted sources
-  const trustedEvidence = verifiedEvidence.filter(
-    (e) => e.confidence === "verified" && (e.trust_level === "official" || e.trust_level === "verified")
-  );
-
-  // Build verified facts lane (ONLY from fact store)
-  const verified_facts = trustedEvidence.map((e) => ({
-    statement: e.fact_value || e.claim,
-    source: {
-      url: e.source_url,
-      domain: e.source_domain,
-      title: e.source_title,
-      extracted_at: e.extracted_at || e.source_accessed_at,
-      confidence: e.confidence,
-    },
-    fact_id: e.id,
-    fact_key: e.fact_key || e.claim_category,
-  }));
-
-  // Items that had no verified source
-  const noVerifiedItems = [];
-  if (trustedEvidence.length === 0) {
-    noVerifiedItems.push({
-      query_aspect: subIntent,
-      message: "No verified answer available for this question.",
-      suggested_source: getSuggestedSource(subIntent),
-      reason: "No official source matched this query in our verified database.",
-    });
-  }
-
-  // Model inferences: only if model was used AND had grounding
-  const model_inferences = [];
-  if (modelOutput && modelOutput.text && trustedEvidence.length > 0) {
-    model_inferences.push({
-      statement: modelOutput.text,
-      label: "AI-generated inference grounded in verified sources",
-      grounding_sources: trustedEvidence.map((e) => e.id),
-      model: modelOutput.model || "sonnet",
-      confidence_note: "This is a model-generated synthesis of verified data, not an independent claim.",
-    });
-  }
-
-  return { verified_facts, model_inferences, coaching_suggestions: [], noVerifiedItems };
+function dedupeClaims(claims) {
+  const seen = new Set();
+  return claims.filter((claim) => {
+    if (!claim.statement) return false;
+    const key = claim.lane + ":" + claim.statement.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-// ─── Build response for coaching topics ───
-function composeCoachingAnswer(classification, evidence, modelOutput, locale) {
-  const verified_facts = evidence
-    .filter((e) => e.confidence === "verified" || e.evidence_type === 1)
-    .map((e) => ({
-      statement: e.fact_value || e.claim,
-      source: {
-        url: e.source_url,
-        domain: e.source_domain,
-        extracted_at: e.extracted_at || e.source_accessed_at,
-        confidence: e.confidence || e.trust_level,
-      },
-      fact_id: e.id,
-    }));
-
-  const model_inferences = [];
-  if (modelOutput?.analysis) {
-    model_inferences.push({
-      statement: modelOutput.analysis,
-      label: "AI-generated inference",
-      grounding_sources: evidence.map((e) => e.id).filter(Boolean),
-      model: modelOutput.model || "sonnet",
-      confidence_note: "This is a model-generated assessment, not an admissions decision.",
-    });
-  }
-
-  const coaching_suggestions = [];
-  if (modelOutput?.suggestions) {
-    for (const suggestion of modelOutput.suggestions) {
-      coaching_suggestions.push({
-        statement: typeof suggestion === "string" ? suggestion : suggestion.text,
-        label: "Non-binding coaching suggestion",
-        basis: typeof suggestion === "object" ? suggestion.basis : null,
-      });
+function buildEvidenceClaims(evidence, subIntent) {
+  const claims = [];
+  for (const item of evidence) {
+    const statement = evidenceStatement(item);
+    if (!statement) continue;
+    if (isVerifiedEvidenceForTopic(item, subIntent)) {
+      claims.push(makeClaim({
+        lane: CLAIM_LANES.VERIFIED,
+        statement,
+        source: sourceFromEvidence(item),
+        origin: "evidence_store",
+      }));
+    } else if (isStudentProvidedEvidence(item)) {
+      claims.push(makeClaim({
+        lane: CLAIM_LANES.STUDENT,
+        statement,
+        source: evidenceId(item) ? { id: evidenceId(item) } : null,
+        origin: "student",
+      }));
     }
-  } else if (modelOutput?.text) {
-    coaching_suggestions.push({
-      statement: modelOutput.text,
-      label: "Non-binding coaching suggestion",
-      basis: evidence.length > 0
-        ? `Based on ${evidence.length} evidence item(s) from official and verified sources.`
-        : null,
-    });
   }
-
-  return { verified_facts, model_inferences, coaching_suggestions, noVerifiedItems: [] };
+  return claims;
 }
 
-// ─── Main compose function ───
+function buildModelClaims(modelOutput, evidenceClaims) {
+  if (!modelOutput) return [];
+  const sourceIds = evidenceClaims
+    .filter((claim) => claim.lane === CLAIM_LANES.VERIFIED)
+    .flatMap((claim) => claim.sourceIds);
+  const claims = [];
+  const add = (value, basis) => {
+    const statement = typeof value === "string" ? value : value?.text;
+    if (!statement) return;
+    const claim = makeClaim({
+      lane: CLAIM_LANES.COACHING,
+      statement,
+      basis: basis || value?.basis || null,
+      origin: "model",
+    });
+    claim.sourceIds = [...sourceIds];
+    claims.push(claim);
+  };
+
+  if (Array.isArray(modelOutput.suggestions)) {
+    for (const suggestion of modelOutput.suggestions) add(suggestion);
+  } else if (modelOutput.text) {
+    add(modelOutput.text, sourceIds.length ? "Synthesized from the cited evidence." : null);
+  }
+  if (modelOutput.analysis && modelOutput.analysis !== modelOutput.text) {
+    add(modelOutput.analysis, sourceIds.length ? "Analysis grounded only in the cited evidence." : null);
+  }
+  return claims;
+}
+
+function deterministicClaims(classification, result) {
+  if (!result) return [];
+  const intent = normalizeSubIntent(classification?.subIntent);
+  const claims = [];
+
+  if (intent === "fafsa" || intent === "eligibility") {
+    const rules = result.results || result.rules || [];
+    for (const rule of rules) {
+      const sourceUrl = rule.source || result.source || null;
+      const officialEvidence = {
+        id: rule.ruleId || rule.id || null,
+        topic_type: "fafsa",
+        fact_key: rule.ruleId || rule.id || "eligibility_rule",
+        fact_value: rule.description || rule.message || rule.label,
+        source_url: sourceUrl,
+        source_domain: rule.sourceDomain || sourceDomain(sourceUrl),
+        source_title: rule.sourceTitle || result.sourceTitle || null,
+        extracted_at: rule.effectiveAt || result.effectiveAt || null,
+        expires_at: rule.expiresAt || result.expiresAt || null,
+        academic_year: rule.academicYear || result.academicYear || null,
+        confidence: "verified",
+        trust_level: "official",
+      };
+      const statement = evidenceStatement(officialEvidence);
+      if (statement && isVerifiedEvidenceForTopic(officialEvidence, "fafsa")) {
+        claims.push(makeClaim({
+          lane: CLAIM_LANES.VERIFIED,
+          statement,
+          source: sourceFromEvidence(officialEvidence),
+          origin: "rules_engine",
+        }));
+      }
+      if (rule.status && rule.status !== "not_applicable") {
+        claims.push(makeClaim({
+          lane: CLAIM_LANES.STUDENT,
+          statement: (rule.label || rule.ruleId || rule.id || "Eligibility item") + ": " + rule.status,
+          basis: "Calculated from information supplied by the student.",
+          origin: "rules_engine",
+        }));
+      }
+    }
+  } else if (intent === "deadlines") {
+    const deadline = result.deadlineDate || result.deadline;
+    const statement = result.message || (
+      deadline
+        ? "Using the provided deadline " + deadline + ", " + String(result.daysRemaining) + " day(s) remain."
+        : "No deadline date was available."
+    );
+    const sourceUrl = result.source_url || result.source || null;
+    const deadlineEvidence = {
+      id: result.fact_id || null,
+      topic_type: "deadlines",
+      fact_key: "deadline",
+      fact_value: statement,
+      source_url: sourceUrl,
+      source_domain: result.source_domain || sourceDomain(sourceUrl),
+      source_title: result.source_title || null,
+      expires_at: result.expires_at || null,
+      confidence: result.confidence || (sourceUrl ? "verified" : "student_provided"),
+      trust_level: result.trust_level || (sourceUrl ? "official" : "student_provided"),
+    };
+    claims.push(makeClaim({
+      lane: isVerifiedEvidenceForTopic(deadlineEvidence, "deadlines")
+        ? CLAIM_LANES.VERIFIED
+        : CLAIM_LANES.STUDENT,
+      statement,
+      source: sourceUrl ? sourceFromEvidence(deadlineEvidence) : null,
+      basis: sourceUrl ? null : "Calculated from a deadline supplied by the student or caller.",
+      origin: "rules_engine",
+    }));
+  } else if (result.summary || result.message) {
+    claims.push(makeClaim({
+      lane: CLAIM_LANES.STUDENT,
+      statement: result.summary || result.message,
+      basis: "Deterministic calculation from supplied information.",
+      origin: "rules_engine",
+    }));
+  }
+
+  return claims;
+}
+
+function buildAIDisclosure(modelUsed, locale) {
+  const korean = locale === "ko";
+  const usedModel = modelUsed && modelUsed !== "none";
+  return {
+    session_disclosure: korean
+      ? "AI가 생성한 제안은 코칭으로 표시되며 공식 사실과 분리됩니다."
+      : "AI-generated suggestions are labeled as coaching and kept separate from verified and student-provided facts.",
+    advisory_disclosure: korean
+      ? "이 도구는 정보 제공용이며 공식 입학 또는 재정 지원 결정을 대신하지 않습니다."
+      : "This tool provides informational guidance and does not replace official admissions or financial-aid determinations.",
+    model_disclosure: usedModel
+      ? "AI reasoning tier: " + (TIER_DISCLOSURE_LABELS[modelUsed] || modelUsed) + "."
+      : "No AI model was used for this response.",
+    generated_by: usedModel ? "ai" : "rules_engine",
+  };
+}
+
+function suggestedSource(subIntent) {
+  const sources = {
+    fafsa: { url: "https://studentaid.gov", label: "StudentAid.gov" },
+    eligibility: { url: "https://studentaid.gov", label: "StudentAid.gov" },
+    ferpa: { url: "https://studentprivacy.ed.gov", label: "Student Privacy Policy Office" },
+    financial_aid_policy: { url: "https://studentaid.gov", label: "StudentAid.gov" },
+    deadlines: { url: null, label: "The college's official admissions website" },
+    financial_amounts: { url: null, label: "The college's financial aid office" },
+    school_policies: { url: null, label: "The college's official admissions website" },
+    official_stats: { url: "https://collegescorecard.ed.gov", label: "College Scorecard" },
+  };
+  return sources[subIntent] || { url: null, label: "The relevant official source" };
+}
+
+function answerText(result, modelOutput, claims, regulated) {
+  if (result?.summary) return result.summary;
+  if (result?.message) return result.message;
+  if (modelOutput?.text) return modelOutput.text;
+  if (modelOutput?.analysis) return modelOutput.analysis;
+  const verified = claims.filter((claim) => claim.lane === CLAIM_LANES.VERIFIED);
+  if (verified.length) return verified.map((claim) => claim.statement).join("\n");
+  return regulated
+    ? "No verified answer is available for this question."
+    : "There is not enough information to produce a specific suggestion.";
+}
+
 export function composeAnswer({
-  classification,
+  classification = {},
   evidence = [],
   modelOutput = null,
+  deterministicResult = null,
   locale = "en-US",
-  studentId = null,
 }) {
-  const { topicType, subIntent, modelTier } = classification;
-  const modelUsed = modelOutput?.model || modelTier || "none";
-  const isRegulated = topicType === TOPIC_TYPES.REGULATED || topicType === TOPIC_TYPES.HIGH_STAKES;
+  const topicType = normalizeTopicType(classification.topicType);
+  const subIntent = normalizeSubIntent(classification.subIntent);
+  const regulated = topicType === TOPIC_TYPES.REGULATED || topicType === TOPIC_TYPES.HIGH_STAKES;
+  const modelUsed = modelOutput?.model || classification.modelTier || "none";
 
-  // Compose based on topic type
-  let lanes;
-  if (topicType === TOPIC_TYPES.CRISIS) {
-    // Crisis responses are handled by rules-engine.js buildCrisisResponse()
-    // This shouldn't normally be called for crisis topics
-    lanes = { verified_facts: [], model_inferences: [], coaching_suggestions: [], noVerifiedItems: [] };
-  } else if (isRegulated) {
-    lanes = composeRegulatedAnswer(classification, evidence, modelOutput, locale);
-  } else {
-    lanes = composeCoachingAnswer(classification, evidence, modelOutput, locale);
-  }
+  const claims = dedupeClaims([
+    ...buildEvidenceClaims(evidence, subIntent),
+    ...deterministicClaims(classification, deterministicResult),
+  ]);
+  claims.push(...buildModelClaims(modelOutput, claims));
+  const finalClaims = dedupeClaims(claims);
 
-  // Build sources list (deduped)
+  const verifiedFacts = finalClaims
+    .filter((claim) => claim.lane === CLAIM_LANES.VERIFIED)
+    .map((claim) => ({
+      statement: claim.statement,
+      source: claim.source,
+      fact_id: claim.sourceIds[0] || null,
+    }));
+  const modelClaims = finalClaims.filter(
+    (claim) => claim.lane === CLAIM_LANES.COACHING && claim.origin === "model"
+  );
+  const noVerified = regulated && verifiedFacts.length === 0;
   const sourceMap = new Map();
-  for (const e of evidence) {
-    const key = e.source_url || e.source_domain;
-    if (key && !sourceMap.has(key)) {
-      sourceMap.set(key, {
-        url: e.source_url,
-        title: e.source_title,
-        domain: e.source_domain,
-        accessed: e.extracted_at || e.source_accessed_at,
-        trust_level: e.trust_level || e.confidence,
-      });
-    }
+  for (const claim of finalClaims) {
+    if (!claim.source?.url) continue;
+    sourceMap.set(claim.source.url, claim.source);
   }
 
-  // FAFSA-specific disclosure
-  const isFAFSA = subIntent === "fafsa" || subIntent === "financial_aid_policy";
+  const limitations = [];
+  if (noVerified) limitations.push("No relevant, unexpired official source matched this question.");
+  if (deterministicResult?.advisory) limitations.push(deterministicResult.advisory);
+  if (modelClaims.length) limitations.push("AI coaching suggestions are not admissions predictions or official determinations.");
+  const actions = noVerified ? [{ type: "consult_official_source", ...suggestedSource(subIntent) }] : [];
   const disclosure = buildAIDisclosure(modelUsed, locale);
-  if (isFAFSA) {
-    const fafsaStrings = locale === "ko"
-      ? "이것은 공식 FAFSA 도구가 아니며 StudentAid.gov를 대체하지 않습니다."
-      : "This is NOT an official FAFSA tool and does not replace StudentAid.gov. Only the U.S. Department of Education can make official financial aid determinations.";
-    disclosure.fafsa_disclosure = fafsaStrings;
+  if (subIntent === "fafsa") {
+    disclosure.fafsa_disclosure = "This is not an official FAFSA tool and does not replace StudentAid.gov.";
   }
 
   return {
@@ -238,35 +330,48 @@ export function composeAnswer({
     topic_type: topicType,
     sub_intent: subIntent,
     model_used: modelUsed,
+    answer: answerText(deterministicResult, modelOutput, finalClaims, regulated),
+    claims: finalClaims,
+    limitations,
+    actions,
+    usage: modelOutput?.usage || { input_tokens: 0, output_tokens: 0, estimated_cost_usd: 0 },
 
-    // Three output lanes
-    verified_facts: lanes.verified_facts,
-    model_inferences: lanes.model_inferences,
-    coaching_suggestions: lanes.coaching_suggestions,
-
-    // Evidence panel
+    // Compatibility fields for clients migrating to claim-level lanes.
+    verified_facts: verifiedFacts,
+    model_inferences: modelClaims.map((claim) => ({
+      statement: claim.statement,
+      label: "AI-generated coaching inference",
+      grounding_sources: claim.sourceIds,
+      model: modelUsed,
+    })),
+    coaching_suggestions: finalClaims
+      .filter((claim) => claim.lane === CLAIM_LANES.COACHING)
+      .map((claim) => ({
+        statement: claim.statement,
+        label: "Non-binding coaching suggestion",
+        basis: claim.basis,
+      })),
     sources: [...sourceMap.values()],
-
-    // AI disclosure (session-level)
+    no_verified_answer: noVerified,
     ai_disclosure: {
       ...disclosure,
       content_labels: {
-        verified_facts_count: lanes.verified_facts.length,
-        model_inferences_count: lanes.model_inferences.length,
-        coaching_suggestions_count: lanes.coaching_suggestions.length,
+        verified_facts_count: verifiedFacts.length,
+        student_provided_facts_count: finalClaims.filter((claim) => claim.lane === CLAIM_LANES.STUDENT).length,
+        coaching_suggestions_count: finalClaims.filter((claim) => claim.lane === CLAIM_LANES.COACHING).length,
       },
     },
-
-    // Official-source mode
     official_source_mode: {
-      active: isRegulated,
+      active: regulated,
       topic: subIntent,
-      no_verified_answer_items: lanes.noVerifiedItems,
+      no_verified_answer_items: noVerified ? [{
+        query_aspect: subIntent,
+        message: "No verified answer available for this question.",
+        suggested_source: suggestedSource(subIntent),
+      }] : [],
     },
-
-    // Explanation capability (Korea AI Basic Act)
     explanation: {
-      routing: classification.rationale,
+      routing: classification.rationale || null,
       model_tier: modelUsed,
       evidence_count: evidence.length,
       source_count: sourceMap.size,
@@ -275,7 +380,6 @@ export function composeAnswer({
   };
 }
 
-// ─── Compose a deterministic answer (T0 — no model) ───
 export function composeDeterministicAnswer({
   classification,
   result,
@@ -285,21 +389,33 @@ export function composeDeterministicAnswer({
   return composeAnswer({
     classification,
     evidence,
+    deterministicResult: result,
     modelOutput: null,
     locale,
   });
 }
 
-function getSuggestedSource(subIntent) {
-  const map = {
-    fafsa: { url: "https://studentaid.gov", label: "StudentAid.gov" },
-    ferpa: { url: "https://studentprivacy.ed.gov", label: "Student Privacy Policy Office" },
-    financial_aid_policy: { url: "https://studentaid.gov", label: "StudentAid.gov" },
-    eligibility: { url: "https://studentaid.gov/apply-for-aid/fafsa/eligibility", label: "FAFSA Eligibility" },
-    deadlines: { url: null, label: "Check the college's official admissions website" },
-    financial_amounts: { url: null, label: "Contact the college's financial aid office" },
-    school_policies: { url: null, label: "Check the college's official admissions website" },
-    official_stats: { url: "https://collegescorecard.ed.gov", label: "College Scorecard" },
+export function composeCouncilAnswer({ envelope, locale = "en-US" } = {}) {
+  if (!envelope) return null;
+  const lines = [envelope.recommendation || "(no recommendation)"];
+  const dissents = envelope.dissents || (envelope.dissent ? [envelope.dissent] : []);
+  for (const dissent of dissents) {
+    lines.push("");
+    lines.push("> **" + dissent.from + " flagged:** " + dissent.text);
+  }
+  const citations = (envelope.citations || []).filter((citation) => citation.validated !== false);
+  if (citations.length) {
+    lines.push("");
+    lines.push("_Citations: " + citations.slice(0, 8).map((citation) =>
+      "[[" + citation.type + ":" + citation.id + "]]"
+    ).join(" ") + "_");
+  }
+  return {
+    lane: "council",
+    body: lines.join("\n"),
+    confidence: envelope.confidence,
+    moderator_rule: envelope.moderator_rule,
+    council_breakdown: envelope.council_breakdown,
+    ai_disclosure: buildAIDisclosure("council", locale),
   };
-  return map[subIntent] || { url: null, label: "Consult the relevant official source" };
 }

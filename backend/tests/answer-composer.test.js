@@ -22,6 +22,8 @@ describe("composeDeterministicAnswer", () => {
     });
 
     assert.ok(result.verified_facts);
+    assert.ok(result.verified_facts.some((fact) => fact.statement === "U.S. citizen"));
+    assert.ok(result.claims.some((claim) => claim.lane === "verified_fact"));
     assert.ok(result.ai_disclosure);
     assert.ok(result.ai_disclosure.advisory_disclosure);
   });
@@ -96,5 +98,44 @@ describe("composeAnswer", () => {
 
     assert.ok(result.explanation);
     assert.ok(result.explanation.routing || result.explanation.model_tier !== undefined);
+  });
+
+  it("never promotes a model paragraph to a verified claim", () => {
+    const result = composeAnswer({
+      classification: { topicType: "regulated", subIntent: "fafsa" },
+      evidence: [{
+        id: "fafsa-source",
+        fact_key: "fafsa_eligibility",
+        fact_value: "Students must meet federal eligibility requirements.",
+        source_url: "https://studentaid.gov",
+        source_domain: "studentaid.gov",
+        confidence: "verified",
+        trust_level: "official",
+        expires_at: "2099-01-01T00:00:00.000Z",
+      }],
+      modelOutput: { text: "You definitely qualify for aid.", model: "test-model" },
+    });
+    assert.equal(
+      result.claims.find((claim) => claim.statement === "You definitely qualify for aid.").lane,
+      "coaching_suggestion",
+    );
+    assert.equal(result.verified_facts.some((fact) => fact.statement.includes("definitely qualify")), false);
+  });
+
+  it("does not label expired evidence as verified", () => {
+    const result = composeAnswer({
+      classification: { topicType: "regulated", subIntent: "fafsa" },
+      evidence: [{
+        fact_key: "fafsa_eligibility",
+        fact_value: "Expired rule",
+        source_url: "https://studentaid.gov",
+        source_domain: "studentaid.gov",
+        confidence: "verified",
+        trust_level: "official",
+        expires_at: "2000-01-01T00:00:00.000Z",
+      }],
+    });
+    assert.equal(result.verified_facts.length, 0);
+    assert.equal(result.no_verified_answer, true);
   });
 });

@@ -1,144 +1,111 @@
-// ═══════════════════════════════════════════════════════════════════════
-// COUNCIL AUDIT TRAIL — Logseq journal entry + SQLite row per convening
-// ═══════════════════════════════════════════════════════════════════════
-// Every council convening lands in two places:
-//
-//   1. The student's Logseq vault, `pages/strategy-council-log.md`, as
-//      an appended block. Format: date, question, recommendation,
-//      dissent (if any), citation count, moderator rule. Students can
-//      look up "what did the council say about X" in their own notebook.
-//
-//   2. The operational SQLite database, `council_convenings` table, for
-//      the budget UI and any later analytics. Includes per-seat token
-//      usage, model id, and which seats fell back to embedded.
-//
-// initCouncilTables() is called at server boot from the same place
-// initFactStore / initEvidenceGraph are called.
-// ═══════════════════════════════════════════════════════════════════════
+// Operational Council audit metadata. Student text belongs in the encrypted vault.
 
 import crypto from "node:crypto";
-import { appendBlock, writeJournalEntry } from "../logseq/index.js";
+
+function ensureColumn(db, name, definition) {
+  const columns = db.prepare("PRAGMA table_info(council_convenings)").all().map((row) => row.name);
+  if (!columns.includes(name)) db.exec("ALTER TABLE council_convenings ADD COLUMN " + name + " " + definition);
+}
 
 export function initCouncilTables(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS council_convenings (
-      id TEXT PRIMARY KEY,
-      student_id TEXT NOT NULL,
-      decision_type TEXT NOT NULL,
-      question TEXT NOT NULL,
-      recommendation TEXT NOT NULL,
-      moderator_rule TEXT NOT NULL,
-      confidence REAL,
-      dissent_text TEXT,
-      citations_json TEXT,
-      council_breakdown_json TEXT,
-      total_input_tokens INTEGER DEFAULT 0,
-      total_output_tokens INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_council_student ON council_convenings(student_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_council_rule ON council_convenings(moderator_rule);
-  `);
+  db.exec([
+    "CREATE TABLE IF NOT EXISTS council_convenings (",
+    " id TEXT PRIMARY KEY,",
+    " request_id TEXT,",
+    " student_id TEXT NOT NULL,",
+    " decision_type TEXT NOT NULL,",
+    " question TEXT NOT NULL,",
+    " question_hash TEXT,",
+    " recommendation TEXT NOT NULL,",
+    " moderator_rule TEXT NOT NULL,",
+    " confidence REAL,",
+    " dissent_text TEXT,",
+    " citations_json TEXT,",
+    " council_breakdown_json TEXT,",
+    " total_input_tokens INTEGER DEFAULT 0,",
+    " total_output_tokens INTEGER DEFAULT 0,",
+    " trigger_source TEXT NOT NULL DEFAULT 'manual',",
+    " created_at TEXT DEFAULT (datetime('now'))",
+    ");",
+    "CREATE INDEX IF NOT EXISTS idx_council_student ON council_convenings(student_id, created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_council_rule ON council_convenings(moderator_rule);",
+  ].join("\n"));
+  ensureColumn(db, "request_id", "TEXT");
+  ensureColumn(db, "question_hash", "TEXT");
+  ensureColumn(db, "trigger_source", "TEXT NOT NULL DEFAULT 'manual'");
+  // The same opaque client request ID may be generated independently by two
+  // students. Idempotency is tenant-scoped, so the database constraint must
+  // use the same boundary as getByRequestId.
+  db.transaction(() => {
+    db.exec("DROP INDEX IF EXISTS idx_council_request_student");
+    db.exec("DROP INDEX IF EXISTS idx_council_request");
+    db.exec("CREATE UNIQUE INDEX idx_council_request ON council_convenings(student_id, request_id) WHERE request_id IS NOT NULL");
+  })();
 }
 
 export function prepareCouncilStatements(db) {
   return {
-    insert: db.prepare(`
-      INSERT INTO council_convenings (
-        id, student_id, decision_type, question, recommendation,
-        moderator_rule, confidence, dissent_text, citations_json,
-        council_breakdown_json, total_input_tokens, total_output_tokens
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `),
-    getRecent: db.prepare(`
-      SELECT id, decision_type, question, recommendation, moderator_rule, confidence, created_at
-      FROM council_convenings WHERE student_id = ?
-      ORDER BY created_at DESC LIMIT ?
-    `),
-    getById: db.prepare(`
-      SELECT * FROM council_convenings WHERE id = ? AND student_id = ?
-    `),
+    insert: db.prepare([
+      "INSERT INTO council_convenings (",
+      " id, request_id, student_id, decision_type, question, question_hash, recommendation,",
+      " moderator_rule, confidence, dissent_text, citations_json, council_breakdown_json,",
+      " total_input_tokens, total_output_tokens, trigger_source",
+      ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    ].join("\n")),
+    getRecent: db.prepare([
+      "SELECT id, decision_type, moderator_rule, confidence, created_at, trigger_source",
+      "FROM council_convenings WHERE student_id = ? ORDER BY created_at DESC LIMIT ?",
+    ].join("\n")),
+    getById: db.prepare("SELECT * FROM council_convenings WHERE id = ? AND student_id = ?"),
+    getByRequestId: db.prepare("SELECT id FROM council_convenings WHERE request_id = ? AND student_id = ?"),
   };
 }
 
-/**
- * Persist a convening to SQLite + Logseq. Returns the convening id.
- */
 export async function recordConvening({
   stmts,
   studentId,
-  dataDir,
   decisionType,
   question,
-  envelope,           // moderator output
+  envelope,
   totalTokens = { input: 0, output: 0 },
-  logseq = {},
+  triggerSource = "manual",
+  requestId = null,
 }) {
-  const convening_id = crypto.randomUUID();
-  const dissentText = envelope.dissent ? `${envelope.dissent.from}: ${envelope.dissent.text}` : null;
-
-  // 1. SQLite row
-  try {
-    stmts.insert.run(
-      convening_id,
-      studentId,
-      decisionType,
-      question.slice(0, 2000),
-      String(envelope.recommendation || "").slice(0, 8000),
-      envelope.moderator_rule,
-      envelope.confidence,
-      dissentText,
-      JSON.stringify(envelope.citations || []),
-      JSON.stringify(envelope.council_breakdown || []),
-      totalTokens.input | 0,
-      totalTokens.output | 0,
-    );
-  } catch (err) {
-    console.error("[council/audit-trail] sqlite insert failed:", err.message);
+  if (requestId) {
+    const existing = stmts.getByRequestId.get(requestId, studentId);
+    if (existing) return existing.id;
   }
+  const conveningId = crypto.randomUUID();
+  const questionHash = crypto.createHash("sha256").update(String(question || "")).digest("hex");
+  const citations = (envelope.citations || [])
+    .filter((citation) => citation.validated === true)
+    .map((citation) => ({ type: citation.type, id: citation.id }));
+  const breakdown = (envelope.council_breakdown || []).map((seat) => ({
+    role: seat.role,
+    stance: seat.stance,
+    confidence: seat.confidence,
+    model: seat.model,
+    provider: seat.provider,
+    abstained: seat.abstained,
+    citation_validation: seat.citation_validation,
+  }));
 
-  // 2. Logseq audit block
-  try {
-    const date = new Date().toISOString().slice(0, 10);
-    const summary = formatLogseqBlock({
-      convening_id,
-      date,
-      decisionType,
-      question,
-      envelope,
-    });
-    await appendBlock(studentId, dataDir, "strategy-council-log", summary, logseq);
-    // Cross-link in today's daily journal so the student spots the entry
-    // when they open Logseq.
-    await writeJournalEntry(
-      studentId,
-      dataDir,
-      date,
-      `Strategy Council convened: [[strategy-council-log]] #${convening_id.slice(0, 8)}`,
-      logseq,
-    );
-  } catch (err) {
-    console.warn("[council/audit-trail] logseq write failed:", err.message);
-  }
-
-  return convening_id;
-}
-
-function formatLogseqBlock({ convening_id, date, decisionType, question, envelope }) {
-  const lines = [
-    `### ${date} — ${decisionType} (#${convening_id.slice(0, 8)})`,
-    `**Question:** ${question}`,
-    `**Recommendation:** ${envelope.recommendation}`,
-    `**Confidence:** ${(envelope.confidence ?? 0).toFixed(2)}`,
-    `**Rule:** ${envelope.moderator_rule}`,
-  ];
-  if (envelope.dissent) {
-    lines.push(`**Dissent (${envelope.dissent.from}):** ${envelope.dissent.text}`);
-  }
-  if (envelope.citations?.length) {
-    lines.push(
-      `**Citations:** ${envelope.citations.slice(0, 6).map((c) => `[[${c.type}:${c.id}]]`).join(" ")}`,
-    );
-  }
-  return lines.join("\n");
+  stmts.insert.run(
+    conveningId,
+    requestId,
+    studentId,
+    decisionType,
+    "[redacted; stored only in encrypted student vault]",
+    questionHash,
+    "[redacted; stored only in encrypted student vault]",
+    envelope.moderator_rule,
+    envelope.confidence,
+    envelope.dissents?.length ? String(envelope.dissents.length) + " dissent(s)" : null,
+    JSON.stringify(citations),
+    JSON.stringify(breakdown),
+    Number(totalTokens.input) || 0,
+    Number(totalTokens.output) || 0,
+    String(triggerSource || "manual").slice(0, 40),
+  );
+  return conveningId;
 }

@@ -206,6 +206,20 @@ test("selectivity is a dampener, never a boost, and scales with selectivity", ()
   assert.equal(adjUnknown.adjustment, 1);
 });
 
+test("selectivity devaluation is inversely proportional to acceptance rate (capped at 35%)", () => {
+  const at = (rate) => scoreInstitutionalSelectivityAdjustment({ acceptanceRate: rate }).adjustment;
+  // Devaluation tracks the odds against admission (1−rate)/rate, scaled 0.02,
+  // capped at 0.35: ≈−35% at 4% admit, ≈−11% at 15%, ≈−2% at 50%, ~0 at high.
+  assert.equal(at(4), 0.65);
+  assert.ok(Math.abs(at(15) - 0.89) < 0.02, `15% admit → ${at(15)}`);
+  assert.ok(Math.abs(at(50) - 0.98) < 0.02, `50% admit → ${at(50)}`);
+  assert.ok(at(80) > at(50) && at(80) <= 1, `80% admit → ${at(80)}`);
+  // Strictly monotonic across the un-capped range: lower acceptance ⇒ harsher.
+  assert.ok(at(4) < at(15) && at(15) < at(50) && at(50) < at(80));
+  // Cap holds — even a 2%-admit lottery never exceeds 35% devaluation.
+  assert.equal(at(2), 0.65);
+});
+
 test("the same student is LESS admissible at a more selective school", () => {
   const student = makeStudent();
   const ranges = { sat25: 1460, sat75: 1560, avgGpaAdmitted: 3.9, topMajors: [] };

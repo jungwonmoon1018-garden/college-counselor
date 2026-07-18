@@ -1,54 +1,21 @@
-// ═══════════════════════════════════════════════════════════════════════
-// NARRATIVE FIT LLM SHIM — small-tier narrative_fit scorer with cache
-// ═══════════════════════════════════════════════════════════════════════
-// The EC strength vectorizer's narrative_fit factor is keyword-first.
-// When keyword overlap is inconclusive (< 2 distinct theme matches and
-// the EC text is long enough to be worth a second look), we fall back
-// to this tiny LLM call.
-//
-// Provider: whichever adapter is resolved at call time — Anthropic Haiku
-// is the historical default, but an OpenAI-compat key / Gemini key works
-// just as well. These internal scoring calls bypass the student-facing
-// audit log and rate limiter on purpose.
-// ═══════════════════════════════════════════════════════════════════════
-
-import crypto from "node:crypto";
-import { callLLM, detectProvider, resolveTierDefault, isEmbeddedAvailable } from "./llm-adapters/index.js";
-import { resolveOpenRouterTier } from "./openrouter-model-refresh.js";
-
-// Provider-aware "small" model resolver. For OpenRouter we resolve against the
-// LIVE catalog (resolveOpenRouterTier) so a retired default never leaks; other
-// providers use their static tier default.
-function smallModelFor(provider) {
-  return provider === "openrouter" ? resolveOpenRouterTier("small") : resolveTierDefault(provider, "small");
-}
-
-// Pillar 2: prefer the embedded model when the GGUF is on disk. Confidence
-// from a 1.5B model is fine for narrative-fit (short scoring, structured
-// JSON output); the cache hit downstream means the higher-quality BYOK
-// answer is never displaced after one verified store.
-function embeddedAdapterIfAvailable() {
-  if (!isEmbeddedAvailable()) return null;
-  const model = resolveTierDefault("embedded", "small");
-  if (!model) return null;
-  return { provider: "embedded", apiKey: null, baseUrl: "embedded://local", model };
-}
+// Optional small-tier narrative-fit scorer. It uses only an explicitly
+// injected administrator OpenRouter key; there are no student BYOK or
+// environment fallbacks. Without a key the caller keeps its deterministic
+// keyword score.
+import crypto from 'node:crypto';
+import {
+  callLLM,
+  resolveTierDefault,
+  OPENROUTER_BASE_URL,
+} from './llm-adapters/index.js';
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TOKENS = 80;
 const MAX_NARRATIVE_CHARS = 1200;
 const MAX_EC_CHARS = 1200;
 
-// Legacy export — retained for any call site that still references this
-// constant. New code should read the resolved model from the returned row
-// (`model` column) or from callLLM's response. The real model is the
-// student's BYOK "small" tier (OpenRouter by default).
-export const NARRATIVE_FIT_LLM_MODEL = "small";
+export const NARRATIVE_FIT_LLM_MODEL = 'small';
 
-// Table DDL + prepared statements — these live in counselor.db so we can
-// piggy-back on the shared connection opened by rag-engine.js. The
-// `provider` column was added alongside multi-LLM support; existing rows
-// migrate with NULL provider (treated as "openrouter" for audit display).
 export function initNarrativeFitCacheTable(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS narrative_fit_cache (
@@ -60,16 +27,15 @@ export function initNarrativeFitCacheTable(db) {
       created_at TEXT DEFAULT (datetime('now'))
     );
   `);
-  // In-place migration for pre-existing installations.
-  const cols = db.prepare(`PRAGMA table_info(narrative_fit_cache)`).all().map(r => r.name);
-  if (!cols.includes("provider")) {
-    db.exec(`ALTER TABLE narrative_fit_cache ADD COLUMN provider TEXT`);
+  const columns = db.prepare('PRAGMA table_info(narrative_fit_cache)').all().map((row) => row.name);
+  if (!columns.includes('provider')) {
+    db.exec('ALTER TABLE narrative_fit_cache ADD COLUMN provider TEXT');
   }
 }
 
 export function prepareNarrativeFitCacheStatements(db) {
   return {
-    get: db.prepare(`SELECT * FROM narrative_fit_cache WHERE cache_key = ?`),
+    get: db.prepare('SELECT * FROM narrative_fit_cache WHERE cache_key = ?'),
     put: db.prepare(`
       INSERT OR REPLACE INTO narrative_fit_cache
         (cache_key, score, reason, model, provider, created_at)
@@ -80,118 +46,26 @@ export function prepareNarrativeFitCacheStatements(db) {
 
 export function computeCacheKey(narrativeHash, ecTextHash) {
   return crypto
-    .createHash("sha256")
+    .createHash('sha256')
     .update(`${narrativeHash}:${ecTextHash}`)
-    .digest("hex");
+    .digest('hex');
 }
 
 export function hashText(text) {
-  return crypto.createHash("sha256").update(String(text || "")).digest("hex");
+  return crypto.createHash('sha256').update(String(text || '')).digest('hex');
 }
 
-/**
- * Resolve (provider, apiKey, baseUrl, model) given call-site options.
- * Precedence:
- *   1. Explicit options.provider/apiKey/baseUrl/model.
- *   2. options.apiKey alone → provider auto-detected from key prefix.
- *   3. options.byokLookup() → returns {provider, apiKey, baseUrl, model}
- *      for the student; injected by ec-strength-vectorizer when a student
- *      id is available so narrative-fit runs on the student's bill.
- *   4. Env fallbacks: ANTHROPIC_API_KEY, OPENAI_API_KEY+OPENAI_BASE_URL,
- *      GOOGLE_API_KEY.
- *   5. null — signal keyword-only fallback.
- */
 function resolveAdapterConfig(options = {}) {
-  // 0. Embedded-first (Pillar 2). When the local GGUF is ready, prefer it
-  //    over any cloud BYOK row. Callers can opt out with
-  //    `options.preferCloud = true` (used by the council's BYOK seats).
-  if (options.preferCloud !== true) {
-    const embedded = embeddedAdapterIfAvailable();
-    if (embedded) return embedded;
-  }
-
-  // 1. Full explicit config.
-  if (options.provider && options.apiKey) {
-    const model = options.model || smallModelFor(options.provider) || null;
-    return { provider: options.provider, apiKey: options.apiKey, baseUrl: options.baseUrl || null, model };
-  }
-
-  // 2. apiKey only — detect.
-  if (options.apiKey) {
-    const provider = options.provider || detectProvider({ apiKey: options.apiKey, baseUrl: options.baseUrl });
-    if (provider) {
-      const model = options.model || smallModelFor(provider);
-      return { provider, apiKey: options.apiKey, baseUrl: options.baseUrl || null, model };
-    }
-  }
-
-  // 3. BYOK lookup (injected by caller).
-  if (typeof options.byokLookup === "function") {
-    try {
-      const byok = options.byokLookup();
-      if (byok && byok.apiKey) {
-        const provider = byok.provider || detectProvider({ apiKey: byok.apiKey, baseUrl: byok.baseUrl });
-        if (provider) {
-          const model = byok.model || smallModelFor(provider);
-          return { provider, apiKey: byok.apiKey, baseUrl: byok.baseUrl || null, model };
-        }
-      }
-    } catch {
-      // Non-fatal — fall through to env.
-    }
-  }
-
-  // 4. Env fallbacks (operator key — OpenRouter preferred, then OpenAI, Google).
-  if (process.env.OPENROUTER_API_KEY) {
-    return {
-      provider: "openrouter",
-      apiKey: process.env.OPENROUTER_API_KEY,
-      baseUrl: "https://openrouter.ai/api/v1",
-      model: process.env.LLM_SMALL_MODEL || resolveOpenRouterTier("small"),
-    };
-  }
-  if (process.env.OPENAI_API_KEY) {
-    const baseUrl = process.env.OPENAI_BASE_URL || null;
-    const provider = baseUrl ? "openai_compat" : "openai";
-    return {
-      provider,
-      apiKey: process.env.OPENAI_API_KEY,
-      baseUrl,
-      model: process.env.LLM_SMALL_MODEL || resolveTierDefault(provider, "small"),
-    };
-  }
-  if (process.env.GOOGLE_API_KEY) {
-    return {
-      provider: "google",
-      apiKey: process.env.GOOGLE_API_KEY,
-      baseUrl: null,
-      model: process.env.LLM_SMALL_MODEL || resolveTierDefault("google", "small"),
-    };
-  }
-
-  return null;
+  if (options.provider && options.provider !== 'openrouter') return null;
+  if (options.baseUrl && String(options.baseUrl).replace(/\/$/, '') !== OPENROUTER_BASE_URL) return null;
+  if (!String(options.apiKey || '').startsWith('sk-or-')) return null;
+  return {
+    provider: 'openrouter',
+    apiKey: options.apiKey,
+    model: options.model || resolveTierDefault('openrouter', 'small'),
+  };
 }
 
-/**
- * Backward-compatible entry point. Name kept so existing tests and the
- * ec-strength-vectorizer don't need renaming.
- *
- * @param {object} params
- * @param {string} params.narrative
- * @param {string} params.ecText
- * @param {string} params.narrativeHash
- * @param {string} params.ecTextHash
- * @param {object} params.stmts - from prepareNarrativeFitCacheStatements
- * @param {object} [params.options]
- * @param {function} [params.options.fetchImpl] - injected for tests
- * @param {string}   [params.options.apiKey]
- * @param {string}   [params.options.provider]
- * @param {string}   [params.options.baseUrl]
- * @param {string}   [params.options.model]
- * @param {function} [params.options.byokLookup] — () => {provider, apiKey, baseUrl, model}
- * @param {number}   [params.options.timeoutMs]
- * @returns {Promise<{score:number, reason:string, cached:boolean}|null>}
- */
 export async function callHaikuForNarrativeFit({
   narrative,
   ecText,
@@ -201,62 +75,51 @@ export async function callHaikuForNarrativeFit({
   options = {},
 }) {
   if (!narrative || !ecText) return null;
-  if (!stmts) throw new Error("narrative_fit_cache statements required");
+  if (!stmts) throw new Error('narrative_fit_cache statements required');
 
   const cacheKey = computeCacheKey(narrativeHash, ecTextHash);
   const cached = stmts.get.get(cacheKey);
   if (cached) {
     return {
       score: Number(cached.score),
-      reason: String(cached.reason || ""),
+      reason: String(cached.reason || ''),
       cached: true,
     };
   }
 
   const adapter = resolveAdapterConfig(options);
-  if (!adapter) return null;
-  if (!adapter.model) return null;
+  if (!adapter?.model) return null;
 
   const timeoutMs = Number(options.timeoutMs || DEFAULT_TIMEOUT_MS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const systemPrompt =
-      "You score how well an extracurricular activity fits a student's self-written narrative. " +
-      'Respond with JSON ONLY in the exact shape {"score": NUMBER, "reason": STRING}. ' +
-      "Score is 0.0-1.0: 0.0 = no alignment, 0.5 = tangential, 1.0 = obvious embodiment. " +
-      "Reason must be <=30 words.";
-
-    const userText =
-      "NARRATIVE:\n" +
-      String(narrative).slice(0, MAX_NARRATIVE_CHARS) +
-      "\n\nEC DESCRIPTION:\n" +
-      String(ecText).slice(0, MAX_EC_CHARS);
-
-    const resp = await callLLM({
+    const system =
+      'Score how well an extracurricular activity fits a student-written narrative. ' +
+      'Respond with JSON only: {\u0022score\u0022: NUMBER, \u0022reason\u0022: STRING}. ' +
+      'Score must be 0.0-1.0 and reason must be at most 30 words.';
+    const prompt =
+      `NARRATIVE:\n${String(narrative).slice(0, MAX_NARRATIVE_CHARS)}` +
+      `\n\nEC DESCRIPTION:\n${String(ecText).slice(0, MAX_EC_CHARS)}`;
+    const response = await callLLM({
       provider: adapter.provider,
       apiKey: adapter.apiKey,
-      baseUrl: adapter.baseUrl,
       model: adapter.model,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userText }],
+      system,
+      messages: [{ role: 'user', content: prompt }],
       maxTokens: MAX_TOKENS,
       temperature: 0,
       signal: controller.signal,
       fetchImpl: options.fetchImpl,
     });
-
-    const raw = Array.isArray(resp?.content)
-      ? resp.content.map((c) => c?.text || "").join("").trim()
-      : "";
+    const raw = Array.isArray(response?.content)
+      ? response.content.map((block) => block?.text || '').join('').trim()
+      : '';
     const parsed = parseJsonLoose(raw);
     if (!parsed) return null;
-
     const score = clamp01(Number(parsed.score));
     if (!Number.isFinite(score)) return null;
-    const reason = String(parsed.reason || "").slice(0, 240);
-
+    const reason = String(parsed.reason || '').slice(0, 240);
     stmts.put.run(cacheKey, score, reason, adapter.model, adapter.provider);
     return { score, reason, cached: false };
   } catch {
@@ -266,24 +129,21 @@ export async function callHaikuForNarrativeFit({
   }
 }
 
-// ─── Helpers ──────────────────────────────────────────────
 function parseJsonLoose(raw) {
   if (!raw) return null;
   try {
     return JSON.parse(raw);
   } catch {
-    // Extract first balanced {...} block
-    const start = raw.indexOf("{");
+    const start = raw.indexOf('{');
     if (start < 0) return null;
     let depth = 0;
-    for (let i = start; i < raw.length; i++) {
-      if (raw[i] === "{") depth += 1;
-      else if (raw[i] === "}") {
+    for (let index = start; index < raw.length; index += 1) {
+      if (raw[index] === '{') depth += 1;
+      else if (raw[index] === '}') {
         depth -= 1;
         if (depth === 0) {
-          const candidate = raw.slice(start, i + 1);
           try {
-            return JSON.parse(candidate);
+            return JSON.parse(raw.slice(start, index + 1));
           } catch {
             return null;
           }
@@ -294,9 +154,7 @@ function parseJsonLoose(raw) {
   }
 }
 
-function clamp01(n) {
-  if (!Number.isFinite(n)) return NaN;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
+function clamp01(value) {
+  if (!Number.isFinite(value)) return NaN;
+  return Math.max(0, Math.min(1, value));
 }

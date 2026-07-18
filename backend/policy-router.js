@@ -43,13 +43,13 @@ export const MODEL_TIERS = {
   SMALL: "haiku",
   MEDIUM: "sonnet",
   LARGE: "opus",
-  // Embedded in-process inference (node-llama-cpp + GGUF). Returned when
+  // Reserved compatibility tier. Local model inference is disabled.
   // selectModelTier() would normally pick HAIKU/SMALL AND the embedded
   // provider is fully wired (GGUF present, dep loadable). Orchestration
   // engine dispatches this through callLLM({provider:"embedded"}).
   EMBEDDED_SMALL: "embedded_small",
   // Strategy Council (Pillar 9). Dispatched to council.convene() instead
-  // of callLLM. Composed of 3 embedded + 2 BYOK medium councilors.
+  // of callLLM. Council execution is explicit and sequential.
   COUNCIL: "council",
 };
 
@@ -62,6 +62,7 @@ export const STRATEGY_COUNCIL_SUBINTENTS = new Set([
   "essay",
   "college_list",
   "strategy",
+  "course_planning", // "what courses/APs should I take next year" — high-stakes
 ]);
 
 // ─── Escalation threshold: Sonnet must report confidence below this to escalate to Opus ───
@@ -96,15 +97,97 @@ const PATTERNS = {
     ec_strategy: /\bextracurricular\b|\bec\b|\bactivit(y|ies)\b|\bspike\b|\bhook\b|\bsummer\s*(program|activit|plan)\b|\bleadership\b|\bvolunteer\b|\binternship\b|\bresearch\b/i,
     essay: /\bessay\b|\bnarrative\b|\bpersonal\s*statement\b|\bsupplement\b|\bcommon\s*app\s*essay\b|\bwriting\b.*\b(help|review|feedback)\b/i,
     college_list: /\bcollege\s*list\b|\bschool\s*list\b|\breach\b|\bmatch\b|\bsafety\b|\btarget\b|\bchance\s*me\b|\bcan\s*i\s*get\s*in\b|\bfit\b|\bcompare\s*college/i,
+    course_planning: /\bcourse\s*(selection|load|rigor|plan|planning|schedul)\b|\b(what|which)\s+(aps?|ib|honors|classes|courses|electives)\b|\b(classes|courses|schedule|curriculum)\b[^.?!]{0,40}\b(take|pick|choose|next\s+(year|semester|fall|spring))\b/i,
     strategy: /\bstrategy\b|\bplan\b|\broadmap\b|\b4[- ]year\b|\bjunior\s*year\b|\bsenior\s*year\b|\btimeline\b/i,
     gpa_benchmark: /\bgpa\b|\bsat\b|\bact\b|\bpercentile\b|\bbenchmark\b|\bhow\s*(do|does)\s*(my|i)\s*(compare|stack)\b/i,
   },
 };
 
-// Standalone crisis predicate over the SAME patterns classifyTopic uses, so
-// there is one source of truth for the crisis lexicon. Exported for callers
-// that only need the yes/no (e.g. the chat-history title guard) without a full
-// topic classification.
+const TOPIC_SOURCE_DOMAINS = Object.freeze({
+  fafsa: ["studentaid.gov", "fsapartners.ed.gov"],
+  eligibility: ["studentaid.gov", "fsapartners.ed.gov"],
+  financial_aid_policy: ["studentaid.gov", "fsapartners.ed.gov"],
+  ferpa: ["studentprivacy.ed.gov", "ed.gov"],
+  official_stats: ["collegescorecard.ed.gov", "api.data.gov", "nces.ed.gov"],
+});
+
+const TOPIC_TERMS = Object.freeze({
+  fafsa: ["fafsa", "student aid", "federal aid", "eligibility"],
+  eligibility: ["eligibility", "eligible", "citizenship", "ssn", "enrollment"],
+  financial_aid_policy: ["financial aid", "fafsa", "need blind", "need aware"],
+  ferpa: ["ferpa", "student privacy", "education record"],
+  deadlines: ["deadline", "due date", "early action", "early decision", "regular decision"],
+  financial_amounts: ["tuition", "net price", "financial aid", "grant", "scholarship", "cost"],
+  school_policies: ["policy", "test optional", "test required", "application requirement"],
+  official_stats: ["acceptance", "admission rate", "sat", "act", "enrollment", "graduation"],
+});
+
+function normalizedTopicType(topicType) {
+  return String(topicType || "").toLowerCase();
+}
+
+function sourceDomain(evidence) {
+  if (evidence?.source_domain) return String(evidence.source_domain).toLowerCase();
+  try {
+    return new URL(evidence?.source_url || "").hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+export function isEvidenceUnexpired(evidence, now = new Date()) {
+  if (!evidence || evidence.superseded_by) return false;
+  if (["expired", "stale", "superseded"].includes(String(evidence.trust_level || "").toLowerCase())) return false;
+  const expiry = evidence.expires_at || evidence.expiresAt;
+  if (!expiry) return true;
+  const timestamp = Date.parse(expiry);
+  return Number.isFinite(timestamp) && timestamp > now.getTime();
+}
+
+export function isEvidenceRelevant(evidence, subIntent) {
+  if (!evidence) return false;
+  const intent = String(subIntent || "").toLowerCase();
+  const directTopics = [
+    evidence.topic_type,
+    evidence.sub_intent,
+    evidence.claim_category,
+    evidence.fact_key,
+    ...(Array.isArray(evidence.relevant_topics) ? evidence.relevant_topics : []),
+  ].filter(Boolean).map((value) => String(value).toLowerCase());
+  if (directTopics.some((value) => value === intent || value.includes(intent))) return true;
+
+  const domain = sourceDomain(evidence);
+  if ((TOPIC_SOURCE_DOMAINS[intent] || []).some((allowed) => domain === allowed || domain.endsWith("." + allowed))) {
+    return true;
+  }
+
+  const text = [
+    evidence.fact_key,
+    evidence.fact_value,
+    evidence.claim_category,
+    evidence.claim,
+    evidence.source_title,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return (TOPIC_TERMS[intent] || [intent.replaceAll("_", " ")])
+    .filter((term) => term.length >= 3)
+    .some((term) => text.includes(term));
+}
+
+export function isVerifiedEvidenceForTopic(evidence, subIntent, { now = new Date() } = {}) {
+  const explicitFactVerification = String(evidence?.confidence || "").toLowerCase() === "verified";
+  const reviewedOfficialEvidence = evidence?.evidence_type === 1 &&
+    String(evidence?.trust_level || "").toLowerCase() === "official" &&
+    Boolean(evidence?.verified_at);
+  if (!explicitFactVerification && !reviewedOfficialEvidence) return false;
+  if (!evidence?.source_url && !evidence?.source_domain) return false;
+  if (!isEvidenceUnexpired(evidence, now)) return false;
+  return isEvidenceRelevant(evidence, subIntent);
+}
+
+// Single source of truth for the crisis lexicon (PATTERNS.crisis). Used by the
+// deterministic crisis path AND by any surface that must never echo a minor's
+// crisis words back — e.g. a chat-thread title. Keeps one canonical check so
+// the two never drift.
 export function isCrisisText(text) {
   const s = (text || "").trim();
   if (!s) return false;
@@ -178,20 +261,17 @@ export function classifyTopic(query, conversationContext = {}) {
   }
 
   // 4. Coaching topics
-  // Reasoning-heavy subintents (EC strategy, essay review, college-list
-  // building, 4-year strategy) need to weigh multiple signals at once:
-  // student profile + each school's published values + competitive
-  // context. Pin those to LARGE/Opus from the first attempt so the
-  // model has the headroom to produce strategic answers instead of
-  // surface-level suggestions. Cheaper subintents stay on SONNET.
+  // Start with the cheapest tier that can reasonably handle the request.
+  // Strategic coaching starts at medium, never large; large models require
+  // an explicit, separately budgeted action.
   const HEAVY_COACHING_SUBINTENTS = new Set([
-    "ec_strategy", "essay", "college_list", "strategy",
+    "ec_strategy", "essay", "college_list", "strategy", "course_planning",
   ]);
   for (const [subIntent, pattern] of Object.entries(PATTERNS.coaching)) {
     if (pattern.test(text)) {
-      let modelTier = MODEL_TIERS.SONNET;
+      let modelTier = MODEL_TIERS.HAIKU;
       if (subIntent === "gpa_benchmark") modelTier = MODEL_TIERS.NONE;
-      else if (HEAVY_COACHING_SUBINTENTS.has(subIntent)) modelTier = MODEL_TIERS.OPUS;
+      else if (HEAVY_COACHING_SUBINTENTS.has(subIntent)) modelTier = MODEL_TIERS.SONNET;
       return {
         topicType: TOPIC_TYPES.COACHING,
         intent: "coaching",
@@ -211,7 +291,7 @@ export function classifyTopic(query, conversationContext = {}) {
     intent: "coaching",
     subIntent: "general",
     sourceConstraint: "evidence_grounded",
-    modelTier: MODEL_TIERS.SONNET,
+    modelTier: MODEL_TIERS.HAIKU,
     gates: ["coaching_label"],
     confidence: 0.5,
     rationale: "No specific topic matched. Default to evidence-grounded coaching.",
@@ -221,8 +301,9 @@ export function classifyTopic(query, conversationContext = {}) {
 // ─── Compliance gate enforcement ───
 export function enforceGates(topicType, subIntent, availableEvidence = []) {
   const results = [];
+  const normalizedType = normalizedTopicType(topicType);
 
-  if (topicType === TOPIC_TYPES.CRISIS) {
+  if (normalizedType === TOPIC_TYPES.CRISIS) {
     results.push({
       gate: "crisis_protocol",
       passed: true,
@@ -232,10 +313,9 @@ export function enforceGates(topicType, subIntent, availableEvidence = []) {
     return { allowed: true, gates: results, fallback: null };
   }
 
-  if (topicType === TOPIC_TYPES.REGULATED || topicType === TOPIC_TYPES.HIGH_STAKES) {
-    // Check if we have any verified evidence for this topic
-    const verifiedEvidence = availableEvidence.filter(
-      (e) => e.confidence === "verified" || e.confidence === "extracted"
+  if (normalizedType === TOPIC_TYPES.REGULATED || normalizedType === TOPIC_TYPES.HIGH_STAKES) {
+    const verifiedEvidence = availableEvidence.filter((e) =>
+      isVerifiedEvidenceForTopic(e, subIntent)
     );
 
     if (verifiedEvidence.length === 0) {
@@ -264,7 +344,7 @@ export function enforceGates(topicType, subIntent, availableEvidence = []) {
     });
   }
 
-  if (topicType === TOPIC_TYPES.COACHING) {
+  if (normalizedType === TOPIC_TYPES.COACHING) {
     results.push({
       gate: "coaching_label",
       passed: true,
@@ -307,7 +387,8 @@ export function selectModelTier(...args) {
 }
 
 function selectModelTierInner(topicType, subIntent, queryComplexity = "normal", priorAttempt = null, opts = {}) {
-  const allowCouncil = opts.allowCouncil !== false;
+  const explicitCouncil = opts.explicitCouncil === true;
+  const allowPaidEscalation = opts.allowPaidEscalation === true && opts.budgetApproved === true;
 
   // Crisis: never use a model
   if (topicType === TOPIC_TYPES.CRISIS) return MODEL_TIERS.NONE;
@@ -324,7 +405,8 @@ function selectModelTierInner(topicType, subIntent, queryComplexity = "normal", 
     }
     // If Sonnet couldn't resolve (low confidence), escalate to Opus
     if (priorAttempt.tier === MODEL_TIERS.SONNET &&
-        priorAttempt.confidence < OPUS_ESCALATION_THRESHOLD) {
+        priorAttempt.confidence < OPUS_ESCALATION_THRESHOLD &&
+        allowPaidEscalation) {
       return MODEL_TIERS.OPUS;
     }
     return priorAttempt.tier;
@@ -335,7 +417,8 @@ function selectModelTierInner(topicType, subIntent, queryComplexity = "normal", 
     if (subIntent === "deadlines" || subIntent === "official_stats") return MODEL_TIERS.NONE;
     if (!priorAttempt) return MODEL_TIERS.SONNET;
     if (priorAttempt.tier === MODEL_TIERS.SONNET &&
-        priorAttempt.confidence < OPUS_ESCALATION_THRESHOLD) {
+        priorAttempt.confidence < OPUS_ESCALATION_THRESHOLD &&
+        allowPaidEscalation) {
       return MODEL_TIERS.OPUS;
     }
     return MODEL_TIERS.SONNET;
@@ -349,17 +432,18 @@ function selectModelTierInner(topicType, subIntent, queryComplexity = "normal", 
     // when allowed. Falls back to OPUS when the caller is already inside
     // a council sub-call (avoids infinite recursion).
     if (STRATEGY_COUNCIL_SUBINTENTS.has(subIntent)) {
-      if (allowCouncil) return MODEL_TIERS.COUNCIL;
-      return MODEL_TIERS.OPUS;
+      if (explicitCouncil) return MODEL_TIERS.COUNCIL;
+      return MODEL_TIERS.SONNET;
     }
-    if (!priorAttempt) return MODEL_TIERS.SONNET;
+    if (!priorAttempt) return MODEL_TIERS.HAIKU;
     // Escalate any other complex coaching turn to Opus on retry.
-    if (priorAttempt.tier === MODEL_TIERS.SONNET &&
+    if (priorAttempt.tier === MODEL_TIERS.HAIKU &&
         priorAttempt.confidence < OPUS_ESCALATION_THRESHOLD &&
-        queryComplexity === "complex") {
-      return MODEL_TIERS.OPUS;
+        queryComplexity === "complex" &&
+        allowPaidEscalation) {
+      return MODEL_TIERS.SONNET;
     }
-    return MODEL_TIERS.SONNET;
+    return priorAttempt.tier || MODEL_TIERS.HAIKU;
   }
 
   return MODEL_TIERS.SONNET;
@@ -416,7 +500,11 @@ export function routeRequest(query, conversationContext = {}, availableEvidence 
     classification.subIntent,
     conversationContext.queryComplexity || "normal",
     conversationContext.priorAttempt || null,
-    { allowCouncil: conversationContext.allowCouncil !== false },
+    {
+      explicitCouncil: conversationContext.explicitCouncil === true,
+      allowPaidEscalation: conversationContext.allowPaidEscalation === true,
+      budgetApproved: conversationContext.budgetApproved === true,
+    },
   );
 
   const isDeterministic = canHandleDeterministically(classification.topicType, classification.subIntent);

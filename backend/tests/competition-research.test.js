@@ -21,7 +21,6 @@ import {
   searchCompetitionCatalog,
   findBestCompetitionCatalogPrestige,
   isReputableSourceUrl,
-  PRESTIGE_TTL_DAYS,
   REPUTABLE_DOMAINS,
   OFFICIAL_COMPETITION_SOURCES,
 } from "../competition-research.js";
@@ -31,27 +30,6 @@ function freshStmts() {
   const db = new Database(":memory:");
   initRAGTables(db);
   return { db, stmts: prepareRAGStatements(db) };
-}
-
-// Fake fetch returning an OpenAI/OpenRouter-shaped chat-completion whose
-// message content is the JSON payload. Captures the outbound request body so
-// tests can assert the web-plugin wiring (plugins:[{id:"web"}], no tools).
-function fakeOpenRouterFetch(jsonPayload, captured = {}) {
-  return async (_url, opts) => {
-    captured.body = JSON.parse(opts.body);
-    captured.url = _url;
-    return {
-      ok: true,
-      status: 200,
-      headers: new Map(),
-      json: async () => ({
-        id: "chatcmpl-1",
-        model: "z-ai/glm-5.1",
-        choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(jsonPayload) }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 10, completion_tokens: 20 },
-      }),
-    };
-  };
 }
 
 // ─── Normalization + cache key ─────────────────────────────────────────
@@ -141,11 +119,11 @@ test("returns cached prestige on TTL hit without calling the adapter", async () 
     key, "AIME", "national", 0.72,
     "Seeded from test.",
     JSON.stringify(["https://maa.org/aime"]),
-    "research", "anthropic", "claude-haiku-4-5-20251001",
+    "catalog", null, null,
     JSON.stringify({ score: 0.72 }),
   );
 
-  // Adapter is Anthropic but fetchImpl would throw if touched.
+  // Caller-supplied network hooks are ignored on a reviewed cache hit.
   const r = await researchCompetitionPrestige({
     activityName: "AIME",
     levelHint: "national",
@@ -157,12 +135,12 @@ test("returns cached prestige on TTL hit without calling the adapter", async () 
   });
   assert.equal(r.cached, true);
   assert.equal(r.score, 0.72);
-  assert.equal(r.source, "research");
+  assert.equal(r.source, "catalog");
 });
 
 // ─── Path 2: benchmark short-circuit ───────────────────────────────────
 
-test("benchmark hit short-circuits web search and caches result", async () => {
+test("benchmark hit short-circuits lookup and caches result", async () => {
   const { stmts } = freshStmts();
   const r = await researchCompetitionPrestige({
     activityName: "USAJMO qualifier",
@@ -192,7 +170,7 @@ test("benchmark hit short-circuits web search and caches result", async () => {
   assert.equal(r2.source, "benchmark");
 });
 
-test("official catalog hit short-circuits web search and caches result without adapter", async () => {
+test("official catalog hit caches result without an adapter", async () => {
   const { stmts } = freshStmts();
   const r = await researchCompetitionPrestige({
     activityName: "USACO Platinum",
@@ -220,7 +198,7 @@ test("official catalog hit short-circuits web search and caches result without a
 
 // ─── Path 3: non-Anthropic → unavailable ───────────────────────────────
 
-test("non-Anthropic adapter returns source:unavailable without throwing", async () => {
+test("unrecognized activity remains unavailable regardless of adapter", async () => {
   const { stmts } = freshStmts();
   const r = await researchCompetitionPrestige({
     activityName: "Some Obscure Contest",
@@ -244,72 +222,35 @@ test("missing adapter returns source:unavailable without throwing", async () => 
   assert.equal(r.source, "unavailable");
 });
 
-// ─── Path 3: OpenRouter web-plugin research ────────────────────────────
-
-test("OpenRouter adapter runs web-plugin research, parses JSON, sends plugins (not tools), and caches", async () => {
+test("unknown competition stays deterministic and never fetches", async () => {
   const { stmts } = freshStmts();
-  const captured = {};
-  let usageLogged = null;
-  const fetchImpl = fakeOpenRouterFetch(
-    {
-      score: 0.83,
-      rationale: "National official-source engineering challenge signal.",
-      sourcesCited: ["https://usaco.org/index.php?page=contests", "https://www.soinc.org/"],
-    },
-    captured,
-  );
-  const r = await researchCompetitionPrestige({
+  let fetched = false;
+  const result = await researchCompetitionPrestige({
     activityName: "Uncataloged Engineering Challenge",
     levelHint: "national",
     stmts,
-    adapter: {
-      provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1",
-      recordUsage: (model, usage) => { usageLogged = { model, usage }; },
-    },
-    options: { fetchImpl },
+    adapter: { provider: "openrouter", apiKey: "sk-or-x" },
+    options: { fetchImpl: async () => { fetched = true; } },
   });
-  assert.equal(r.source, "research");
-  assert.equal(r.score, 0.83);
-  assert.ok(r.sourcesCited.length >= 1 && r.sourcesCited.every(isReputableSourceUrl));
-  // Web plugin wired, no Anthropic-native tools.
-  assert.ok(Array.isArray(captured.body.plugins), "plugins[] must be present");
-  assert.equal(captured.body.plugins[0].id, "web");
-  assert.equal(captured.body.tools, undefined, "must NOT send native tools");
-  // Usage sink fired for budget accounting.
-  assert.ok(usageLogged && usageLogged.usage, "recordUsage should fire");
-
-  // Second call hits the 30-day cache (no fetch).
-  const r2 = await researchCompetitionPrestige({
-    activityName: "Uncataloged Engineering Challenge",
-    levelHint: "national",
-    stmts,
-    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
-    options: { fetchImpl: async () => { throw new Error("second call must hit cache"); } },
-  });
-  assert.equal(r2.cached, true);
-  assert.equal(r2.score, 0.83);
+  assert.equal(fetched, false);
+  assert.equal(result.source, "unavailable");
+  assert.equal(result.score, 0);
+  assert.match(result.rationale, /No reviewed benchmark or official catalog/i);
 });
 
-test("expired cache row is ignored; a fresh OpenRouter call re-researches", async () => {
-  const { db, stmts } = freshStmts();
-  const key = computePrestigeCacheKey("Old Research", null);
-  const stalePastIso = new Date(Date.now() - (PRESTIGE_TTL_DAYS + 5) * 86_400_000).toISOString();
-  db.prepare(`
-    INSERT INTO ec_prestige_cache (cache_key, activity_name, level_hint, score, rationale, sources_json, source, provider, model, result_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    key, "Old Research", null, 0.11, "stale", JSON.stringify([]),
-    "research", "openrouter", "z-ai/glm-5.1", JSON.stringify({ score: 0.11 }), stalePastIso,
+test("legacy model-research cache rows are ignored", async () => {
+  const { stmts } = freshStmts();
+  const key = computePrestigeCacheKey("Old Model Research", null);
+  stmts.upsertPrestigeCache.run(
+    key, "Old Model Research", null, 0.99, "old model claim", JSON.stringify([]),
+    "research", "openrouter", "old/model", JSON.stringify({ score: 0.99 }),
   );
-  const r = await researchCompetitionPrestige({
-    activityName: "Old Research",
+  const result = await researchCompetitionPrestige({
+    activityName: "Old Model Research",
     stmts,
-    adapter: { provider: "openrouter", apiKey: "sk-or-x", model: "z-ai/glm-5.1" },
-    options: { fetchImpl: fakeOpenRouterFetch({ score: 0.66, rationale: "refreshed.", sourcesCited: ["https://maa.org/"] }) },
   });
-  assert.equal(r.source, "research");
-  assert.equal(r.score, 0.66);
-  assert.equal(r.cached, false);
+  assert.equal(result.source, "unavailable");
+  assert.equal(result.score, 0);
 });
 
 // ─── Invalid input ─────────────────────────────────────────────────────

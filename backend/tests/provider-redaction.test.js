@@ -53,27 +53,12 @@ test("compat provider redactor exports redact and restore only restorable tokens
   assert.match(restored.response.content[0].text, /\[SSN_01\]/);
 });
 
-test("callLLM redacts Anthropic request bodies before fetch", async () => {
+test("callLLM redacts the fixed OpenRouter request body before fetch", async () => {
   let captured = "";
-  await callLLM({
-    provider: "anthropic",
-    apiKey: "sk-ant-test",
-    model: "claude-haiku-4-5-20251001",
-    messages: [{ role: "user", content: PII_TEXT }],
-    fetchImpl: async (_url, init) => {
-      captured = init.body;
-      return { ok: true, status: 200, headers: new Headers(), json: async () => ({ content: [{ type: "text", text: "ok" }], usage: {} }) };
-    },
-  });
-  assertNoRawPii(captured);
-});
-
-test("callLLM redacts OpenAI-compatible request bodies before fetch", async () => {
-  let captured = "";
-  await callLLM({
-    provider: "openai",
-    apiKey: "sk-test",
-    model: "gpt-4o-mini",
+  const result = await callLLM({
+    provider: "openrouter",
+    apiKey: "sk-or-test",
+    model: "google/gemma-4-26b-a4b-it",
     messages: [{ role: "user", content: PII_TEXT }],
     fetchImpl: async (_url, init) => {
       captured = init.body;
@@ -81,21 +66,9 @@ test("callLLM redacts OpenAI-compatible request bodies before fetch", async () =
     },
   });
   assertNoRawPii(captured);
-});
-
-test("callLLM redacts Google request bodies before fetch", async () => {
-  let captured = "";
-  await callLLM({
-    provider: "google",
-    apiKey: "AIza-test",
-    model: "gemini-2.0-flash",
-    messages: [{ role: "user", content: PII_TEXT }],
-    fetchImpl: async (_url, init) => {
-      captured = init.body;
-      return { ok: true, status: 200, headers: new Headers(), json: async () => ({ candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: {} }) };
-    },
-  });
-  assertNoRawPii(captured);
+  assertNoRawPii(JSON.stringify(result));
+  assert.equal(Object.hasOwn(result, "_raw"), false);
+  assert.equal(Object.hasOwn(result, "_tokenMap"), false);
 });
 
 test("screenInput and screenOutput expose compatibility aliases", () => {

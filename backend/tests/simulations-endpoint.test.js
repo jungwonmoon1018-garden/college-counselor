@@ -11,14 +11,13 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.join(__dirname, "..");
 const BASE = "http://localhost:3101";
 const SIM_BASE = "http://localhost:3102";
-const TEST_DB_PATH = path.join(PROJECT_ROOT, "data", "counselor.sim-endpoint.test.db");
-const TEST_SIM_PROFILE_DB = path.join(PROJECT_ROOT, "data", "simulated-profiles.endpoint.test.db");
-const TEST_SIM_VECTOR_DB = path.join(PROJECT_ROOT, "data", "simulated-vectors.endpoint.test.db");
+const TEST_DATA_DIR = path.join(PROJECT_ROOT, "data", "simulations-endpoint-test");
+const TEST_DB_PATH = path.join(TEST_DATA_DIR, "counselor.db");
+const TEST_SIM_PROFILE_DB = path.join(TEST_DATA_DIR, "simulated-profiles.endpoint.test.db");
+const TEST_SIM_VECTOR_DB = path.join(TEST_DATA_DIR, "simulated-vectors.endpoint.test.db");
 
 function clean() {
-  for (const file of [TEST_DB_PATH, TEST_SIM_PROFILE_DB, TEST_SIM_VECTOR_DB]) {
-    for (const suffix of ["", "-shm", "-wal"]) fs.rmSync(`${file}${suffix}`, { force: true });
-  }
+  fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
 }
 
 async function waitFor(url, proc, outputRef) {
@@ -50,6 +49,7 @@ async function withServers(fn) {
     env: {
       ...process.env,
       NODE_ENV: "test",
+      DATA_DIR: TEST_DATA_DIR,
       SIM_PORT: "3102",
       SIM_INTERNAL_TOKEN: "endpoint-sim-token",
       SIM_PROFILE_DB_PATH: TEST_SIM_PROFILE_DB,
@@ -68,6 +68,7 @@ async function withServers(fn) {
         ...process.env,
         PORT: "3101",
         NODE_ENV: "test",
+        DATA_DIR: TEST_DATA_DIR,
         DB_PATH: TEST_DB_PATH,
         COUNSELOR_PASS: "testpass",
         SCORECARD_API_KEY: "",
@@ -101,8 +102,10 @@ test("simulation proxy creates temporary vectors without changing actual profile
     const register = await req("POST", "/api/students/register", {
       email: "sim-endpoint@example.com",
       majorInterest: "Computer Science",
+      grade: "11",
+      password: "simulation endpoint test password",
     });
-    assert.equal(register.status, 200);
+    assert.equal(register.status, 201);
     const token = register.data.token;
     await delay(1100);
 

@@ -14,15 +14,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.resolve(__dirname, "../server.js"), "utf8");
 
 test("crisis_detected audit rows never persist raw user text", () => {
-  // Every insertAudit call that logs a crisis must use the redaction marker…
+  // This build routes crisis handling through one unified deterministic path
+  // (not separate /api/llm + /api/chat branches), so there is a single crisis
+  // audit insert. The invariant is the same: it must log a neutral constant
+  // marker, never the student's words (which can carry address/medical PII into
+  // the unencrypted audit table). Multi-line inserts are matched, [^;] spans
+  // newlines.
   const crisisInserts = SRC.match(/insertAudit\.run\([^;]*"crisis_detected"[^;]*\);/g) || [];
-  assert.ok(crisisInserts.length >= 2, "expected the crisis branches in /api/llm and /api/chat");
+  assert.ok(crisisInserts.length >= 1, "expected at least one crisis_detected audit insert");
   for (const line of crisisInserts) {
     assert.ok(
-      !/userText\.slice/.test(line),
-      "crisis audit row must NOT log userText (PII at rest):\n" + line,
+      !/userText/.test(line),
+      "crisis audit row must NOT log the user's message (PII at rest):\n" + line,
     );
-    assert.match(line, /\[crisis text redacted\]/, "crisis audit row must use the redaction marker:\n" + line);
+    assert.match(
+      line,
+      /"crisis_policy_triggered"|\[crisis text redacted\]/,
+      "crisis audit row must use a neutral marker, not raw text:\n" + line,
+    );
   }
 });
 

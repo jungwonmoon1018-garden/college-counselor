@@ -25,7 +25,7 @@ export function getSystemPrompt(student) {
     "  - Use 'oppose' only when the Strategist's recommendation is genuinely unsafe or unsupported.",
     "  - Use 'support' when you've checked carefully and found no gap. This is rare but real.",
     "Constraints:",
-    "- Cite the specific graph_node or logseq_block that surfaces the gap.",
+    "- Cite only graph_node, baseline_fact, or evidence_item IDs present in the shared context.",
     "- Do not invent risks — every flagged risk must trace to context.",
     "- This is coaching. No outcome promises.",
   ].join("\n");

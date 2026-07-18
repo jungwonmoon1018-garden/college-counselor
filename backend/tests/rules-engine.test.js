@@ -54,6 +54,24 @@ describe("runFAFSAEligibilityCheck", () => {
       assert.ok(rule.source, `Rule ${rule.ruleId} missing source URL`);
     }
   });
+
+  it("does not treat Selective Service registration as an eligibility requirement", () => {
+    const result = runFAFSAEligibilityCheck({ selective_service: false });
+    assert.equal(result.results.some((rule) => rule.ruleId === "selective_service"), false);
+    assert.ok(result.removedRequirements.some((rule) => rule.id === "selective_service"));
+    assert.notEqual(result.eligible, false);
+  });
+
+  it("versions every FAFSA rule with an academic year and lifecycle", () => {
+    const result = runFAFSAEligibilityCheck({});
+    assert.equal(result.academicYear, "2026-2027");
+    assert.ok(Date.parse(result.effectiveAt) < Date.parse(result.expiresAt));
+    for (const rule of result.results) {
+      assert.equal(rule.academicYear, result.academicYear);
+      assert.equal(rule.expiresAt, result.expiresAt);
+      assert.equal(rule.sourceDomain, "fsapartners.ed.gov");
+    }
+  });
 });
 
 describe("calculateDeadlineStatus", () => {

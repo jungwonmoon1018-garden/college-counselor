@@ -1,300 +1,127 @@
-// ═══════════════════════════════════════════════════════════════════════
-// LLM ADAPTER DISPATCHER — provider detection + unified callLLM()
-// ═══════════════════════════════════════════════════════════════════════
-// This module is the single edge between the counseling backend and any
-// LLM API. The rest of the app now speaks in provider-agnostic verbs:
-//
-//   - detectProvider({apiKey, provider, baseUrl})   → normalized provider id
-//   - callLLM({provider, ...})                       → normalized response
-//   - validateKey({provider, apiKey, baseUrl})       → cheap "is this alive"
-//   - listKnownModels(provider)                      → seed list for UI
-//
-// Every response — no matter which provider answered — comes back in the
-// backend's normalized shape:
-// { content: [{type:"text",text}], usage: {input_tokens, output_tokens},
-//   model, stop_reason, _raw, _responseHeaders }.
-// ═══════════════════════════════════════════════════════════════════════
-
-import { callOpenAI,    validateOpenAIKey }    from "./openai.js";
-import { callGoogle,    validateGoogleKey }    from "./google.js";
-import { callEmbeddedLlama, validateEmbedded, isModelFileOnDisk, embeddedLlamaRuntimeSafe } from "./embedded-llama.js";
+import { callOpenAI, validateOpenAIKey } from './openai.js';
 import {
   TIER_DEFAULTS,
   PROVIDER_META,
   PROVIDER_WIRE_PROTOCOL,
   resolveTierDefault,
   isReasoningModel,
-} from "./tier-defaults.js";
-import { sanitizeProviderPayload } from "../content-moderation.js";
-import { llmDebug, llmLog, since } from "./llm-log.js";
+} from './tier-defaults.js';
+import { sanitizeProviderPayload } from '../content-moderation.js';
 
-export const PROVIDERS = Object.freeze({
-  OPENAI: "openai",
-  OPENAI_COMPAT: "openai_compat",
-  GOOGLE: "google",
-  OPENROUTER: "openrouter",
-  DEEPSEEK: "deepseek",
-  TOGETHER: "together",
-  ZHIPU: "zhipu",
-  OLLAMA: "ollama",
-  LMSTUDIO: "lmstudio",
-  EMBEDDED: "embedded",
-});
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+export const PROVIDERS = Object.freeze({ OPENROUTER: 'openrouter' });
 
-// Model id must be a plain string: 3-120 chars, no whitespace, no control
-// characters. Prevents injection via model field; does NOT restrict which
-// model families are allowed.
-const MODEL_ID_RE = /^[\w./:@\-+]{3,120}$/;
+const MODEL_ID_RE = /^[\w./:@+\-]{3,120}$/;
+const OPENROUTER_META = PROVIDER_META[0];
+const OPENROUTER_ALLOWED_MODELS = new Set([
+  ...Object.values(TIER_DEFAULTS.openrouter).filter(Boolean),
+  ...(OPENROUTER_META?.knownModels || []),
+]);
+
 export function isReasonableModelId(value) {
-  if (typeof value !== "string") return false;
-  if (value.length < 3 || value.length > 120) return false;
-  if (/\s/.test(value)) return false;
-  // Disallow ASCII control characters.
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code < 0x20 || code === 0x7f) return false;
-  }
-  return MODEL_ID_RE.test(value);
+  return typeof value === 'string'
+    && MODEL_ID_RE.test(value)
+    && !/[\s\x00-\x1f\x7f]/.test(value);
 }
 
-/**
- * Pick the provider id given (in priority order):
- *   1. Explicit `provider` param.
- *   2. Explicit `baseUrl` — force openai_compat (unless apiKey prefix hints
- *      at a known OpenAI-compat host).
- *   3. Key prefix heuristics.
- *   4. null — caller must choose.
- */
-export function detectProvider({ apiKey = "", provider = "", baseUrl = "" } = {}) {
-  if (provider && typeof provider === "string") {
-    const canon = provider.toLowerCase().trim();
-    if (PROVIDER_WIRE_PROTOCOL[canon]) return canon;
-  }
-
-  const key = typeof apiKey === "string" ? apiKey.trim() : "";
-  const url = typeof baseUrl === "string" ? baseUrl.trim().toLowerCase() : "";
-
-  // Infer from baseUrl hostnames for common compat hosts, but only if no
-  // provider was explicitly set.
-  if (url) {
-    if (url.startsWith("embedded://")) return PROVIDERS.EMBEDDED;
-    if (url.includes("openrouter.ai")) return PROVIDERS.OPENROUTER;
-    if (url.includes("deepseek.com")) return PROVIDERS.DEEPSEEK;
-    if (url.includes("together.xyz")) return PROVIDERS.TOGETHER;
-    if (url.includes("bigmodel.cn")) return PROVIDERS.ZHIPU;
-    if (url.includes("11434")) return PROVIDERS.OLLAMA;
-    if (url.includes("1234")) return PROVIDERS.LMSTUDIO;
-    if (url.includes("generativelanguage.googleapis.com")) return PROVIDERS.GOOGLE;
-    if (url.includes("api.openai.com")) return PROVIDERS.OPENAI;
-    // Unknown baseUrl + key present → generic compat.
-    if (key) return PROVIDERS.OPENAI_COMPAT;
-  }
-
-  if (key.startsWith("sk-or-")) return PROVIDERS.OPENROUTER;
-  if (key.startsWith("AIza")) return PROVIDERS.GOOGLE;
-  // sk-proj-*, sk-* — default to OpenAI; user can override with baseUrl.
-  if (key.startsWith("sk-")) return PROVIDERS.OPENAI;
-
-  return null;
+export function isAllowedOpenRouterModel(value) {
+  return isReasonableModelId(value) && OPENROUTER_ALLOWED_MODELS.has(value);
 }
 
-/**
- * Dispatch to the correct wire adapter. Accepts either a concrete model id
- * (preferred) or a `tier` name ("small"|"medium"|"large") — we resolve the
- * tier against TIER_DEFAULTS when no explicit model is given.
- *
- * @param {object} opts
- * @param {string} opts.provider
- * @param {string} opts.apiKey
- * @param {string} [opts.baseUrl]
- * @param {string} [opts.model]
- * @param {"small"|"medium"|"large"} [opts.tier]
- * @param {Array}  opts.messages
- * @param {string} [opts.system]
- * @param {number} [opts.maxTokens]
- * @param {number} [opts.temperature]
- * @param {object} [opts.extraHeaders]
- * @param {object} [opts.webPlugin]    — OpenRouter web plugin opts ({enabled, ...}); other providers ignore.
- * @param {Array}  [opts.tools]        — custom tool defs; unsupported on the OpenAI/Google wire (callers strip + retry).
- * @param {object|string} [opts.toolChoice]
- * @param {AbortSignal} [opts.signal]
- * @param {function}   [opts.fetchImpl]
- */
-export async function callLLM(opts = {}) {
-  const provider = opts.provider || detectProvider({ apiKey: opts.apiKey, baseUrl: opts.baseUrl });
-  if (!provider) {
-    const err = new Error("Could not detect LLM provider; pass an explicit `provider`.");
-    err.status = 400;
-    err.code = "unknown_provider";
-    err.provider = null;
-    throw err;
+export function detectProvider({ apiKey = '', provider = '', baseUrl = '' } = {}) {
+  const explicit = String(provider || '').trim().toLowerCase();
+  const key = String(apiKey || '').trim();
+  const url = String(baseUrl || '').trim().replace(/\/$/, '');
+  if (explicit && explicit !== PROVIDERS.OPENROUTER) return null;
+  if (url && url !== OPENROUTER_BASE_URL) return null;
+  return key.startsWith('sk-or-') ? PROVIDERS.OPENROUTER : null;
+}
+
+function configurationError(message, code) {
+  const error = new Error(message);
+  error.status = 400;
+  error.code = code;
+  error.provider = PROVIDERS.OPENROUTER;
+  return error;
+}
+
+export async function callLLM(options = {}) {
+  if (detectProvider(options) !== PROVIDERS.OPENROUTER) {
+    throw configurationError('Only the fixed OpenRouter provider is supported.', 'unsupported_provider');
+  }
+  if (options.webPlugin?.enabled || (Array.isArray(options.tools) && options.tools.length > 0)) {
+    throw configurationError('General web and custom tool execution are disabled.', 'tools_disabled');
   }
 
-  const model = opts.model || resolveTierDefault(provider, opts.tier || "small");
-  if (!model) {
-    const err = new Error(`No model id for provider "${provider}" (tier ${opts.tier || "small"}).`);
-    err.status = 400;
-    err.code = "missing_model";
-    err.provider = provider;
-    throw err;
-  }
-  if (!isReasonableModelId(model)) {
-    const err = new Error(`Invalid model id "${String(model).slice(0, 60)}".`);
-    err.status = 400;
-    err.code = "invalid_model";
-    err.provider = provider;
-    throw err;
-  }
-
-  const wire = PROVIDER_WIRE_PROTOCOL[provider];
-  llmDebug("DISPATCH", "callLLM", { provider, wire, model, maxTokens: opts.maxTokens || 1024 });
-  const hasTools = Array.isArray(opts.tools) && opts.tools.length > 0;
-  if (hasTools) {
-    // No provider on the OpenAI/Google wire executes the backend's custom
-    // function tools. OpenRouter routes web access through its native web
-    // plugin instead — when that's requested, fall through silently and let
-    // the OpenAI adapter pick up the webPlugin opt. For every other case,
-    // tool-use is unsupported; callers strip tools and retry.
-    if (provider === PROVIDERS.OPENROUTER && opts.webPlugin && opts.webPlugin.enabled) {
-      // ok — adapter will use plugins: [{id:"web"}] instead of native tools.
-    } else {
-      const err = new Error(
-        `Provider "${provider}" does not support custom tool-use. ` +
-        `Use OpenRouter's web plugin for web access, or drop the tools.`
-      );
-      err.status = 400;
-      err.code = "tools_unsupported";
-      err.provider = provider;
-      throw err;
-    }
+  const model = options.model || resolveTierDefault('openrouter', options.tier || 'small');
+  if (!isAllowedOpenRouterModel(model)) {
+    throw configurationError('The requested model is not in the packaged allowlist.', 'model_not_allowed');
   }
 
   const sanitized = sanitizeProviderPayload({
-    system: opts.system,
-    messages: opts.messages,
-    tools: opts.tools,
-    toolChoice: opts.toolChoice,
-    metadata: opts.metadata,
-  }, { boundary: `llm-adapter:${provider}` });
-  const sanitizedPayload = sanitized.sanitizedPayload;
-
-  // Reasoning models (DeepSeek V4 Pro, R1, OpenAI o1/o3, etc.) spend
-  // a large fraction of their max_tokens budget on internal thinking
-  // BEFORE emitting visible text. If the caller asked for 1024 and
-  // the model burns 1200 thinking tokens, the user gets an empty
-  // response. Auto-bump the budget to a safe floor so reasoning has
-  // room to breathe AND there's enough left for an answer. Caller's
-  // explicit override is respected when it's already large enough.
-  const reasoningBudgetFloor = isReasoningModel(model) ? 8192 : 0;
-  const effectiveMaxTokens = Math.max(opts.maxTokens || 1024, reasoningBudgetFloor);
-  const attachRedaction = (response) => {
-    if (response && typeof response === "object") {
-      response._redaction = sanitized.redactionReport;
-      response._tokenMap = sanitized.tokenMap;
-    }
-    return response;
-  };
-
-  switch (wire) {
-    case "embedded": {
-      llmLog("DISPATCH", "→ embedded llama", { model });
-      const t0 = Date.now();
-      const out = attachRedaction(await callEmbeddedLlama({
-        model,
-        messages: sanitizedPayload.messages,
-        system: sanitizedPayload.system,
-        maxTokens: effectiveMaxTokens,
-        temperature: opts.temperature,
-        signal: opts.signal,
-      }));
-      llmDebug("DISPATCH", "← embedded llama done", { model, ms: since(t0), outTokens: out?.usage?.output_tokens });
-      return out;
-    }
-    case "google":
-      return attachRedaction(await callGoogle({
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-        model,
-        messages: sanitizedPayload.messages,
-        system: sanitizedPayload.system,
-        maxTokens: effectiveMaxTokens,
-        temperature: opts.temperature,
-        signal: opts.signal,
-        fetchImpl: opts.fetchImpl,
-      }));
-    case "openai":
-    default:
-      return attachRedaction(await callOpenAI({
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl || defaultBaseUrlFor(provider),
-        model,
-        messages: sanitizedPayload.messages,
-        system: sanitizedPayload.system,
-        maxTokens: effectiveMaxTokens,
-        temperature: opts.temperature,
-        extraHeaders: opts.extraHeaders,
-        signal: opts.signal,
-        fetchImpl: opts.fetchImpl,
-        providerTag: provider,
-        webPlugin: opts.webPlugin || null,
-      }));
-  }
-}
-
-export async function validateKey({ provider, apiKey, baseUrl, fetchImpl, signal } = {}) {
-  const detected = provider || detectProvider({ apiKey, baseUrl });
-  if (!detected) {
-    return { valid: false, status: 400, code: "unknown_provider", message: "Cannot detect provider from inputs" };
-  }
-  const wire = PROVIDER_WIRE_PROTOCOL[detected];
-  if (wire === "embedded") return validateEmbedded({ model: resolveTierDefault(detected, "small") });
-  if (wire === "google")    return validateGoogleKey({ apiKey, baseUrl, fetchImpl, signal });
-  return validateOpenAIKey({
-    apiKey,
-    baseUrl: baseUrl || defaultBaseUrlFor(detected),
-    model: resolveTierDefault(detected, "small"),
-    fetchImpl,
-    signal,
-    providerTag: detected,
+    system: options.system,
+    messages: options.messages,
+    metadata: options.metadata,
+  }, { boundary: 'llm-adapter:openrouter' });
+  const requested = Number.isFinite(Number(options.maxTokens))
+    ? Math.trunc(Number(options.maxTokens))
+    : 1024;
+  const reasoningFloor = isReasoningModel(model) ? 8192 : 1;
+  const maxTokens = Math.min(16384, Math.max(reasoningFloor, requested));
+  return callOpenAI({
+    apiKey: options.apiKey,
+    model,
+    messages: sanitized.sanitizedPayload.messages,
+    system: sanitized.sanitizedPayload.system,
+    maxTokens,
+    temperature: options.temperature,
+    signal: options.signal,
+    fetchImpl: options.fetchImpl,
   });
 }
 
-/**
- * Sync probe — true iff embedded TEXT inference is both ready (GGUF on disk)
- * AND safe to run on this runtime (see embeddedLlamaRuntimeSafe: Node version,
- * env kill-switch, crash-loop marker). The single chokepoint every caller
- * (policy-router, councilor, narrative-fit, seasonal, pillars) routes through,
- * so an unsafe runtime falls back to BYOK everywhere instead of segfaulting.
- * Note: embeddings (bge/ONNX) are NOT gated here — they don't segfault and
- * have their own isEmbeddingsAvailable() probe.
- */
+export async function validateKey({ provider = 'openrouter', apiKey, baseUrl, fetchImpl, signal } = {}) {
+  if (detectProvider({ provider, apiKey, baseUrl }) !== PROVIDERS.OPENROUTER) {
+    return {
+      valid: false,
+      status: 400,
+      code: 'unsupported_provider',
+      message: 'Only an OpenRouter key and the fixed OpenRouter endpoint are supported.',
+    };
+  }
+  return validateOpenAIKey({
+    apiKey,
+    model: resolveTierDefault('openrouter', 'small'),
+    fetchImpl,
+    signal,
+  });
+}
+
+// Compatibility probe for legacy callers while embedded inference is removed.
 export function isEmbeddedAvailable() {
-  const modelId = resolveTierDefault(PROVIDERS.EMBEDDED, "small");
-  if (!modelId) return false;
-  if (!isModelFileOnDisk(modelId)) return false;
-  return embeddedLlamaRuntimeSafe();
+  return false;
 }
 
 export function listKnownModels(provider) {
-  const meta = PROVIDER_META.find((p) => p.id === provider);
-  return meta?.knownModels || [];
+  return provider === 'openrouter' ? [...OPENROUTER_ALLOWED_MODELS] : [];
 }
 
 export function listProviders() {
-  return PROVIDER_META.map((p) => ({
-    id: p.id,
-    label: p.label,
-    keyPrefix: p.keyPrefix,
-    baseUrlOptional: p.baseUrlOptional,
-    baseUrl: p.baseUrl || null,
-    knownModels: p.knownModels,
-    defaults: TIER_DEFAULTS[p.id] || null,
-  }));
+  return [{
+    id: 'openrouter',
+    label: 'OpenRouter',
+    keyPrefix: 'sk-or-',
+    baseUrlOptional: false,
+    baseUrl: OPENROUTER_BASE_URL,
+    knownModels: [...OPENROUTER_ALLOWED_MODELS],
+    defaults: TIER_DEFAULTS.openrouter,
+  }];
 }
 
-function defaultBaseUrlFor(provider) {
-  const meta = PROVIDER_META.find((p) => p.id === provider);
-  return meta?.baseUrl || null;
-}
-
-export { TIER_DEFAULTS, PROVIDER_META, PROVIDER_WIRE_PROTOCOL, resolveTierDefault, isReasoningModel };
+export {
+  TIER_DEFAULTS,
+  PROVIDER_META,
+  PROVIDER_WIRE_PROTOCOL,
+  resolveTierDefault,
+  isReasoningModel,
+};

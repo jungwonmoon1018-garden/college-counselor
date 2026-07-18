@@ -19,7 +19,6 @@ export const RETENTION_POLICIES = {
     notifications: { days: 90, label: "90 days" },
     stale_facts: { days: 90, label: "90 days after superseded" },
     expired_evidence: { days: 90, label: "90 days after expiry" },
-    resolved_reviews: { days: 90, label: "90 days after resolution" },
     profile_data: { days: null, label: "Until deletion requested" },
   },
   institutional: {
@@ -29,7 +28,6 @@ export const RETENTION_POLICIES = {
     notifications: { years: 7, label: "7 years" },
     stale_facts: { days: 180, label: "180 days after superseded" },
     expired_evidence: { days: 180, label: "180 days after expiry" },
-    resolved_reviews: { years: 5, label: "5 years" },
     profile_data: { days: null, label: "Per institutional agreement" },
   },
 };
@@ -109,17 +107,6 @@ export function runRetentionCleanup(db, piiVaultDb, mode = "consumer") {
     }
   }
 
-  // 6. Clean resolved review queue items
-  if (policy.resolved_reviews.days) {
-    try {
-      const reviewResult = db.prepare(
-        `DELETE FROM review_queue WHERE status = 'resolved' AND resolved_at < datetime('now', '-${policy.resolved_reviews.days} days')`
-      ).run();
-      results.resolved_reviews = { deleted: reviewResult.changes };
-    } catch (e) {
-      results.resolved_reviews = { error: e.message };
-    }
-  }
 
   // 7. Clean old conversation logs (chat history). chat_messages.content is
   //    plaintext student-typed text, so honor the declared conversation_logs
@@ -166,12 +153,6 @@ export function getRetentionReport(db, piiVaultDb, mode = "consumer") {
       "SELECT trust_level, COUNT(*) as count FROM evidence_items GROUP BY trust_level"
     ).all();
   } catch { report.evidence_items = null; }
-
-  try {
-    report.review_queue = db.prepare(
-      "SELECT status, COUNT(*) as count FROM review_queue GROUP BY status"
-    ).all();
-  } catch { report.review_queue = null; }
 
   if (piiVaultDb) {
     try {

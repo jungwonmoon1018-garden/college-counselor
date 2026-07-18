@@ -11,6 +11,9 @@
 **/dist/
 **/bin/
 **/obj/
+desktop/release/
+frontend/playwright-report/
+frontend/test-results/
 
 # Editor / local tooling
 .claude/launch.json

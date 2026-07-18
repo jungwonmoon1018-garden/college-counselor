@@ -24,11 +24,13 @@ test("resolveCouncilModel honors COUNCIL_MODEL override", () => {
   delete process.env.COUNCIL_MODEL;
 });
 
-test("resolveCouncilModel leaves non-OpenRouter BYOK on its tier default", () => {
+test("resolveCouncilModel off OpenRouter: explicit model wins, else no tier default", () => {
   delete process.env.COUNCIL_MODEL;
-  // openai medium tier default — unchanged behavior for non-OpenRouter providers.
-  assert.equal(resolveCouncilModel({ provider: "openai" }, "medium"), "gpt-4o");
-  // explicit student model wins for non-OpenRouter.
+  // This build is OpenRouter-only, so there is no packaged tier default for any
+  // other provider — resolveTierDefault returns null. (resolveAdapter also
+  // rejects non-OpenRouter seats; this is the defensive model-selection path.)
+  assert.equal(resolveCouncilModel({ provider: "openai" }, "medium"), null);
+  // An explicit model is still honored if one is supplied.
   assert.equal(resolveCouncilModel({ provider: "openai", model: "gpt-4.1" }, "medium"), "gpt-4.1");
 });
 

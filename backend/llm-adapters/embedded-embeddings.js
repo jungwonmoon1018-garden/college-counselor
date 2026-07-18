@@ -1,112 +1,50 @@
-// ═══════════════════════════════════════════════════════════════════════
-// EMBEDDED EMBEDDINGS — local ONNX text embedding via @xenova/transformers
-// ═══════════════════════════════════════════════════════════════════════
-// Wraps the bge-small-en-v1.5 model so vector-store.js can compute query
-// embeddings without a remote API call. Default dimensions: 384.
-//
-// Lazy-loaded: the first embed() call downloads the model into the Xenova
-// cache (~30 MB) and pins the pipeline; subsequent calls are sub-200 ms on
-// CPU. Falls back gracefully when @xenova/transformers is not installed —
-// callers should treat that as "no semantic search available" rather than
-// throwing.
-// ═══════════════════════════════════════════════════════════════════════
+import crypto from "node:crypto";
 
-import { llmLog, llmDebug, since } from "./llm-log.js";
-
-const DEFAULT_MODEL_ID = "Xenova/bge-small-en-v1.5";
+// Deterministic local feature hashing for retrieval. This is deliberately not
+// an LLM or downloaded embedding model: it has no network access, native code,
+// model cache, or executable schema parser.
 const DEFAULT_DIMENSIONS = 384;
+const MODEL_ID = "local-feature-hash-v1";
 
-let PIPELINE_PROMISE = null;
-let MODULE_LOAD_ERROR = null;
-
-async function loadTransformers() {
-  if (MODULE_LOAD_ERROR) throw MODULE_LOAD_ERROR;
-  try {
-    const xenova = await import("@xenova/transformers");
-    // Pin cache directory to a stable per-repo location so reinstalls don't
-    // re-download. The Xenova package already caches under its own dir;
-    // we only override when the env explicitly requests it.
-    if (process.env.XENOVA_CACHE_DIR) {
-      xenova.env.cacheDir = process.env.XENOVA_CACHE_DIR;
-    }
-    // Disallow remote model downloads in CI / offline environments.
-    if (process.env.XENOVA_OFFLINE === "1") {
-      xenova.env.allowRemoteModels = false;
-    }
-    return xenova;
-  } catch (err) {
-    MODULE_LOAD_ERROR = new Error(
-      `@xenova/transformers is not installed (${err.message}). ` +
-      `Install with: npm install @xenova/transformers`
-    );
-    MODULE_LOAD_ERROR.code = "embeddings_unavailable";
-    MODULE_LOAD_ERROR.cause = err;
-    throw MODULE_LOAD_ERROR;
+function features(text) {
+  const normalized = String(text)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return [];
+  const tokens = normalized.split(" ");
+  const output = [...tokens];
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    output.push(`${tokens[index]} ${tokens[index + 1]}`);
   }
+  return output;
 }
 
-async function getPipeline(modelId = DEFAULT_MODEL_ID) {
-  if (PIPELINE_PROMISE) return PIPELINE_PROMISE;
-  PIPELINE_PROMISE = (async () => {
-    llmLog("EMBED", "loading bge pipeline (first call may download model)", { modelId });
-    const t0 = Date.now();
-    const xenova = await loadTransformers();
-    const extractor = await xenova.pipeline("feature-extraction", modelId, {
-      quantized: true, // smaller download, near-identical quality at 384 dims
-    });
-    llmLog("EMBED", "bge pipeline ready", { modelId, ms: since(t0) });
-    return { extractor, modelId };
-  })();
-  try {
-    return await PIPELINE_PROMISE;
-  } catch (err) {
-    PIPELINE_PROMISE = null;
-    throw err;
+export async function embed(text) {
+  const vector = new Float32Array(DEFAULT_DIMENSIONS);
+  for (const feature of features(text)) {
+    const digest = crypto.createHash("sha256").update(feature).digest();
+    const bucket = digest.readUInt32BE(0) % DEFAULT_DIMENSIONS;
+    vector[bucket] += (digest[4] & 1) === 0 ? 1 : -1;
   }
+  let norm = 0;
+  for (const value of vector) norm += value * value;
+  norm = Math.sqrt(norm);
+  if (norm > 0) {
+    for (let index = 0; index < vector.length; index += 1) vector[index] /= norm;
+  }
+  return vector;
 }
 
-/**
- * Embed a single text into a Float32Array. Mean-pooled, L2-normalized so
- * cosine == dot product downstream. Truncates to the model's max sequence
- * length (typically 512 tokens) silently — callers pre-chunk if needed.
- */
-export async function embed(text, { modelId = DEFAULT_MODEL_ID } = {}) {
-  if (typeof text !== "string" || !text.trim()) {
-    return new Float32Array(DEFAULT_DIMENSIONS);
-  }
-  const { extractor } = await getPipeline(modelId);
-  const t0 = Date.now();
-  const output = await extractor(text, { pooling: "mean", normalize: true });
-  // Output is a Tensor — we want the raw Float32Array.
-  const vec = new Float32Array(output.data);
-  llmDebug("EMBED", "embed", { chars: text.length, dims: vec.length, ms: since(t0) });
-  return vec;
+export async function embedBatch(texts) {
+  return Promise.all((texts || []).map((text) => embed(text)));
 }
 
-/**
- * Batch embed — slightly more efficient than mapping embed() one-by-one
- * because the pipeline can batch tokenization.
- */
-export async function embedBatch(texts, opts = {}) {
-  const out = [];
-  for (const t of texts) {
-    out.push(await embed(t, opts));
-  }
-  return out;
-}
-
-/**
- * Cheap probe — used by /api/llm/providers/embedded/status. Does NOT trigger
- * a model download; only checks whether the npm dep loads.
- */
 export async function isEmbeddingsAvailable() {
-  try {
-    await loadTransformers();
-    return true;
-  } catch {
-    return false;
-  }
+  return true;
 }
 
 export const EMBEDDING_DIMENSIONS = DEFAULT_DIMENSIONS;
-export const EMBEDDING_MODEL_ID = DEFAULT_MODEL_ID;
+export const EMBEDDING_MODEL_ID = MODEL_ID;

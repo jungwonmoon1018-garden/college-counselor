@@ -186,15 +186,13 @@ function cosineSimilarity(a, b) {
 // ─── Semantic search (Pillar 4): embed query → cosine search → fall back to keyword ───
 //
 // Single-call helper for RAG: takes a plain string and returns the top-k
-// most semantically similar embeddings. Uses the embedded ONNX bge-small
-// model from llm-adapters/embedded-embeddings.js — no remote calls. Falls
-// back to keywordSearch() automatically when the embeddings dep isn't
-// installed or query embedding fails, so callers don't have to branch.
+// most similar locally stored vectors. The adapter uses deterministic feature
+// hashing and never downloads or executes a model. Keyword search remains the
+// stable fallback when a collection has not been seeded.
 export async function semanticSearch(stmts, queryText, sourceType = null, limit = 5) {
   if (!queryText || typeof queryText !== "string") return [];
 
-  // Cheap availability check; avoids paying the model-load cost when the
-  // dep isn't installed.
+  // Kept as an adapter capability check for future implementations.
   const available = await isEmbeddingsAvailable();
   if (!available) {
     llmDebug("EMBED", "semanticSearch → keyword fallback", { reason: "embeddings unavailable" });
@@ -217,7 +215,7 @@ export async function semanticSearch(stmts, queryText, sourceType = null, limit 
     llmDebug("EMBED", "semanticSearch → keyword fallback", { reason: "0 semantic hits" });
     return keywordSearch(stmts, queryText, sourceType, limit);
   }
-  llmDebug("EMBED", "semanticSearch via bge", { hits: results.length });
+  llmDebug("EMBED", "semanticSearch via local feature hash", { hits: results.length });
   return results;
 }
 

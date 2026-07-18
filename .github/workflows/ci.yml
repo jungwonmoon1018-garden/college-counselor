@@ -2,17 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, main]
   pull_request:
 
-# Cancel superseded runs on the same ref to save minutes.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   backend:
-    name: Backend (tests + lint)
+    name: Backend
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -24,69 +23,69 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: backend/package-lock.json
-      - name: Install deps
-        run: npm ci
-      - name: Syntax check setup tooling
-        run: |
-          node --check env-file.js
-          node --check server.js
-          node --check scripts/setup-secrets.mjs
-      - name: Generate college profiles from test fixture
-        # Build the generated profiles from a small committed IPEDS fixture so
-        # the integration tests that look up specific schools (UMich, MIT,
-        # Vanderbilt, Georgetown) have deterministic data. Production uses the
-        # full IPEDS CSVs via `npm run generate:colleges` with no args.
-        run: npm run generate:colleges -- --hd tests/fixtures/ipeds/hd2023.csv --adm tests/fixtures/ipeds/adm2023.csv
+      - run: npm ci
+      - run: npm run lint
+      - run: node --check server.js
       - name: Test
-        # Dummy secrets keep modules that read them happy; tests don't touch real
-        # PII. NODE_ENV stays development so boot-time fatals don't trip.
         env:
-          NODE_ENV: development
+          NODE_ENV: test
           ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
-          JWT_SECRET: "ci-only-secret-not-used-in-production-0000000000000000"
+          JWT_SECRET: "ci-only-secret-not-used-outside-tests-0000000000000000"
         run: npm test
-      - name: Lint
-        # Non-blocking for now: server.js is large and may carry pre-existing
-        # style findings; surface them without failing the build.
-        continue-on-error: true
-        run: npm run lint
+      - run: npm audit --audit-level=high
 
-  apple:
-    name: Apple build (iOS + macOS)
-    # macOS 15 image ships Xcode 16, which can read the project format the
-    # current XcodeGen emits (Xcode 15.4 on macos-14 cannot — "format 77").
-    runs-on: macos-15
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v5
-      - name: Select latest stable Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/setup-node@v5
         with:
-          xcode-version: latest-stable
-      - name: Install XcodeGen
-        run: brew install xcodegen
-      - name: Build webview wrapper (apple-webview/)
-        working-directory: apple-webview
-        run: |
-          xcodegen generate
-          xcodebuild build \
-            -project CollegeCounselorWeb.xcodeproj \
-            -scheme CollegeCounselorWeb-iOS \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO
-          xcodebuild build \
-            -project CollegeCounselorWeb.xcodeproj \
-            -scheme CollegeCounselorWeb-macOS \
-            -destination 'generic/platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
 
-  windows:
-    name: Windows app build (WebView2 / .NET 8)
-    runs-on: windows-latest
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-node@v5
         with:
-          dotnet-version: "8.0.x"
-      - name: Build WebView2 wrapper (windows-webview/)
-        working-directory: windows-webview/CollegeCounselorWeb
-        run: dotnet build -c Release
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - run: npm ci --omit=dev
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run build
+        working-directory: frontend
+      - run: npm run rebuild:backend
+        working-directory: desktop
+      - name: Package unpacked Windows app
+        if: runner.os == 'Windows'
+        run: npx electron-builder --dir --win
+        working-directory: desktop
+      - name: Package unpacked macOS app
+        if: runner.os == 'macOS'
+        run: npx electron-builder --dir --mac
+        working-directory: desktop
+      - run: npm audit --audit-level=high
+        working-directory: desktop

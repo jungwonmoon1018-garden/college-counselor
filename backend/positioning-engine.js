@@ -429,14 +429,21 @@ export function scoreDifferentiationStrength(student) {
 
 export function scoreInstitutionalSelectivityAdjustment(collegeContext) {
   const admitRate = normalizePercentValue(collegeContext.acceptanceRate ?? collegeContext.acceptance ?? collegeContext.admission_rate ?? null);
-  if (admitRate == null) return { adjustment: 1, selectivityIndex: null };
+  if (admitRate == null || admitRate <= 0) return { adjustment: 1, selectivityIndex: null };
   const selectivityIndex = clamp01(1 - admitRate);
-  // DAMPENER, not a boost. academic.score is already school-relative (scored
-  // against this school's GPA/SAT ranges), so selectivity should only mildly
-  // dampen — never inflate. ≈0.86 at a 4%-admit school, ≈0.93 at 60%, 1.0 when
-  // unknown. The previous `0.8 + idx*0.35` boosted selective schools up to
-  // 1.15× — the core admissibility over-estimation this corrects.
-  const adjustment = round2(1 - selectivityIndex * 0.15);
+  // DEVALUATION, inversely proportional to the acceptance rate. The devaluation
+  // tracks the ODDS AGAINST admission, (1 − rate)/rate ≈ 1/rate for small rate,
+  // so it concentrates almost entirely on ultra-selective schools and fades to
+  // ~nothing for high-admit ones — unlike the old linear `1 − (1 − rate)·0.15`
+  // dampener, which barely separated a 4%-admit Ivy from a 60%-admit state
+  // school. Scaled by 0.02 and capped at 0.35 so a hyper-reach is discounted
+  // hard (≈−35% at 4% admit, ≈−11% at 15%, ≈−2% at 50%, ~0 at high admit)
+  // without collapsing to noise. UNKNOWN admit rate ⇒ no change (1.0), never a
+  // boost. Applied ONCE, to the whole composite in buildPositioningForTarget
+  // (not the academic sub-score), so selectivity is not double-counted.
+  const oddsAgainst = (1 - admitRate) / admitRate;
+  const devaluation = Math.min(0.35, 0.02 * oddsAgainst);
+  const adjustment = round2(1 - devaluation);
   return { adjustment, selectivityIndex: round2(selectivityIndex) };
 }
 
@@ -524,9 +531,10 @@ export function buildPositioningForTarget(student, collegeContext, cdsResult, op
   // displayed number came only from major demand, so a 4%-admit Ivy and a
   // 60%-admit state school scored identical competitiveness for the same
   // major — which reads as badly inflated for the selective school. The raw
-  // major-pool signal is preserved separately for transparency. finalScore
-  // math below is left untouched (it applies selectivity.adjustment on its
-  // own), so this does not double-count.
+  // major-pool signal is preserved separately for transparency. This uses the
+  // selectivity INDEX (1 − rate); the composite instead applies the separate
+  // inverse-proportional selectivity.adjustment once, below — different knobs,
+  // so this does not double-count.
   const selectivityPressure = selectivity.selectivityIndex; // 0..1, null if admit rate unknown
   const displayedCompetitivenessScore = selectivityPressure != null
     ? round1((1 - clamp01(majorComp.difficultyIndex * 0.35 + selectivityPressure * 0.65)) * 100)
@@ -534,14 +542,19 @@ export function buildPositioningForTarget(student, collegeContext, cdsResult, op
 
   const contextBonus = options.contextualAchievementBonus ?? 0;
   const redFlagPenalty = Math.min(24, redFlags.length * 5);
-  const finalScore =
-    (academic.score * selectivity.adjustment * (0.82 + ((majorComp.score / 100) * 0.33))) +
+  const preSelectivityScore =
+    (academic.score * (0.82 + ((majorComp.score / 100) * 0.33))) +
     (fit.score * 0.12) +
     (narrative.score * 0.08) +
     strategicFocus.bonus +
     contextBonus -
     redFlagPenalty;
-  const boundedFinal = round1(Math.max(0, Math.min(100, finalScore / 1.15)));
+  // Devalue the COMPOSITE inversely proportional to the acceptance rate (see
+  // scoreInstitutionalSelectivityAdjustment). Applied once, to the whole score
+  // rather than only the academic sub-score, so a hyper-selective school's
+  // composite is discounted as a whole and selectivity isn't double-counted.
+  const finalScore = (preSelectivityScore / 1.15) * selectivity.adjustment;
+  const boundedFinal = round1(Math.max(0, Math.min(100, finalScore)));
   const confidence = scoreEvidenceConfidence({
     cdsResult,
     collegeContext,

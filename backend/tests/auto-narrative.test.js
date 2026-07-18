@@ -4,7 +4,8 @@
 // Unit tests for the fingerprint helper + grep-style contract tests that
 // lock the wiring (course-change detection, sync hook, voice protection),
 // matching the convention in differentiation-endpoints.test.js. Full
-// integration needs a seeded vault + BYOK + session token (out of scope).
+// integration needs a seeded vault + configured OpenRouter + session token
+// (out of scope).
 // ═══════════════════════════════════════════════════════════════════════
 
 import test from "node:test";
@@ -82,10 +83,10 @@ test("auto-narrative never overwrites a student-written narrative", () => {
   assert.match(SERVER, /skipped: "student_written"/);
 });
 
-test("auto-narrative no-ops on unchanged fingerprint + gates on triggers/BYOK/budget", () => {
+test("auto-narrative no-ops on unchanged fingerprint + gates on triggers/OpenRouter/budget", () => {
   assert.match(SERVER, /AUTO_NARRATIVE_TRIGGERS/);
   assert.match(SERVER, /fingerprint_unchanged/);
-  assert.match(SERVER, /skipped: "no_byok"/);
+  assert.match(SERVER, /skipped: "openrouter_not_configured"/);
   assert.match(SERVER, /skipped: "budget"/);
 });
 

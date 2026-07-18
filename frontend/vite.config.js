@@ -6,14 +6,13 @@ export default defineConfig({
   plugins: [react()],
   build: {
     rollupOptions: {
-      // Two pages: the student app (index.html) and the operator setup
-      // (setup.html). Keeps the setup UI fully isolated from App.jsx.
+      // The student app and the localhost-only administrator surface are
+      // separate entry points. The admin page receives the privileged
+      // Electron preload bridge; student pages never handle installation keys.
       input: {
         main: resolve(__dirname, "index.html"),
-        setup: resolve(__dirname, "setup.html"),
+        admin: resolve(__dirname, "admin.html"),
         methodology: resolve(__dirname, "methodology.html"),
-        presignup: resolve(__dirname, "pre-signup.html"),
-        login: resolve(__dirname, "login.html"),
       },
     },
   },
@@ -24,10 +23,11 @@ export default defineConfig({
         target: "http://localhost:3001",
         changeOrigin: true,
       },
-      "/dashboard": {
-        target: "http://localhost:3001",
-        changeOrigin: true,
-      },
     },
+  },
+  test: {
+    environment: "jsdom",
+    setupFiles: "./src/test-setup.js",
+    clearMocks: true,
   },
 });

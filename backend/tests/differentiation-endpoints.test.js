@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = fs.readFileSync(path.resolve(__dirname, "../server.js"), "utf8");
+const LLM_ADAPTER = fs.readFileSync(path.resolve(__dirname, "../llm-adapters/index.js"), "utf8");
 
 // ─── Spike Finder ───────────────────────────────────────────────────────
 test("server.js exposes GET /api/ec/spike, student-auth gated", () => {
@@ -67,8 +68,8 @@ test("course recommender frames coaching as non-binding 'you might consider'", (
   assert.match(SERVER, /you might consider/i);
 });
 
-// ─── LLM + web-search semantic ranking ──────────────────────────────────
-test("candidate rank has an LLM + web-search re-rank with deterministic fallback", () => {
+// ─── Budgeted LLM semantic ranking ───────────────────────────────────────
+test("candidate rank has an LLM semantic re-rank with deterministic fallback", () => {
   assert.match(SERVER, /async function llmRankCandidates\(/);
   assert.match(SERVER, /app\.post\("\/api\/ec\/candidates\/rank",\s*studentLimiter,\s*requireStudentAuth,\s*async/);
   // deterministic baseline still present (fallback)
@@ -78,19 +79,16 @@ test("candidate rank has an LLM + web-search re-rank with deterministic fallback
   assert.match(SERVER, /engine,/);
 });
 
-test("spike finder has an LLM + web-search re-rank", () => {
+test("spike finder has an LLM semantic re-rank", () => {
   assert.match(SERVER, /async function llmRankSpike\(/);
   assert.match(SERVER, /app\.get\("\/api\/ec\/spike",\s*studentLimiter,\s*requireStudentAuth,\s*async/);
   assert.match(SERVER, /leadRationale/);
 });
 
-test("semantic rankers enable web search via the OpenRouter web plugin", () => {
-  // Web access is now routed through OpenRouter's web plugin (no Anthropic
-  // native web_search tools). The rankers opt in with wantsWeb:true and the
-  // per-student closure converts that into the plugin + domain allowlist.
-  assert.match(SERVER, /wantsWeb: true/);
-  assert.match(SERVER, /useORWebPlugin/);
-  assert.match(SERVER, /buildAllowedDomains/);
+test("semantic rankers stay inside the fixed OpenRouter no-tools boundary", () => {
+  assert.doesNotMatch(SERVER, /wantsWeb\s*:/);
+  assert.match(SERVER, /No browsing is available/);
+  assert.match(LLM_ADAPTER, /General web and custom tool execution are disabled/);
 });
 
 test("rank + spike fold in target-school priorities", () => {
@@ -104,21 +102,24 @@ test("server.js exposes POST /api/calendar/context, student-auth gated", () => {
   assert.match(SERVER, /app\.post\("\/api\/calendar\/context",\s*studentLimiter,\s*requireStudentAuth,\s*async/);
 });
 
-test("calendar builds a deterministic cycle calendar + web deadline lookup", () => {
+test("calendar builds a deterministic cycle calendar + typical target-school fallback", () => {
   assert.match(SERVER, /function buildAdmissionsCalendar\(/);
-  assert.match(SERVER, /async function fetchSchoolDeadlinesViaWeb\(/);
   // typical deadlines + HS breaks + ISO fallbacks present in the calendar shape
   assert.match(SERVER, /typicalDeadlines/);
   assert.match(SERVER, /typicalHsBreaks/);
   assert.match(SERVER, /typicalISO/);
-  // deadlines cached + resolved against target schools
-  assert.match(SERVER, /calendar_deadlines/);
+  // target schools are resolved but exact dates remain explicitly unverified
   assert.match(SERVER, /resolveTargetSchools/);
+  assert.match(SERVER, /source: "typical"/);
+  assert.doesNotMatch(SERVER, /fetchSchoolDeadlinesViaWeb/);
 });
 
-test("deadline web lookup is pinned to DeepSeek V4 Pro on OpenRouter", () => {
-  assert.match(SERVER, /deepseek\/deepseek-v4-pro/);
-  assert.match(SERVER, /byok\.provider === "openrouter"/);
+test("calendar context does not dispatch a paid model or web lookup", () => {
+  const start = SERVER.indexOf('app.post("/api/calendar/context"');
+  const end = SERVER.indexOf("// GET: retrieve historical directionality", start);
+  const route = SERVER.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.doesNotMatch(route, /buildStudentCallLLM|callLLM|reserveStudentModelCall|deepseek/i);
 });
 
 test("bulk deadlines endpoint exists (collapses the add-school burst)", () => {
@@ -141,16 +142,19 @@ test("server.js exposes POST /api/narrative/draft, student-auth gated", () => {
   assert.match(SERVER, /app\.post\("\/api\/narrative\/draft",\s*studentLimiter,\s*requireStudentAuth/);
 });
 
-test("generation endpoints use the shared BYOK closure + MEDIUM tier", () => {
+test("generation endpoints use the shared fixed-OpenRouter closure + MEDIUM tier", () => {
   assert.match(SERVER, /function buildStudentCallLLM\(/);
-  assert.match(SERVER, /lookupStudentBYOK/);
+  assert.match(SERVER, /function currentOperatorKeyConfig\(/);
+  assert.match(SERVER, /provider: "openrouter"/);
   // Both endpoints prefer the medium model for synthesis work.
-  assert.match(SERVER, /byok\.models\?\.medium/);
+  assert.match(SERVER, /modelConfig\.models\?\.medium/);
 });
 
-test("generation endpoints gate on budget and require a BYOK key", () => {
-  assert.match(SERVER, /No personal API key on file/);
-  assert.match(SERVER, /checkBudget\(piiVault, ragStmts, req\.studentId\)/);
+test("generation endpoints require administrator OpenRouter config and reserve budget", () => {
+  assert.match(SERVER, /The administrator must configure OpenRouter first/);
+  assert.match(SERVER, /function reserveStudentModelCall\(/);
+  assert.match(SERVER, /reserveBudget\(db,/);
+  assert.doesNotMatch(SERVER, /No personal API key on file/);
 });
 
 test("EC idea generation grounds + tags ideas, narrative draft is not auto-saved", () => {

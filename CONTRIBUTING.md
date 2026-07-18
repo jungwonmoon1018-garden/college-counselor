@@ -28,9 +28,9 @@ cd backend && npm install && npm run dev
 cd frontend && npm install && npm run dev
 ```
 
-The public launch / beta-signup page lives at `/pre-signup.html` (Vite dev
-server), backed by the public `POST /api/beta-signup` and `GET /api/beta-impact`
-endpoints. Impact numbers are real or zero — never fabricate metrics.
+The supported product is the packaged desktop application. Browser-only
+launch and beta-signup pages are no longer shipped. Never advertise a retired
+surface or fabricate adoption or impact metrics.
 
 ## Ground rules
 

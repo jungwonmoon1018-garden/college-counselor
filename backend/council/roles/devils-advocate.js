@@ -19,7 +19,7 @@ export function getSystemPrompt(student) {
     "  - If the question is open-ended, propose the alternative the rest of the council would most likely dismiss too quickly.",
     "Stance: always 'oppose'. Your recommendation is the counter-proposal.",
     "Constraints:",
-    "  - Your counter-proposal must be at least one graph_node or logseq_block of evidence away from arbitrary. No 'just because.'",
+    "  - Ground the counter-proposal in a graph_node, baseline_fact, or evidence_item ID present in context.",
     "  - Confidence reflects how well evidence supports the counter, NOT how much you like it.",
     "  - This is coaching. No outcome promises.",
   ].join("\n");

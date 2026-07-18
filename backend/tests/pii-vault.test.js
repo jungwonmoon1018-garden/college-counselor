@@ -1,6 +1,6 @@
 // Tests for pii-vault.js
 // Covers: encrypt/decrypt, hashValue, student PII CRUD, document vault,
-// expiry cleanup, right-to-erasure, BYOK minor guard, document classification.
+// expiry cleanup, right-to-erasure, and document classification.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +13,7 @@ import {
   encrypt,
   decrypt,
   hashValue,
+  hashEmail,
   initPIIVault,
   preparePIIStatements,
   storeStudentPII,
@@ -20,8 +21,6 @@ import {
   storeDocument,
   cleanExpiredDocuments,
   deleteAllStudentPII,
-  lookupStudentBYOK,
-  isBYOKAllowed,
   hashStudentIdForProvider,
 } from "../pii-vault.js";
 
@@ -94,6 +93,13 @@ test("hashValue differs for different salts", () => {
   assert.notEqual(h1, h2);
 });
 
+test("hashEmail is normalized and keyed per installation", () => {
+  const keyA = "11".repeat(32);
+  const keyB = "22".repeat(32);
+  assert.equal(hashEmail("  Student@Example.COM ", keyA), hashEmail("student@example.com", keyA));
+  assert.notEqual(hashEmail("student@example.com", keyA), hashEmail("student@example.com", keyB));
+});
+
 // ─── initPIIVault ───
 
 test("initPIIVault creates a vault db file and returns vault object", () => {
@@ -113,7 +119,7 @@ test("initPIIVault creates all required tables", () => {
   assert.ok(tables.includes("students_pii"));
   assert.ok(tables.includes("consent_records"));
   assert.ok(tables.includes("document_vault"));
-  assert.ok(tables.includes("student_api_keys"));
+  assert.ok(!tables.includes("student_api_keys"));
   vault.db.close();
   fs.rmSync(dir, { recursive: true });
 });
@@ -183,7 +189,7 @@ test("email hash is deterministic and used for lookup index", () => {
   const email = "lookup@example.com";
 
   storeStudentPII(stmts, vault, studentId, { email });
-  const row = stmts.getStudentByEmailHash.get(hashValue(email, "email_salt_cc"));
+  const row = stmts.getStudentByEmailHash.get(hashEmail(email, vault.encryptionKey));
   assert.ok(row);
   assert.equal(row.student_id, studentId);
 
@@ -326,79 +332,6 @@ test("deleteAllStudentPII removes PII and documents for student", () => {
     .prepare("SELECT COUNT(*) as n FROM document_vault WHERE student_id=?")
     .get(studentId);
   assert.equal(docs.n, 0);
-
-  vault.db.close();
-  fs.rmSync(dir, { recursive: true });
-});
-
-// ─── BYOK minor guard ───
-
-test("isBYOKAllowed returns false for unknown student", () => {
-  const { vault, stmts, dir } = tempVault();
-  const result = isBYOKAllowed(stmts, "ghost");
-  assert.equal(result.allowed, false);
-  vault.db.close();
-  fs.rmSync(dir, { recursive: true });
-});
-
-test("isBYOKAllowed returns false for minor", () => {
-  const { vault, stmts, dir } = tempVault();
-  const studentId = crypto.randomUUID();
-  storeStudentPII(stmts, vault, studentId, { email: "minor@example.com", isMinor: true });
-
-  const result = isBYOKAllowed(stmts, studentId);
-  assert.equal(result.allowed, false);
-  assert.equal(result.byokBlocked, true);
-  assert.ok(typeof result.reason === "string" && result.reason.length > 0);
-
-  vault.db.close();
-  fs.rmSync(dir, { recursive: true });
-});
-
-test("isBYOKAllowed returns true for adult", () => {
-  const { vault, stmts, dir } = tempVault();
-  const studentId = crypto.randomUUID();
-  storeStudentPII(stmts, vault, studentId, { email: "adult@example.com", isMinor: false });
-
-  const result = isBYOKAllowed(stmts, studentId);
-  assert.equal(result.allowed, true);
-
-  vault.db.close();
-  fs.rmSync(dir, { recursive: true });
-});
-
-// ─── lookupStudentBYOK ───
-
-test("lookupStudentBYOK returns null when no key stored", () => {
-  const { vault, stmts, dir } = tempVault();
-  const result = lookupStudentBYOK(stmts, vault, "no-key-student");
-  assert.equal(result, null);
-  vault.db.close();
-  fs.rmSync(dir, { recursive: true });
-});
-
-test("lookupStudentBYOK decrypts and returns stored api key", () => {
-  const { vault, stmts, dir } = tempVault();
-  const studentId = crypto.randomUUID();
-  const apiKey = "sk-ant-real-key-12345";
-
-  stmts.upsertApiKey.run(
-    studentId,
-    encrypt(apiKey, vault.encryptionKey),
-    "sk-ant-...2345",
-    "anthropic",
-    null,
-    "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6",
-    "claude-opus-4-7",
-  );
-
-  const result = lookupStudentBYOK(stmts, vault, studentId);
-  assert.ok(result);
-  assert.equal(result.apiKey, apiKey);
-  assert.equal(result.provider, "anthropic");
-  assert.equal(result.models.small, "claude-haiku-4-5-20251001");
-  assert.equal(result.models.large, "claude-opus-4-7");
 
   vault.db.close();
   fs.rmSync(dir, { recursive: true });
