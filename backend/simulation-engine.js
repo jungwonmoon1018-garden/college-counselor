@@ -20,6 +20,13 @@ function safeArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function requireStudentId(studentId) {
+  if (typeof studentId !== "string" || studentId.length === 0 || studentId.length > 256) {
+    throw Object.assign(new Error("studentId required"), { status: 400 });
+  }
+  return studentId;
+}
+
 function normalizeProfile(snapshot = {}) {
   return {
     gpa: snapshot.gpa || {
@@ -151,8 +158,10 @@ export function initSimulationStore(dataDir, options = {}) {
   }
   const profileDb = new Database(profilePath);
   const vectorDb = new Database(vectorPath);
-  profileDb.pragma("journal_mode = WAL");
-  vectorDb.pragma("journal_mode = WAL");
+  // DELETE journals let SQLite use a super-journal for the attached databases.
+  // That makes privacy erasure atomic across both simulation files.
+  profileDb.pragma("journal_mode = DELETE");
+  vectorDb.pragma("journal_mode = DELETE");
 
   profileDb.exec(`
     CREATE TABLE IF NOT EXISTS simulated_profiles (
@@ -184,6 +193,7 @@ export function initSimulationStore(dataDir, options = {}) {
     CREATE INDEX IF NOT EXISTS idx_sim_vectors_simulation ON simulated_vectors(simulation_id);
     CREATE INDEX IF NOT EXISTS idx_sim_vectors_expiry ON simulated_vectors(expires_at);
   `);
+  profileDb.prepare("ATTACH DATABASE ? AS simulation_vector_store").run(vectorPath);
 
   const profileStmts = {
     insert: profileDb.prepare(`INSERT INTO simulated_profiles (id, student_id, scenario_name, scenario_json, base_profile_json, simulated_profile_json, positioning_json, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
@@ -191,6 +201,8 @@ export function initSimulationStore(dataDir, options = {}) {
     delete: profileDb.prepare(`DELETE FROM simulated_profiles WHERE id = ? AND student_id = ?`),
     cleanup: profileDb.prepare(`DELETE FROM simulated_profiles WHERE expires_at <= datetime('now')`),
     count: profileDb.prepare(`SELECT COUNT(*) AS count FROM simulated_profiles`),
+    listByStudent: profileDb.prepare(`SELECT * FROM simulated_profiles WHERE student_id = ? AND expires_at > datetime('now') ORDER BY created_at, id`),
+    deleteByStudent: profileDb.prepare(`DELETE FROM simulated_profiles WHERE student_id = ?`),
   };
   const vectorStmts = {
     insert: vectorDb.prepare(`INSERT INTO simulated_vectors (id, simulation_id, student_id, vector_type, vector_name, vector_json, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
@@ -198,9 +210,21 @@ export function initSimulationStore(dataDir, options = {}) {
     deleteBySimulation: vectorDb.prepare(`DELETE FROM simulated_vectors WHERE simulation_id = ? AND student_id = ?`),
     cleanup: vectorDb.prepare(`DELETE FROM simulated_vectors WHERE expires_at <= datetime('now')`),
     count: vectorDb.prepare(`SELECT COUNT(*) AS count FROM simulated_vectors`),
+    listByStudent: vectorDb.prepare(`SELECT * FROM simulated_vectors WHERE student_id = ? AND expires_at > datetime('now') ORDER BY simulation_id, vector_type, vector_name, id`),
+  };
+  const privacyStmts = {
+    deleteVectorsByStudent: profileDb.prepare(`DELETE FROM simulation_vector_store.simulated_vectors WHERE student_id = ?`),
   };
 
-  return { profileDb, vectorDb, profilePath, vectorPath, profileStmts, vectorStmts };
+  return {
+    profileDb,
+    vectorDb,
+    profilePath,
+    vectorPath,
+    profileStmts,
+    vectorStmts,
+    privacyStmts,
+  };
 }
 
 export function closeSimulationStore(store) {
@@ -217,8 +241,7 @@ export function cleanupExpiredSimulations(store) {
 export async function createSimulation(store, request, options = {}) {
   cleanupExpiredSimulations(store);
   const ttlDays = Number(options.ttlDays ?? request.ttlDays ?? 7);
-  const studentId = request.studentId;
-  if (!studentId) throw Object.assign(new Error("studentId required"), { status: 400 });
+  const studentId = requireStudentId(request.studentId);
 
   const baseProfile = normalizeProfile(request.baseProfile);
   const simulatedProfile = mergeProfile(baseProfile, request.profilePatch || request.scenario?.profilePatch || {});
@@ -292,6 +315,7 @@ export async function createSimulation(store, request, options = {}) {
 }
 
 export function getSimulation(store, studentId, simulationId) {
+  requireStudentId(studentId);
   cleanupExpiredSimulations(store);
   const row = store.profileStmts.get.get(simulationId, studentId);
   if (!row) return null;
@@ -310,7 +334,67 @@ export function getSimulation(store, studentId, simulationId) {
 }
 
 export function deleteSimulation(store, studentId, simulationId) {
+  requireStudentId(studentId);
   store.vectorStmts.deleteBySimulation.run(simulationId, studentId);
   const deleted = store.profileStmts.delete.run(simulationId, studentId).changes;
   return { deleted: deleted > 0 };
+}
+
+function simulationFromRows(row, vectorRows) {
+  return {
+    simulation: true,
+    simulationId: row.id,
+    basedOnStudentId: row.student_id,
+    scenarioName: row.scenario_name,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    scenario: row.scenario_json ? JSON.parse(row.scenario_json) : {},
+    baseProfile: JSON.parse(row.base_profile_json),
+    profile: JSON.parse(row.simulated_profile_json),
+    vectors: vectorRows.map((vector) => ({
+      type: vector.vector_type,
+      name: vector.vector_name,
+      vector: JSON.parse(vector.vector_json),
+    })),
+    positioning: JSON.parse(row.positioning_json),
+  };
+}
+
+export function listStudentSimulations(store, studentId) {
+  const exactStudentId = requireStudentId(studentId);
+  cleanupExpiredSimulations(store);
+  const profileRows = store.profileStmts.listByStudent.all(exactStudentId);
+  const vectorRows = store.vectorStmts.listByStudent.all(exactStudentId);
+  const vectorsBySimulation = new Map();
+  for (const row of vectorRows) {
+    const rows = vectorsBySimulation.get(row.simulation_id) || [];
+    rows.push(row);
+    vectorsBySimulation.set(row.simulation_id, rows);
+  }
+  return profileRows.map((row) =>
+    simulationFromRows(row, vectorsBySimulation.get(row.id) || []));
+}
+
+export function exportStudentSimulations(store, studentId) {
+  const exactStudentId = requireStudentId(studentId);
+  return {
+    format: "College Counselor Simulation Export v1",
+    studentId: exactStudentId,
+    simulations: listStudentSimulations(store, exactStudentId),
+  };
+}
+
+export function deleteAllStudentSimulations(store, studentId) {
+  const exactStudentId = requireStudentId(studentId);
+  const erase = store.profileDb.transaction(() => {
+    const vectors = store.privacyStmts.deleteVectorsByStudent.run(exactStudentId).changes;
+    const profiles = store.profileStmts.deleteByStudent.run(exactStudentId).changes;
+    return { profiles, vectors };
+  });
+  const deletedRows = erase();
+  return {
+    deleted: true,
+    studentId: exactStudentId,
+    deletedRows,
+  };
 }

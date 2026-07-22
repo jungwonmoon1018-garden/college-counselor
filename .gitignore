@@ -9,11 +9,14 @@
 
 # Builds
 **/dist/
+backend/public/
 **/bin/
 **/obj/
 desktop/release/
 frontend/playwright-report/
 frontend/test-results/
+/playwright-report/
+/test-results/
 
 # Editor / local tooling
 .claude/launch.json
@@ -21,6 +24,7 @@ frontend/test-results/
 # Environment / secrets
 **/.env
 **/.env.local
+**/.env.web
 **/.env.bak-*
 **/.env.tmp-*
 *.enc.json

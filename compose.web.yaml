@@ -1,0 +1,56 @@
+name: college-counselor
+
+services:
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - .env.web
+    environment:
+      NODE_ENV: production
+      WEB_DEPLOYMENT: "1"
+      HOST: 0.0.0.0
+      PORT: "3001"
+      DATA_DIR: /var/lib/college-counselor
+      TRUST_PROXY: "1"
+    expose:
+      - "3001"
+    volumes:
+      - counselor-data:/var/lib/college-counselor
+    networks:
+      - web-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN in .env.web}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - web-network
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  counselor-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  web-network:

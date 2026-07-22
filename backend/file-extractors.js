@@ -10,7 +10,17 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import { createRequire } from "node:module";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 const require = createRequire(import.meta.url);
+
+const TESSERACT_CACHE_PATH = process.env.TESSERACT_CACHE_PATH || path.join(os.tmpdir(), "college-counselor-tesseract");
+
+function ensureTesseractCache() {
+  fs.mkdirSync(TESSERACT_CACHE_PATH, { recursive: true });
+  return TESSERACT_CACHE_PATH;
+}
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 export const MAX_EXTRACTED_CHARS = 50_000;
@@ -52,27 +62,55 @@ export async function extractPlainText(input) {
 }
 
 // ─── PDF ────────────────────────────────────────────────────
-let _pdfParseRef = null;
-async function loadPdfParse() {
-  if (_pdfParseRef) return _pdfParseRef;
-  // pdf-parse ships a CommonJS index that runs a debug self-test when
-  // `require.main === module`; calling via createRequire avoids that path.
-  _pdfParseRef = require("pdf-parse");
-  return _pdfParseRef;
+const PDF_TEXT_PAGE_LIMIT = 100;
+let _pdfJsRef = null;
+async function loadPdfJs() {
+  if (_pdfJsRef) return _pdfJsRef;
+  _pdfJsRef = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  return _pdfJsRef;
 }
 
 export async function extractPDF(input) {
   const buf = asBuffer(input);
+  let document = null;
   try {
-    const pdfParse = await loadPdfParse();
-    const result = await pdfParse(buf);
+    const pdfJs = await loadPdfJs();
+    document = await pdfJs.getDocument({
+      data: new Uint8Array(buf),
+      disableWorker: true,
+      verbosity: 0,
+    }).promise;
+    const pageLimit = Math.min(document.numPages, PDF_TEXT_PAGE_LIMIT);
+    const pages = [];
+    let extractedChars = 0;
+    let stoppedForTextBudget = false;
+    for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item) => `${String(item?.str || "")}${item?.hasEOL ? "\n" : " "}`)
+        .join("")
+        .trim();
+      pages.push(text);
+      extractedChars += text.length;
+      page.cleanup?.();
+      if (extractedChars > MAX_EXTRACTED_CHARS) {
+        stoppedForTextBudget = pageNumber < document.numPages;
+        break;
+      }
+    }
+    const truncatedPages = document.numPages > pageLimit || stoppedForTextBudget;
     return {
-      text: String(result?.text || ""),
-      pageCount: Number(result?.numpages || 0) || null,
-      warning: null,
+      text: pages.join("\n\n"),
+      pageCount: document.numPages,
+      warning: truncatedPages
+        ? `PDF extraction stopped at the ${PDF_TEXT_PAGE_LIMIT}-page/50,000-character safety limit.`
+        : null,
     };
   } catch (err) {
     throw new ExtractionError("pdf_parse_failed", `PDF extraction failed: ${err.message}`, err);
+  } finally {
+    if (document) await document.destroy().catch(() => {});
   }
 }
 
@@ -108,13 +146,6 @@ async function loadTesseract() {
   return _tesseractRef;
 }
 
-let _pdfJsRef = null;
-async function loadPdfJs() {
-  if (_pdfJsRef) return _pdfJsRef;
-  _pdfJsRef = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  return _pdfJsRef;
-}
-
 let _canvasRef = null;
 async function loadCanvas() {
   if (_canvasRef) return _canvasRef;
@@ -127,7 +158,10 @@ export async function extractImage(input, { timeoutMs = 30_000, languages = "eng
   let timer;
   try {
     const tesseract = await loadTesseract();
-    const recognizePromise = tesseract.recognize(buf, languages, { logger: () => {} });
+    const recognizePromise = tesseract.recognize(buf, languages, {
+      logger: () => {},
+      cachePath: ensureTesseractCache(),
+    });
     const text = await new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(new ExtractionError("ocr_timeout", `OCR timed out after ${timeoutMs}ms`)), timeoutMs);
       recognizePromise

@@ -39,13 +39,9 @@ test("extractPlainText strips BOM", async () => {
 });
 
 // ─── PDF ───
-// pdf-parse ships a webpack-bundled pdf.js v1.10.100 (2020-vintage) that
-// has a known incompatibility with Node ≥ 20's built-in --test runner:
-// every PDF parse hits a spurious "bad XRef entry" error. Outside the test
-// runner (server runtime, standalone node invocation) extraction works
-// correctly, so we gate the happy-path test behind RUN_PDF_TESTS=1 and
-// verify the code path manually when running the server.
-test("extractPDF pulls text from a valid PDF", { skip: !process.env.RUN_PDF_TESTS }, async () => {
+// The production path uses the same modern PDF.js build under Node's test
+// runner, so this is part of the default deployment gate.
+test("extractPDF pulls text from a valid PDF", async () => {
   const pdfBuf = fs.readFileSync(path.join(FIXTURES, "hello.pdf"));
   const out = await extractPDF(pdfBuf);
   assert.ok(out.text.includes("Hello"));
@@ -175,7 +171,10 @@ test("extractDOCX throws ExtractionError on garbage input", async () => {
 
 // ─── Image OCR (opt-in, slow) ───
 test("extractImage handles a 1x1 PNG without throwing", { skip: !process.env.RUN_OCR_TESTS }, async () => {
-  const png = fs.readFileSync(path.join(FIXTURES, "tiny.png"));
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
   const out = await extractImage(png, { languages: "eng", timeoutMs: 60_000 });
   // 1x1 transparent PNG has nothing to OCR. We just want to ensure it
   // does not throw and returns empty-ish text.

@@ -52,6 +52,461 @@ jobs:
       - run: npm run build
       - run: npm audit --audit-level=high
 
+  web:
+    name: Private web profile
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - run: npm ci --omit=dev
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - name: Build private web bundle
+        run: npm run build:web
+      - name: Smoke-test private web runtime
+        run: npm run smoke:web
+      - name: Build and smoke-test Linux container
+        shell: bash
+        run: |
+          docker --version
+          docker compose version
+          encryption_key=$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
+          simulation_token=$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
+          storage_salt=$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
+          registration_code=$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
+          # Use the exact service env_file path from compose.web.yaml so this
+          # validates the checked-in deployment contract, not only interpolation.
+          ci_env="$GITHUB_WORKSPACE/.env.web"
+          umask 077
+          printf '%s\n' \
+            'PUBLIC_DOMAIN=ci.local.test' \
+            'PUBLIC_ORIGIN=https://ci.local.test' \
+            "ENCRYPTION_KEY=$encryption_key" \
+            "SIM_INTERNAL_TOKEN=$simulation_token" \
+            "STUDENT_STORAGE_SALT=$storage_salt" \
+            "REGISTRATION_ACCESS_CODE=$registration_code" \
+            'OPENROUTER_API_KEY=' \
+            'SCORECARD_API_KEY=' \
+            'RETENTION_MODE=consumer' \
+            'CDS_DAILY_REFRESH=0' \
+            'AUTO_REFRESH_CDS=0' \
+            'ENABLE_DOMAIN_MONITOR=0' > "$ci_env"
+
+          docker compose --env-file "$ci_env" -f compose.web.yaml config --quiet
+          docker run --rm \
+            --entrypoint caddy \
+            --env PUBLIC_DOMAIN=ci.local.test \
+            --volume "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+          docker build --tag college-counselor:web-ci .
+          docker run --detach --name college-counselor-web-ci \
+            --publish 127.0.0.1:3101:3001 \
+            --env NODE_ENV=production \
+            --env WEB_DEPLOYMENT=1 \
+            --env HOST=0.0.0.0 \
+            --env PORT=3001 \
+            --env TRUST_PROXY=1 \
+            --env PUBLIC_DOMAIN=ci.local.test \
+            --env PUBLIC_ORIGIN=https://ci.local.test \
+            --env "ENCRYPTION_KEY=$encryption_key" \
+            --env "SIM_INTERNAL_TOKEN=$simulation_token" \
+            --env "STUDENT_STORAGE_SALT=$storage_salt" \
+            --env "REGISTRATION_ACCESS_CODE=$registration_code" \
+            --env OPENROUTER_API_KEY= \
+            --env SCORECARD_API_KEY= \
+            --env CDS_DAILY_REFRESH=0 \
+            --env AUTO_REFRESH_CDS=0 \
+            --env ENABLE_DOMAIN_MONITOR=0 \
+            college-counselor:web-ci
+
+          ready=false
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent --show-error http://127.0.0.1:3101/api/ready >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            docker logs college-counselor-web-ci
+            exit 1
+          fi
+
+          curl --fail --silent --show-error http://127.0.0.1:3101/ >/dev/null
+          admin_status=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3101/admin.html)
+          test "$admin_status" = "404"
+      - name: Remove CI web container
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force college-counselor-web-ci >/dev/null 2>&1 || true
+          rm -f "$GITHUB_WORKSPACE/.env.web"
+
+  saas:
+    name: Multi-tenant SaaS profile
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+            frontend/package-lock.json
+      - run: npm ci
+      - run: npm ci --omit=dev
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit chrome msedge
+      - name: Build SaaS bundle
+        run: npm run build:saas
+      - name: Smoke-test multi-tenant SaaS runtime
+        run: npm run smoke:saas
+      - name: Test SaaS browser compatibility (Chromium, Chrome, Edge, Firefox, WebKit)
+        run: npm run smoke:browsers:saas
+      - name: Upload SaaS browser report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: saas-browser-report
+          path: |
+            playwright-report/
+            test-results/saas-browser/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Validate SaaS deployment and Linux container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker --version
+          docker compose version
+
+          secret() {
+            node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))"
+          }
+
+          encryption_key=$(secret)
+          simulation_token=$(secret)
+          storage_salt=$(secret)
+          email_pepper=$(secret)
+          provisioning_token=$(secret)
+          owner_temp_password=$(secret)
+          owner_final_password=$(secret)
+          ci_env="$RUNNER_TEMP/college-counselor-saas.env"
+          compose_json="$RUNNER_TEMP/college-counselor-saas-compose.json"
+          litestream_json="$RUNNER_TEMP/college-counselor-saas-litestream.json"
+          umask 077
+          printf '%s\n' \
+            'PUBLIC_DOMAIN=saas-ci.local.test' \
+            'PUBLIC_ORIGIN=https://saas-ci.local.test' \
+            'INVITE_BASE_URL=https://saas-ci.local.test' \
+            "ENCRYPTION_KEY=$encryption_key" \
+            "SIM_INTERNAL_TOKEN=$simulation_token" \
+            "STUDENT_STORAGE_SALT=$storage_salt" \
+            "SAAS_EMAIL_PEPPER=$email_pepper" \
+            "SAAS_PROVISIONING_TOKEN=$provisioning_token" \
+            'RESEND_API_KEY=re_ci_only_not_used' \
+            'EMAIL_FROM="College Counselor CI <ci@saas-ci.local.test>"' \
+            'OPENROUTER_API_KEY=ci-only-not-used' \
+            'SCORECARD_API_KEY=' \
+            'RETENTION_MODE=institutional' \
+            'SAAS_GUARDIAN_CONSENT_REQUIRED=1' \
+            'SAAS_POLICY_VERSION=2026.1' \
+            'SAAS_INVITE_TTL_HOURS=72' \
+            'SAAS_SESSION_IDLE_MINUTES=15' \
+            'SAAS_SESSION_ABSOLUTE_HOURS=168' \
+            'SAAS_PASSWORD_RESET_TTL_MINUTES=30' \
+            'SAAS_STUDENT_UPLOAD_QUOTA_MB=100' \
+            'SAAS_TENANT_UPLOAD_QUOTA_MB=2048' \
+            'SAAS_MIN_FREE_STORAGE_MB=64' \
+            'CDS_DAILY_REFRESH=0' \
+            'AUTO_REFRESH_CDS=0' \
+            'ENABLE_DOMAIN_MONITOR=0' \
+            'LITESTREAM_ACCESS_KEY_ID=ci-bucket-access-key' \
+            'LITESTREAM_SECRET_ACCESS_KEY=ci-bucket-secret-key' \
+            'LITESTREAM_S3_BUCKET=ci-private-backup-bucket' \
+            'LITESTREAM_S3_REGION=us-east-1' \
+            'LITESTREAM_S3_ENDPOINT=' \
+            'LITESTREAM_S3_PREFIX=college-counselor/ci' \
+            'LITESTREAM_HEARTBEAT_URL=' \
+            'LITESTREAM_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' \
+            > "$ci_env"
+
+          docker compose \
+            --env-file "$ci_env" \
+            -f compose.saas.yaml \
+            --profile backup \
+            config --quiet
+          docker compose \
+            --env-file "$ci_env" \
+            -f compose.saas.yaml \
+            --profile backup \
+            config --format json > "$compose_json"
+
+          node -e '
+            const fs = require("node:fs");
+            const model = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const assert = (value, message) => { if (!value) throw new Error(message); };
+            const app = model.services?.app;
+            const caddy = model.services?.caddy;
+            const backup = model.services?.litestream;
+            assert(app?.build?.args?.FRONTEND_BUILD === "build:saas", "Compose does not build the SaaS frontend.");
+            assert(JSON.stringify(app.command) === JSON.stringify(["node", "start-saas.mjs"]), "Compose does not use the SaaS launcher.");
+            assert(app.environment?.SAAS_DEPLOYMENT === "1", "SAAS_DEPLOYMENT is not enabled.");
+            assert(app.environment?.RETENTION_MODE === "institutional", "Institutional retention is not enforced.");
+            assert(app.environment?.SAAS_GUARDIAN_CONSENT_REQUIRED === "1", "Guardian consent is not required.");
+            assert(app.environment?.SAAS_SESSION_IDLE_MINUTES === "15", "Server-side session inactivity lifetime is not fixed at 15 minutes.");
+            assert(app.environment?.SAAS_PASSWORD_RESET_TTL_MINUTES === "30", "Password-reset lifetime is not fixed at 30 minutes.");
+            assert(app.environment?.SAAS_STUDENT_UPLOAD_QUOTA_MB === "100", "Student upload quota is not enforced.");
+            assert(app.environment?.SAAS_TENANT_UPLOAD_QUOTA_MB === "2048", "Tenant upload quota is not enforced.");
+            assert(app.environment?.SAAS_MIN_FREE_STORAGE_MB === "64", "CI storage reserve is not enforced.");
+            assert(app.environment?.SIM_DATA_DIR === "/tmp/simulations", "Simulation state is not isolated on the ephemeral tmpfs.");
+            assert(app.read_only === true, "Application root filesystem is writable.");
+            assert(app.deploy?.replicas === 1, "Application is not fixed at one replica.");
+            assert(!app.ports, "Application port is published directly.");
+            assert(model.volumes?.["counselor-data"] !== undefined, "Persistent data volume is missing.");
+            assert(caddy?.image === "caddy:2.11.4-alpine", "Unexpected Caddy image.");
+            assert(backup?.image === "litestream/litestream:0.5.14-scratch", "Unexpected Litestream image.");
+            assert(!Object.hasOwn(app.environment || {}, "LITESTREAM_SECRET_ACCESS_KEY"), "Backup secret leaked to app.");
+            assert(!Object.hasOwn(backup.environment || {}, "ENCRYPTION_KEY"), "Application key leaked to backup sidecar.");
+          ' "$compose_json"
+
+          # Parse the embedded configuration with the exact pinned Litestream
+          # binary. This catches fields that Compose itself treats as opaque.
+          docker compose \
+            --env-file "$ci_env" \
+            -f compose.saas.yaml \
+            --profile backup \
+            run --rm --no-deps litestream \
+            databases -config /etc/litestream.yml -json > "$litestream_json"
+          node -e '
+            const fs = require("node:fs");
+            const databases = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const expected = new Set([
+              "/var/lib/college-counselor/counselor.db",
+              "/var/lib/college-counselor/pii-vault.db",
+              "/var/lib/college-counselor/vectors.db",
+            ]);
+            if (databases.length !== expected.size) throw new Error("Litestream database count is incorrect.");
+            for (const database of databases) {
+              if (!expected.delete(database.path)) throw new Error(`Unexpected Litestream database: ${database.path}`);
+              if (database.replica !== "s3") throw new Error(`Unexpected replica type: ${database.replica}`);
+            }
+            if (expected.size) throw new Error("A required SQLite database is not replicated.");
+          ' "$litestream_json"
+
+          node -e '
+            const fs = require("node:fs");
+            const config = fs.readFileSync("Caddyfile.saas", "utf8");
+            for (const key of ["invite", "reset", "token"]) {
+              const directive = new RegExp(`\\breplace\\s+${key}\\s+REDACTED\\b`);
+              if (!directive.test(config)) throw new Error(`Caddy does not redact the ${key} query credential.`);
+            }
+          '
+          docker run --rm \
+            --entrypoint caddy \
+            --env PUBLIC_DOMAIN=saas-ci.local.test \
+            --volume "$PWD/Caddyfile.saas:/etc/caddy/Caddyfile:ro" \
+            caddy:2.11.4-alpine \
+            validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+          docker build \
+            --build-arg FRONTEND_BUILD=build:saas \
+            --tag college-counselor:saas-ci \
+            .
+
+          docker run --rm --entrypoint node college-counselor:saas-ci -e '
+            const fs = require("node:fs");
+            const root = "/app/backend/public";
+            if (!fs.existsSync(`${root}/index.html`)) throw new Error("Student entry is missing.");
+            if (!fs.existsSync(`${root}/organization.html`)) throw new Error("Organization entry is missing.");
+            if (fs.existsSync(`${root}/admin.html`)) throw new Error("Desktop administrator entry leaked into SaaS.");
+          '
+
+          docker volume create college-counselor-saas-ci-data >/dev/null
+          docker run --detach \
+            --name college-counselor-saas-ci \
+            --init \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+            --volume college-counselor-saas-ci-data:/var/lib/college-counselor \
+            --publish 127.0.0.1:3201:3001 \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL \
+            --pids-limit 256 \
+            --memory 2g \
+            --cpus 2.0 \
+            --env NODE_ENV=production \
+            --env WEB_DEPLOYMENT=1 \
+            --env SAAS_DEPLOYMENT=1 \
+            --env HOST=0.0.0.0 \
+            --env PORT=3001 \
+            --env TRUST_PROXY=1 \
+            --env DATA_DIR=/var/lib/college-counselor \
+            --env SIM_DATA_DIR=/tmp/simulations \
+            --env HOME=/tmp \
+            --env TMPDIR=/tmp \
+            --env XDG_CACHE_HOME=/tmp/.cache \
+            --env TESSERACT_CACHE_PATH=/tmp/tesseract \
+            --env PUBLIC_DOMAIN=saas-ci.local.test \
+            --env PUBLIC_ORIGIN=https://saas-ci.local.test \
+            --env INVITE_BASE_URL=https://saas-ci.local.test \
+            --env "ENCRYPTION_KEY=$encryption_key" \
+            --env "SIM_INTERNAL_TOKEN=$simulation_token" \
+            --env "STUDENT_STORAGE_SALT=$storage_salt" \
+            --env "SAAS_EMAIL_PEPPER=$email_pepper" \
+            --env "SAAS_PROVISIONING_TOKEN=$provisioning_token" \
+            --env RESEND_API_KEY=re_ci_only_not_used \
+            --env 'EMAIL_FROM=College Counselor CI <ci@saas-ci.local.test>' \
+            --env OPENROUTER_API_KEY= \
+            --env SCORECARD_API_KEY= \
+            --env RETENTION_MODE=institutional \
+            --env SAAS_GUARDIAN_CONSENT_REQUIRED=1 \
+            --env SAAS_POLICY_VERSION=2026.1 \
+            --env SAAS_INVITE_TTL_HOURS=72 \
+            --env SAAS_SESSION_IDLE_MINUTES=15 \
+            --env SAAS_SESSION_ABSOLUTE_HOURS=168 \
+            --env SAAS_PASSWORD_RESET_TTL_MINUTES=30 \
+            --env SAAS_STUDENT_UPLOAD_QUOTA_MB=100 \
+            --env SAAS_TENANT_UPLOAD_QUOTA_MB=2048 \
+            --env SAAS_MIN_FREE_STORAGE_MB=64 \
+            --env CDS_DAILY_REFRESH=0 \
+            --env AUTO_REFRESH_CDS=0 \
+            --env ENABLE_DOMAIN_MONITOR=0 \
+            college-counselor:saas-ci \
+            node start-saas.mjs
+
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent --show-error http://127.0.0.1:3201/api/ready >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            docker logs college-counselor-saas-ci
+            exit 1
+          fi
+
+          runtime_payload=$(curl --fail --silent --show-error http://127.0.0.1:3201/api/runtime-config)
+          node -e '
+            const runtime = JSON.parse(process.argv[1]);
+            if (runtime.deployment !== "saas") throw new Error("Container is not in SaaS mode.");
+            if (runtime.invitationRequired !== true) throw new Error("Container permits open registration.");
+            if (runtime.registrationAccessCodeRequired !== false) throw new Error("Private-web registration leaked into SaaS.");
+            if (runtime.organizationPortalPath !== "/organization.html") throw new Error("Organization portal is not advertised.");
+          ' "$runtime_payload"
+
+          curl --fail --silent --show-error http://127.0.0.1:3201/ >/dev/null
+          curl --fail --silent --show-error http://127.0.0.1:3201/organization.html >/dev/null
+          admin_status=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3201/admin.html)
+          test "$admin_status" = "404"
+          registration_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: https://saas-ci.local.test' \
+            --data '{"email":"uninvited@saas-ci.local.test","password":"not accepted without invitation","name":"Uninvited Student","grade":11}' \
+            http://127.0.0.1:3201/api/students/register)
+          test "$registration_status" = "403"
+
+          # The privileged bootstrap creates an active owner with a temporary
+          # password. Prove the owner can immediately rotate it and that the
+          # old credential stops working before invitations are created.
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $provisioning_token" \
+            --data "{\"name\":\"CI School\",\"slug\":\"ci-school\",\"ownerEmail\":\"owner@saas-ci.local.test\",\"ownerPassword\":\"$owner_temp_password\"}" \
+            http://127.0.0.1:3201/api/platform/organizations >/dev/null
+          owner_cookie="$RUNNER_TEMP/college-counselor-saas-owner-cookie.txt"
+          owner_login=$(curl --fail --silent --show-error \
+            --request POST \
+            --cookie-jar "$owner_cookie" \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: https://saas-ci.local.test' \
+            --data "{\"email\":\"owner@saas-ci.local.test\",\"password\":\"$owner_temp_password\",\"organizationSlug\":\"ci-school\"}" \
+            http://127.0.0.1:3201/api/organization/auth)
+          owner_csrf=$(node -e '
+            const payload = JSON.parse(process.argv[1]);
+            if (!payload.csrfToken) throw new Error("Owner login omitted CSRF proof.");
+            process.stdout.write(payload.csrfToken);
+          ' "$owner_login")
+          owner_session=$(awk '$6 == "cc_saas_session" { print $7 }' "$owner_cookie")
+          test -n "$owner_session"
+          curl --fail --silent --show-error \
+            --request PUT \
+            --header "Cookie: cc_saas_session=$owner_session" \
+            --cookie-jar "$owner_cookie" \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: https://saas-ci.local.test' \
+            --header "X-CSRF-Token: $owner_csrf" \
+            --data "{\"currentPassword\":\"$owner_temp_password\",\"newPassword\":\"$owner_final_password\"}" \
+            http://127.0.0.1:3201/api/organization/password >/dev/null
+          old_password_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: https://saas-ci.local.test' \
+            --data "{\"email\":\"owner@saas-ci.local.test\",\"password\":\"$owner_temp_password\",\"organizationSlug\":\"ci-school\"}" \
+            http://127.0.0.1:3201/api/organization/auth)
+          test "$old_password_status" = "401"
+          new_password_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: https://saas-ci.local.test' \
+            --data "{\"email\":\"owner@saas-ci.local.test\",\"password\":\"$owner_final_password\",\"organizationSlug\":\"ci-school\"}" \
+            http://127.0.0.1:3201/api/organization/auth)
+          test "$new_password_status" = "200"
+
+          test "$(docker inspect --format '{{.Config.User}}' college-counselor-saas-ci)" = "node"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' college-counselor-saas-ci)" = "true"
+
+          healthy=false
+          for attempt in $(seq 1 75); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' college-counselor-saas-ci)" = "healthy" ]; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$healthy" != true ]; then
+            docker inspect --format '{{json .State.Health}}' college-counselor-saas-ci
+            docker logs college-counselor-saas-ci
+            exit 1
+          fi
+      - name: Remove CI SaaS resources
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force college-counselor-saas-ci >/dev/null 2>&1 || true
+          docker volume rm college-counselor-saas-ci-data >/dev/null 2>&1 || true
+          if [ -f "$RUNNER_TEMP/college-counselor-saas.env" ]; then
+            docker compose \
+              --env-file "$RUNNER_TEMP/college-counselor-saas.env" \
+              -f compose.saas.yaml \
+              --profile backup \
+              down --volumes --remove-orphans >/dev/null 2>&1 || true
+          fi
+          rm -f \
+            "$RUNNER_TEMP/college-counselor-saas.env" \
+            "$RUNNER_TEMP/college-counselor-saas-compose.json" \
+            "$RUNNER_TEMP/college-counselor-saas-litestream.json" \
+            "$RUNNER_TEMP/college-counselor-saas-owner-cookie.txt"
+
   desktop:
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

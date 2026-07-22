@@ -7,19 +7,50 @@ import {
   createSimulation,
   getSimulation,
   deleteSimulation,
-  cleanupExpiredSimulations,
+  exportStudentSimulations,
+  deleteAllStudentSimulations,
 } from "./simulation-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const SIM_PORT = parseInt(process.env.SIM_PORT || "3002", 10);
+const SIM_PORT_RAW = String(process.env.SIM_PORT || "3002").trim();
+const SIM_PORT = /^(0|[1-9]\d*)$/.test(SIM_PORT_RAW) ? Number(SIM_PORT_RAW) : NaN;
 const DATA_DIR = process.env.SIM_DATA_DIR || process.env.DATA_DIR || path.join(__dirname, "data");
 const SIM_TTL_DAYS = parseInt(process.env.SIM_TTL_DAYS || "7", 10);
 const SIM_INTERNAL_TOKEN = process.env.SIM_INTERNAL_TOKEN || "local-simulation-sidecar";
+const WEB_DEPLOYMENT = process.env.WEB_DEPLOYMENT === "1";
+
+function hasRepeatedPattern(value, maxPatternLength = 16) {
+  const secret = String(value || "");
+  const largestPattern = Math.min(maxPatternLength, Math.floor(secret.length / 2));
+  for (let length = 1; length <= largestPattern; length += 1) {
+    if (secret.length % length !== 0) continue;
+    const pattern = secret.slice(0, length);
+    if (pattern.repeat(secret.length / length) === secret) return true;
+  }
+  return false;
+}
+
+function isStrongSecret(value) {
+  const secret = String(value || "");
+  return Buffer.byteLength(secret, "utf8") >= 32
+    && Buffer.byteLength(secret, "utf8") <= 512
+    && new Set(secret).size >= 8
+    && !hasRepeatedPattern(secret)
+    && !/^(change[-_ ]?me|replace[-_ ]?with|local-simulation-sidecar)/i.test(secret);
+}
 
 if (process.env.NODE_ENV === "production" && !process.env.SIM_INTERNAL_TOKEN) {
   console.error("FATAL: SIM_INTERNAL_TOKEN is required in production for the simulation sidecar.");
+  process.exit(1);
+}
+if (!Number.isSafeInteger(SIM_PORT) || SIM_PORT < 1 || SIM_PORT > 65535) {
+  console.error("FATAL: SIM_PORT must be an integer from 1 through 65535.");
+  process.exit(1);
+}
+if (process.env.NODE_ENV === "production" && WEB_DEPLOYMENT && !isStrongSecret(process.env.SIM_INTERNAL_TOKEN)) {
+  console.error("FATAL: SIM_INTERNAL_TOKEN must be a non-placeholder secret of at least 32 bytes.");
   process.exit(1);
 }
 
@@ -40,14 +71,14 @@ function requireInternalToken(req, res, next) {
 }
 
 app.get("/health", (_req, res) => {
-  const cleanup = cleanupExpiredSimulations(store);
-  res.json({
-    status: "ok",
-    simulation: true,
-    profileDb: path.basename(store.profilePath),
-    vectorDb: path.basename(store.vectorPath),
-    cleanup,
-  });
+  try {
+    const profilesReady = store.profileDb.prepare("SELECT 1 AS ok").get()?.ok === 1;
+    const vectorsReady = store.vectorDb.prepare("SELECT 1 AS ok").get()?.ok === 1;
+    if (!profilesReady || !vectorsReady) return res.status(503).json({ status: "not_ready" });
+    return res.json({ status: "ok" });
+  } catch {
+    return res.status(503).json({ status: "not_ready" });
+  }
 });
 
 app.post("/simulations", requireInternalToken, async (req, res) => {
@@ -56,6 +87,22 @@ app.post("/simulations", requireInternalToken, async (req, res) => {
     res.status(201).json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || "Simulation creation failed" });
+  }
+});
+
+app.post("/internal/simulations/export", requireInternalToken, (req, res) => {
+  try {
+    res.json(exportStudentSimulations(store, req.body?.studentId));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || "Simulation export failed" });
+  }
+});
+
+app.post("/internal/simulations/delete-all", requireInternalToken, (req, res) => {
+  try {
+    res.json(deleteAllStudentSimulations(store, req.body?.studentId));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || "Simulation deletion failed" });
   }
 });
 

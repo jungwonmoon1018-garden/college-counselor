@@ -1,0 +1,25 @@
+{
+  "name": "college-counselor",
+  "private": true,
+  "version": "1.0.0",
+  "description": "College Counselor monorepo",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build:web": "npm --prefix frontend run build:web && node scripts/prepare-web.mjs",
+    "build:saas": "npm --prefix frontend run build:saas && node scripts/prepare-web.mjs",
+    "start:web": "npm --prefix backend run start:web",
+    "start:saas": "npm --prefix backend run start:saas",
+    "smoke:web": "node scripts/smoke-web.mjs",
+    "smoke:saas": "node scripts/smoke-saas.mjs",
+    "smoke:browsers:saas": "npm run build:saas && playwright test --config=playwright.saas.config.mjs",
+    "test": "npm --prefix backend test && npm --prefix frontend test",
+    "lint": "npm --prefix backend run lint",
+    "check": "npm run lint && npm test && npm run build:web && npm run smoke:web",
+    "check:saas": "npm run lint && npm test && npm run build:saas && npm run smoke:saas"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

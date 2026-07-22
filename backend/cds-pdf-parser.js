@@ -18,6 +18,8 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import fs from "fs";
+import os from "node:os";
+import path from "node:path";
 // pdfjs-dist v4 ships ESM only. Import the legacy build which is more
 // compatible with Node (no DOM dependencies).
 const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -135,7 +137,9 @@ export async function extractItemsViaOCR(pdfPath, maxPages = 25) {
   const recognizeOpts = {
     logger: () => {},
     tessedit_pageseg_mode: "6",
+    cachePath: process.env.TESSERACT_CACHE_PATH || path.join(os.tmpdir(), "college-counselor-tesseract"),
   };
+  fs.mkdirSync(recognizeOpts.cachePath, { recursive: true });
 
   for (let p = 1; p <= pagesToRead; p++) {
     const page = await pdf.getPage(p);

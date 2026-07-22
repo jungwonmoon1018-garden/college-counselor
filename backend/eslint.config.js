@@ -24,6 +24,7 @@ export default [
       "models/**",
       "node_modules/**",
       "graphify-out/**",
+      "public/**",
     ],
   },
   {
