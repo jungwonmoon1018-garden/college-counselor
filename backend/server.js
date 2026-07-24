@@ -21,7 +21,10 @@ import dotenv from "dotenv";
 // actually fire. Load the .env next to THIS file (not the process CWD) so the
 // server boots correctly regardless of where it's launched from — e.g. a
 // repo-root preview/launcher config, not only `cd backend && node server.js`.
-dotenv.config({ override: false, path: fileURLToPath(new URL(".env", import.meta.url)) });
+// quiet: true — dotenv@17 otherwise prints a randomized third-party ad "tip"
+// (see node_modules/dotenv/lib/main.js TIPS) on every boot; this app's own
+// logging discipline is metadata-only, no unsolicited external URLs in logs.
+dotenv.config({ override: false, quiet: true, path: fileURLToPath(new URL(".env", import.meta.url)) });
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";

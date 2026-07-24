@@ -14,6 +14,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import dns from "node:dns/promises";
+import net from "node:net";
 import { fetchRepositoryIndex, findBestRepositoryEntry, selectPreferredCdsLink, parseCdsRepositoryIndex } from "./cds-search.js";
 import { parseCDSPositional } from "./cds-pdf-parser.js";
 import { persistAndValidate } from "./cds-validator.js";
@@ -117,6 +119,73 @@ export function resolveDownloadURL(url) {
   return url;
 }
 
+// SSRF guard for downloadCDS: link targets originate from a scraped
+// third-party repository index (cds-search.js) merged with the operator
+// index, not from any student/attacker-reachable input — but a compromised
+// or careless upstream source could still point at an internal address, so
+// resolve-and-check the actual destination IP (not just the hostname string,
+// which DNS could rebind) before every fetch AND every redirect hop.
+const BLOCKED_IPV4_RANGES = [
+  [/^0\./, "unspecified"],
+  [/^10\./, "private"],
+  [/^127\./, "loopback"],
+  [/^169\.254\./, "link-local"],
+  [/^172\.(1[6-9]|2\d|3[01])\./, "private"],
+  [/^192\.168\./, "private"],
+  [/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, "carrier-grade-nat"],
+];
+
+export function isBlockedIp(address, family) {
+  if (family === 6 || net.isIPv6(address)) {
+    const a = address.toLowerCase();
+    if (a === "::1" || a === "::") return true;
+    if (a.startsWith("::ffff:")) return isBlockedIp(a.slice(7), 4);
+    if (/^fe80:/.test(a)) return true; // link-local
+    if (/^f[cd][0-9a-f]{2}:/.test(a)) return true; // unique local (fc00::/7)
+    return false;
+  }
+  return BLOCKED_IPV4_RANGES.some(([re]) => re.test(address));
+}
+
+export async function assertSafeFetchTarget(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Refusing to fetch a malformed URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Refusing to fetch a non-http(s) URL: ${rawUrl}`);
+  }
+  let addresses;
+  try {
+    addresses = await dns.lookup(parsed.hostname, { all: true, verbatim: true });
+  } catch {
+    throw new Error(`Refusing to fetch an unresolvable host: ${parsed.hostname}`);
+  }
+  if (addresses.length === 0 || addresses.some((a) => isBlockedIp(a.address, a.family))) {
+    throw new Error(`Refusing to fetch a URL that resolves to a non-public address: ${parsed.hostname}`);
+  }
+  return parsed;
+}
+
+// fetch() with redirect:"follow" would otherwise let a validated first hop
+// redirect straight to an internal address. Follow manually and re-validate
+// every Location header the same way as the initial URL.
+async function safeFetch(rawUrl, options, maxRedirects = 5) {
+  let current = rawUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    await assertSafeFetchTarget(current);
+    const res = await fetch(current, { ...options, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+      current = new URL(res.headers.get("location"), current).toString();
+      continue;
+    }
+    return res;
+  }
+  throw new Error(`Too many redirects fetching ${rawUrl}`);
+}
+
 // Try one cycle's link: cache hit, else fetch + magic-byte sniff. Returns a
 // result object or throws (so the caller can fall back to an older cycle).
 async function tryDownloadCycle({ slug, name, yearKey, link, force }) {
@@ -134,7 +203,7 @@ async function tryDownloadCycle({ slug, name, yearKey, link, force }) {
     }
   }
 
-  const res = await fetch(downloadURL, { headers: BROWSER_HEADERS, redirect: "follow" });
+  const res = await safeFetch(downloadURL, { headers: BROWSER_HEADERS });
   if (!res.ok) throw new Error(`Download failed (${res.status}) for ${name} ${yearKey}`);
   const buf = Buffer.from(await res.arrayBuffer());
 

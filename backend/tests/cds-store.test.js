@@ -12,7 +12,7 @@ import {
   strictSchoolKey,
   schoolNamesCompatible,
 } from "../cds-store.js";
-import { resolveDownloadURL, unwrapGoogleRedirect } from "../cds-ingest-pipeline.js";
+import { resolveDownloadURL, unwrapGoogleRedirect, isBlockedIp, assertSafeFetchTarget } from "../cds-ingest-pipeline.js";
 
 function freshStmts() {
   const db = new Database(":memory:");
@@ -98,4 +98,29 @@ test("resolveDownloadURL unwraps Google redirect + Drive links", () => {
   assert.equal(resolveDownloadURL("https://x.edu/cds.pdf"), "https://x.edu/cds.pdf");
   // Sheets → xlsx export (then rejected downstream as non-PDF).
   assert.match(resolveDownloadURL("https://docs.google.com/spreadsheets/d/SHEET1/edit"), /export\?format=xlsx/);
+});
+
+test("isBlockedIp rejects loopback/private/link-local, allows public", () => {
+  assert.equal(isBlockedIp("127.0.0.1", 4), true);
+  assert.equal(isBlockedIp("10.0.0.5", 4), true);
+  assert.equal(isBlockedIp("172.16.0.1", 4), true);
+  assert.equal(isBlockedIp("172.31.255.255", 4), true);
+  assert.equal(isBlockedIp("172.32.0.1", 4), false); // just outside the 172.16/12 block
+  assert.equal(isBlockedIp("192.168.1.1", 4), true);
+  assert.equal(isBlockedIp("169.254.1.1", 4), true);
+  assert.equal(isBlockedIp("100.64.0.1", 4), true); // carrier-grade NAT
+  assert.equal(isBlockedIp("8.8.8.8", 4), false);
+  assert.equal(isBlockedIp("::1", 6), true);
+  assert.equal(isBlockedIp("::ffff:127.0.0.1", 6), true); // IPv4-mapped loopback
+  assert.equal(isBlockedIp("fe80::1", 6), true);
+  assert.equal(isBlockedIp("fd00::1", 6), true); // unique-local
+  assert.equal(isBlockedIp("2001:4860:4860::8888", 6), false);
+});
+
+test("assertSafeFetchTarget rejects malformed URLs, non-http(s) schemes, and loopback hosts", async () => {
+  await assert.rejects(() => assertSafeFetchTarget("file:///etc/passwd"), /non-http/);
+  await assert.rejects(() => assertSafeFetchTarget("ftp://internal.example/x"), /non-http/);
+  await assert.rejects(() => assertSafeFetchTarget("http://127.0.0.1/admin"), /non-public address/);
+  await assert.rejects(() => assertSafeFetchTarget("http://localhost:3001/api/health"), /non-public address/);
+  await assert.rejects(() => assertSafeFetchTarget("not a url"), /malformed/);
 });

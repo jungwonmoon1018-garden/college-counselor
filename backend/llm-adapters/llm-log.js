@@ -35,6 +35,10 @@ export function llmLog(tag, msg, fields) {
 }
 
 export function isLlmDebug() {
+  // Verbose model-path logging is a diagnostic aid, never a production
+  // posture — force it off in prod regardless of a stray LLM_DEBUG=1 in the
+  // deployment environment.
+  if (process.env.NODE_ENV === "production") return false;
   return process.env.LLM_DEBUG === "1";
 }
 
