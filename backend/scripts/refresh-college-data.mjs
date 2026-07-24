@@ -40,7 +40,7 @@ import { searchScorecard, getCollegeById } from "../college-scorecard.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
-dotenv.config({ path: path.join(PROJECT_ROOT, ".env"), override: true });
+dotenv.config({ path: path.join(PROJECT_ROOT, ".env"), override: true, quiet: true });
 
 function readArg(flag, fallback = null) {
   const i = process.argv.indexOf(flag);
