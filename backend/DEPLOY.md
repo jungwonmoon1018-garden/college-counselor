@@ -1,8 +1,11 @@
 # Desktop Release Guide
 
-College Counselor v1 is a local household desktop application. Remote web,
-school multi-tenant, Caddy, Docker, and public-internet deployments are outside
-the supported security model.
+This guide covers the local household desktop profile. The separate private,
+single-instance web profile is documented in [WEB-DEPLOY.md](../WEB-DEPLOY.md).
+The invitation-only organization SaaS profile is documented in
+[SAAS-PROD.md](../SAAS-PROD.md); it has its own tenancy, guardian-consent,
+cookie-session, backup, and release gates and must not be enabled by merely
+exposing a desktop/private-web process.
 
 ## Requirements
 

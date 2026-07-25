@@ -166,9 +166,7 @@ describe("GET /api/health", () => {
   it("returns status ok", async () => {
     const { status, data } = await req("GET", "/api/health");
     assert.equal(status, 200);
-    assert.equal(data.status, "ok");
-    assert.ok(data.timestamp);
-    assert.ok(typeof data.uptime === "number");
+    assert.deepEqual(data, { status: "ok" });
   });
 });
 
@@ -544,15 +542,7 @@ describe("GET /api/students/export", () => {
 });
 
 describe("POST /api/agents/orchestrate", () => {
-  // SKIPPED (pre-existing contract drift, not a regression from this PR):
-  // /api/agents/orchestrate now returns { routing, query:{raw,colleges},
-  // compliance:{fafsaGrounding,…} } (see buildOrchestration in
-  // orchestration-engine.js), but this test asserts an older/aspirational shape
-  // — route.intent, executionPlan.primaryAgent, compliance.piiMasking,
-  // query.masked, retrieval.structured/unstructured. It can't pass against the
-  // current endpoint for anyone. Re-enable once the response contract is
-  // reconciled. The SSN-blocking behavior is still covered by the test below.
-  it("routes a college-match query with masking and structured grounding", { skip: "orchestrate response contract drift — see comment" }, async () => {
+  it("routes a college-match query with masking and structured grounding", async () => {
     const { token } = await createStudentSession();
     const { status, data } = await req("POST", "/api/agents/orchestrate", {
       query: "Can I get into UMich Ross? My email is student@example.com.",
@@ -561,14 +551,15 @@ describe("POST /api/agents/orchestrate", () => {
     });
 
     assert.equal(status, 200);
-    assert.equal(data.route.intent, "college_match");
-    assert.equal(data.executionPlan.primaryAgent.id, "data_miner");
-    assert.equal(data.compliance.piiMasking.applied, true);
-    assert.match(data.query.masked, /STUDENT_EMAIL_01/);
-    assert.ok(Array.isArray(data.retrieval.structured.colleges));
-    assert.ok(data.retrieval.structured.colleges.some(c => c.name.includes("University of Michigan")));
-    assert.ok(Array.isArray(data.retrieval.unstructured.topDocuments));
-    assert.ok(data.retrieval.unstructured.topDocuments.length > 0);
+    assert.ok(data.routing?.classification);
+    assert.equal(data.compliance.piiHashedForProvider, true);
+    assert.ok(!data.query.raw.includes("student@example.com"));
+    assert.ok(Array.isArray(data.query.colleges));
+    assert.ok(data.query.colleges.some(c => c.name.includes("University of Michigan")));
+    assert.ok(Array.isArray(data.executionPlan.steps));
+    assert.ok(Array.isArray(data.evidence));
+    assert.ok(Array.isArray(data.verifiedFacts));
+    assert.equal(data._meta.deterministic, false);
   });
 
   it("blocks credential input (SSN) instead of processing it", async () => {
@@ -582,10 +573,7 @@ describe("POST /api/agents/orchestrate", () => {
     assert.equal(data.blocked, true);
   });
 
-  // SKIPPED (same pre-existing contract drift): asserts route.intent /
-  // executionPlan.primaryAgent / knowledgeGaps, which the current endpoint
-  // doesn't return. Re-enable once the orchestrate contract is reconciled.
-  it("routes FAFSA queries to the compliance officer and reports missing corpus honestly", { skip: "orchestrate response contract drift — see comment above" }, async () => {
+  it("answers FAFSA queries through the deterministic regulated path", async () => {
     const { token } = await createStudentSession({ majorInterest: "Engineering" });
     const { status, data } = await req("POST", "/api/agents/orchestrate", {
       query: "How will FAFSA affect need-based aid at MIT?",
@@ -594,33 +582,31 @@ describe("POST /api/agents/orchestrate", () => {
     });
 
     assert.equal(status, 200);
-    assert.equal(data.route.intent, "financial_aid");
-    assert.equal(data.executionPlan.primaryAgent.id, "compliance_officer");
-    assert.equal(data.compliance.fafsaGrounding.required, true);
-    assert.equal(data.compliance.fafsaGrounding.ready, false);
-    assert.ok(data.knowledgeGaps.includes("fafsa_corpus_missing"));
+    assert.equal(data._meta.deterministic, true);
+    assert.equal(data._meta.modelTier, "NONE");
+    assert.equal(data._meta.cost, "$0.00");
+    assert.ok(Array.isArray(data.verified_facts));
+    assert.ok(Array.isArray(data.claims));
+    assert.ok(data.ai_disclosure);
   });
 });
 
 describe("POST /api/mcp/admissions/query", () => {
-  // SKIPPED (pre-existing contract drift): the endpoint returns
-  // { operation, college, studentContext, evidence, source }, but this test
-  // asserts { server:"admissions-mcp", result:{ name, acceptanceRatePct } }.
-  // Mismatch predates this PR; re-enable once the MCP response is reconciled.
-  it("returns deterministic college snapshots for matched schools", { skip: "mcp response contract drift — see comment" }, async () => {
+  it("returns an authenticated evidence-backed student context", async () => {
     const { token } = await createStudentSession();
     const { status, data } = await req("POST", "/api/mcp/admissions/query", {
       operation: "college_snapshot",
-      query: "Need a grounded snapshot for UMich",
+      college: { name: "University of Michigan" },
     }, {
       Authorization: `Bearer ${token}`,
     });
 
     assert.equal(status, 200);
-    assert.equal(data.server, "admissions-mcp");
     assert.equal(data.operation, "college_snapshot");
-    assert.ok(data.result.name.includes("University of Michigan"));
-    assert.ok(typeof data.result.acceptanceRatePct === "number");
+    assert.equal(data.college.name, "University of Michigan");
+    assert.ok(data.studentContext);
+    assert.ok(Array.isArray(data.evidence));
+    assert.equal(data.source, "evidence_graph + fact_store");
   });
 });
 

@@ -189,6 +189,50 @@ async function clearSession() {
   } catch {}
 }
 
+// SaaS sessions live in an HttpOnly, SameSite cookie. The sentinel keeps the
+// existing request gates truthy without exposing a reusable credential to
+// JavaScript. CSRF material is intentionally memory-only.
+const COOKIE_SESSION_SENTINEL = "__cc_http_only_cookie__";
+
+function adoptServerSession(data = {}) {
+  const bearer = typeof data.token === "string" ? data.token : "";
+  window.__CC_SESSION_TOKEN__ = bearer || COOKIE_SESSION_SENTINEL;
+  window.__CC_CSRF_TOKEN__ = typeof data.csrfToken === "string" ? data.csrfToken : "";
+  return {
+    ok: true,
+    token: bearer || COOKIE_SESSION_SENTINEL,
+    studentId: data.studentId || data.student?.id || "",
+    recoveryCode: data.recoveryCode || "",
+    student: data.student || null,
+    organization: data.organization || null,
+    membershipStatus: data.membershipStatus || data.membership?.status || "active",
+    profileComplete: data.profileComplete === true,
+  };
+}
+
+// All authenticated student API calls share one cookie-aware header boundary.
+// SaaS uses an HttpOnly session cookie, so the in-memory sentinel must never be
+// serialized as a bearer credential. CSRF material remains memory-only and is
+// attached to every request (the server enforces it on mutating routes).
+function studentSessionHeaders(headers = {}, token = window.__CC_SESSION_TOKEN__) {
+  const next = { ...headers };
+  if (token && token !== COOKIE_SESSION_SENTINEL && !next.Authorization) {
+    next.Authorization = `Bearer ${token}`;
+  }
+  if (window.__CC_CSRF_TOKEN__ && !next["X-CSRF-Token"]) {
+    next["X-CSRF-Token"] = window.__CC_CSRF_TOKEN__;
+  }
+  return next;
+}
+
+function studentFetch(path, options = {}, token = window.__CC_SESSION_TOKEN__) {
+  return fetch(path, {
+    ...options,
+    credentials: options.credentials || "same-origin",
+    headers: studentSessionHeaders(options.headers, token),
+  });
+}
+
 // ─── Vault blob shape ────────────────────────────────────────────────────
 // The passphrase-encrypted per-student vault carries both the student's data
 // and their identity (name/grade). Identity lives here — inside the encrypted
@@ -229,7 +273,7 @@ function readVaultData(blob) {
 // treats the former as a hard rejection and the latter as degraded-but-allowed
 // (the vault already decrypted on-device); create requires a reachable server
 // either way, since the backend owns the credential.
-async function establishServerSession({ email, password, name, grade, mode }) {
+async function establishServerSession({ email, password, name, grade, mode, registrationAccessCode = "", invitationToken = "", organizationSlug = "" }) {
   const post = async (path, body) => {
     const r = await fetch(`/api${path}`, {
       method: "POST",
@@ -242,7 +286,16 @@ async function establishServerSession({ email, password, name, grade, mode }) {
   };
   try {
     const gradeNumber = ({ Freshman:9, Sophomore:10, Junior:11, Senior:12 })[grade] || Number(grade);
-    const regBody = { email, password, name, grade: gradeNumber, schoolDomain: getEmailDomain(email) };
+    const accessCode = String(registrationAccessCode || "").trim();
+    const regBody = {
+      email,
+      password,
+      name,
+      grade: gradeNumber,
+      schoolDomain: getEmailDomain(email),
+      ...(accessCode ? { registrationAccessCode: accessCode } : {}),
+      ...(String(invitationToken || "").trim() ? { invitationToken: String(invitationToken).trim() } : {}),
+    };
 
     if (mode === "create") {
       // New-account signup: register directly. An existing email must NOT
@@ -250,15 +303,25 @@ async function establishServerSession({ email, password, name, grade, mode }) {
       // caller can route to login.
       const { ok, status, d } = await post("/students/register", regBody);
       if (status === 409 || d.code === "account_exists") return { existing: true };
-      if (ok && d.token) { window.__CC_SESSION_TOKEN__ = d.token; return { ok: true, token: d.token, studentId: d.studentId, recoveryCode: d.recoveryCode || "" }; }
+      if (ok && (d.token || d.sessionMode === "cookie" || d.registered)) return adoptServerSession(d);
       return { ok: false, reason: d.error || `server returned ${status}` };
     }
 
     // Login never falls back to registration. Missing accounts and wrong
     // passwords receive the backend's same generic error.
-    const res = await post("/students/auth", { email, password });
-    if (res.ok && res.d.token) { window.__CC_SESSION_TOKEN__ = res.d.token; return { ok: true, token: res.d.token, studentId: res.d.studentId }; }
-    return { ok: false, reason: res.d.error || `server returned ${res.status}` };
+    const requestedOrganization = String(organizationSlug || "").trim().toLowerCase();
+    const res = await post("/students/auth", {
+      email,
+      password,
+      ...(requestedOrganization ? { organizationSlug: requestedOrganization } : {}),
+    });
+    if (res.ok && (res.d.token || res.d.sessionMode === "cookie" || res.d.authenticated)) return adoptServerSession(res.d);
+    return {
+      ok: false,
+      reason: res.d.error || `server returned ${res.status}`,
+      code: typeof res.d.code === "string" ? res.d.code : "",
+      status: res.status,
+    };
   } catch (err) {
     // Transport-level failure only — fetch rejects when it cannot reach the
     // backend. A reachable server that rejects credentials returns above.
@@ -291,6 +354,24 @@ async function fetchServerIdentity(token) {
   } catch {
     return null;
   }
+}
+
+function shapeServerProfile(body = {}) {
+  const profile = body.profile || {};
+  return {
+    profile: {
+      gpa: profile.gpa || { unweighted: null, weighted: null },
+      courses: Array.isArray(profile.courses) ? profile.courses : [],
+      apScores: Array.isArray(profile.apScores) ? profile.apScores : [],
+      testScores: Array.isArray(profile.testScores) ? profile.testScores : [],
+      majorInterest: profile.majorInterest || "",
+    },
+    activities: Array.isArray(profile.activities) ? profile.activities : [],
+    goals: Array.isArray(profile.goals) ? profile.goals : [],
+    majorInterest: profile.majorInterest || "",
+    studyNotes: [],
+    documents: [],
+  };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -967,9 +1048,9 @@ async function execTool(name, input, stateRef, setData) {
       if (proxyUrl) {
         try {
           const base = proxyUrl.replace(/\/chat\/?$/,"");
-          const searchRes = await fetch(`${base}/colleges/search`, {
+          const searchRes = await studentFetch(`${base}/colleges/search`, {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...(token ? { "Authorization": `Bearer ${token}` } : {}) },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name: input.majorKeyword, states: input.states, minSAT: input.satMin, maxTuition: input.maxTuition, sizePreference: input.sizePreference, limit: 10 })
           });
           if (searchRes.ok) {
@@ -1075,9 +1156,9 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { error: "RAG backend not configured", fallback: { profile: data.profile, activities: data.activities } };
       try {
-        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/rag/context"), {
+        const r = await studentFetch(proxyUrl.replace(/\/chat\/?$/,"/rag/context"), {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agentId: input.agentId || "holistic", queryFocus: input.focus || "holistic" })
         });
         if (!r.ok) return { error: `RAG retrieval failed: ${r.status}`, fallback: { profile: data.profile, activities: data.activities } };
@@ -1091,9 +1172,9 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return execTool("search_colleges", input, stateRef, setData); // fallback to local
       try {
-        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/rag/college-match"), {
+        const r = await studentFetch(proxyUrl.replace(/\/chat\/?$/,"/rag/college-match"), {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(input)
         });
         if (!r.ok) return execTool("search_colleges", input, stateRef, setData); // fallback
@@ -1107,9 +1188,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { error: "RAG backend not configured", trends: {} };
       try {
-        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/students/timeline"), {
-          headers: { "Authorization": `Bearer ${token}` }
-        });
+        const r = await studentFetch(proxyUrl.replace(/\/chat\/?$/,"/students/timeline"));
         if (!r.ok) return { error: `Timeline fetch failed: ${r.status}`, trends: {} };
         return await r.json();
       } catch (err) {
@@ -1121,9 +1200,7 @@ async function execTool(name, input, stateRef, setData) {
       const token = window.__CC_SESSION_TOKEN__;
       if (!proxyUrl || !token) return { milestones: [] };
       try {
-        const r = await fetch(proxyUrl.replace(/\/chat\/?$/,"/students/milestones"), {
-          headers: { "Authorization": `Bearer ${token}` }
-        });
+        const r = await studentFetch(proxyUrl.replace(/\/chat\/?$/,"/students/milestones"));
         if (!r.ok) return { milestones: [] };
         return await r.json();
       } catch {
@@ -1201,12 +1278,9 @@ async function readChatFile(file) {
     for (let offset = 0; offset < bytes.length; offset += 0x8000) {
       binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
     }
-    const headers = { "Content-Type": "application/json" };
-    if (window.__CC_SESSION_TOKEN__) headers.Authorization = `Bearer ${window.__CC_SESSION_TOKEN__}`;
-    const response = await fetch("/api/files/extract-text", {
+    const response = await studentFetch("/api/files/extract-text", {
       method: "POST",
-      credentials: "same-origin",
-      headers,
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ base64: btoa(binary), mimeType: file.type || "", filename: name }),
     });
     const body = await response.json().catch(() => ({}));
@@ -1319,19 +1393,14 @@ async function requestChat(payload, signal, locale = "en-US") {
   const url = `${CHAT_PATH}?locale=${encodeURIComponent(lang)}`;
   const headers = { "Content-Type": "application/json", "Accept-Language": lang };
   // Send the session token for tenant authorization and usage accounting.
-  if (window.__CC_SESSION_TOKEN__) {
-    headers["Authorization"] = `Bearer ${window.__CC_SESSION_TOKEN__}`;
-  }
-
-  let r = await fetch(url, { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(payload), signal });
+  let r = await studentFetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
 
   // Auto re-authenticate on 401 (backend may have restarted, clearing in-memory tokens)
   if (r.status === 401) {
     console.warn("[requestChat] 401 — attempting re-authentication…");
     const refreshed = await _tryReAuth();
     if (refreshed) {
-      headers["Authorization"] = `Bearer ${window.__CC_SESSION_TOKEN__}`;
-      r = await fetch(url, { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(payload), signal });
+      r = await studentFetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
     }
   }
 
@@ -1374,10 +1443,19 @@ async function _tryReAuth() {
     const r = await fetch("/api/students/auth", {
       method: "POST", headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ email: credentials.email, password: credentials.password })
+      body: JSON.stringify({
+        email: credentials.email,
+        password: credentials.password,
+        ...(credentials.organizationSlug ? { organizationSlug: credentials.organizationSlug } : {}),
+      })
     });
     const d = await r.json().catch(() => ({}));
-    if (d.token) { window.__CC_SESSION_TOKEN__ = d.token; notifyReauth("ok"); console.info("[ReAuth] Session restored via auth"); return true; }
+    if (r.ok && (d.token || d.sessionMode === "cookie" || d.authenticated)) {
+      adoptServerSession(d);
+      notifyReauth("ok");
+      console.info("[ReAuth] Session restored via auth");
+      return true;
+    }
     notifyReauth("failed");
     return false;
   } catch (err) {
@@ -1817,9 +1895,9 @@ async function orchestrate(userMsg,data,setData,setStatus,signal,pendingFileData
     try {
       setStatus({active:"policy_router",phase:"Checking rules engine..."});
       const base = proxyUrl.replace(/\/chat\/?$/,"");
-      const orchRes = await fetch(`${base}/agents/orchestrate`, {
+      const orchRes = await studentFetch(`${base}/agents/orchestrate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: sanitizeInput(userMsg), studentData: data.profile || {} }),
         signal
       });
@@ -2422,7 +2500,30 @@ select option:hover, select option:focus, select option:checked{background:rgba(
 // ═══════════════════════════════════════════════════════════
 // MAIN APP — CREATE ACCOUNT → SURVEY → LOGIN → CHAT
 // ═══════════════════════════════════════════════════════════
-const S = { LOADING:0, CREATE:1, LOGIN:2, SURVEY:3, CHAT:4 };
+const S = { LOADING:0, CREATE:1, LOGIN:2, SURVEY:3, CHAT:4, WAITING_GUARDIAN:5 };
+const DEFAULT_RUNTIME_CONFIG = Object.freeze({
+  deployment: "desktop",
+  registrationAccessCodeRequired: false,
+  invitationRequired: false,
+  organizationPortalPath: "/organization.html",
+});
+
+// Capture invitation credentials during the first render, before the runtime
+// configuration effect can initiate a request whose Referer might otherwise
+// contain the query string. The short-lived module slot makes the operation
+// idempotent under React StrictMode's development double-initialization; it is
+// cleared as soon as the component commits.
+let pendingStudentInvitationCapture = "";
+function captureStudentInvitationFromLocation() {
+  try {
+    const token = new URLSearchParams(window.location.search).get("invite") || "";
+    if (token) {
+      pendingStudentInvitationCapture = token;
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+    }
+  } catch { /* malformed location is harmless */ }
+  return pendingStudentInvitationCapture;
+}
 
 export default function App() {
   const [screen, setScreen] = useState(S.LOADING);
@@ -2441,9 +2542,55 @@ export default function App() {
   const [cAgeAttest, setCAgeAttest] = useState(false);
   const [cConsentAI, setCConsentAI] = useState(false);
   const [cConsentData, setCConsentData] = useState(false);
+  const [runtimeConfig, setRuntimeConfig] = useState(DEFAULT_RUNTIME_CONFIG);
+  const [runtimeConfigReady, setRuntimeConfigReady] = useState(false);
+  const [registrationAccessCode, setRegistrationAccessCode] = useState("");
+  const [invitationToken, setInvitationToken] = useState(captureStudentInvitationFromLocation);
+  const [pendingMembership, setPendingMembership] = useState(null);
   const [cError, setCError] = useState("");
   const [showCreatePass, setShowCreatePass] = useState(false);
   const [showCreatePass2, setShowCreatePass2] = useState(false);
+  const registrationAccessCodeRequired = runtimeConfig.registrationAccessCodeRequired === true;
+  const invitationRequired = runtimeConfig.invitationRequired === true;
+  const isSaasDeployment = runtimeConfig.deployment === "saas";
+  const isWebDeployment = runtimeConfig.deployment === "web" || isSaasDeployment;
+  const desktopBridgeAvailable = typeof window !== "undefined" && Boolean(window.collegeCounselorDesktop);
+
+  // Public runtime configuration is intentionally best-effort. Desktop builds
+  // and test harnesses retain the existing open-registration behavior when the
+  // endpoint is unavailable.
+  useEffect(() => {
+    let active = true;
+    fetch("/api/runtime-config", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    })
+      .then((response) => {
+        if (response?.ok === false) throw new Error(`Runtime config ${response.status}`);
+        return response?.json?.() || {};
+      })
+      .then((config) => {
+        if (!active || !config || typeof config !== "object") return;
+        setRuntimeConfig({
+          deployment: typeof config.deployment === "string" ? config.deployment : DEFAULT_RUNTIME_CONFIG.deployment,
+          registrationAccessCodeRequired: config.registrationAccessCodeRequired === true,
+          invitationRequired: config.invitationRequired === true,
+          organizationPortalPath: typeof config.organizationPortalPath === "string" ? config.organizationPortalPath : DEFAULT_RUNTIME_CONFIG.organizationPortalPath,
+        });
+      })
+      .catch(() => {
+        // Preserve desktop/open-registration defaults when configuration is
+        // unavailable. Account creation still requires a reachable backend.
+      })
+      .finally(() => {
+        if (active) setRuntimeConfigReady(true);
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    pendingStudentInvitationCapture = "";
+  }, []);
 
   // Survey state
   const [surveyStep, setSurveyStep] = useState(0); // 0=GPA, 1=courses, 2=tests, 3=ECs, 4=goals, 5=parent
@@ -2482,6 +2629,8 @@ export default function App() {
   // Login fields
   const [lEmail, setLEmail] = useState("");
   const [lPass, setLPass] = useState("");
+  const [lOrganizationSlug, setLOrganizationSlug] = useState("");
+  const [organizationSelectionRequired, setOrganizationSelectionRequired] = useState(false);
   const [lError, setLError] = useState("");
   const [showLoginPass, setShowLoginPass] = useState(false);
   const [studentRecoveryOpen, setStudentRecoveryOpen] = useState(false);
@@ -2554,12 +2703,14 @@ export default function App() {
   // Load the saved target schools when the signed-in user is known.
   useEffect(() => {
     if (!user?.email) return;
+    if (isSaasDeployment) { setTargetSchools([]); return; }
     try {
       const raw = window.localStorage?.getItem?.(`cc_targets_${user.email}`);
       setTargetSchools(raw ? JSON.parse(raw) : []);
     } catch { setTargetSchools([]); }
-  }, [user?.email]);
+  }, [user?.email, isSaasDeployment]);
   const saveTargets = (arr, email) => {
+    if (isSaasDeployment) return;
     try { if (email) window.localStorage?.setItem?.(`cc_targets_${email}`, JSON.stringify(arr)); } catch { /* ignore */ }
   };
   // Holds the (later-defined) deadline creator so addTargetSchool can call it
@@ -2582,7 +2733,7 @@ export default function App() {
     // and commit-by dates (advanced-model web search → auto-add). Via ref
     // because the creator is defined later in the component.
     createDeadlinesRef.current?.(n);
-  }, [user?.email, targetSchools]);
+  }, [user?.email, targetSchools, isSaasDeployment]);
   const removeTargetSchool = useCallback((name) => {
     setTargetSchools((prev) => {
       const next = prev.filter((s) => s !== name);
@@ -2607,7 +2758,7 @@ export default function App() {
         })
         .catch((err) => console.warn("[targets] deadline cascade failed:", err?.message));
     }
-  }, [user?.email]);
+  }, [user?.email, isSaasDeployment]);
 
   // ─── Auth-resilient fetch ───────────────────────────────────────
   // Every backend read/write goes through here so a stale or missing
@@ -2620,13 +2771,9 @@ export default function App() {
   //   2. On 401, re-auth ONCE and retry.
   const authedFetch = useCallback(async (path, opts = {}) => {
     const proxyUrl = window.__CC_PROXY_URL__ || "/api/chat";
-    const doFetch = (tok) => fetch(path, {
+    const doFetch = (tok) => studentFetch(path, {
       ...opts,
-      headers: {
-        ...(opts.headers || {}),
-        ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
-      },
-    });
+    }, tok);
     let token = window.__CC_SESSION_TOKEN__;
     if (!token) {
       await _tryReAuth(proxyUrl);
@@ -2725,12 +2872,9 @@ export default function App() {
 
   // Delete a thread (soft archive by default).
   const deleteThread = useCallback(async (threadId, hard = false) => {
-    const token = window.__CC_SESSION_TOKEN__;
-    if (!token) return;
     try {
-      await fetch(`/api/students/threads/${threadId}${hard ? "?hard=1" : ""}`, {
+      await authedFetch(`/api/students/threads/${threadId}${hard ? "?hard=1" : ""}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
       });
       if (activeThreadId === threadId) {
         setActiveThreadId(null);
@@ -2738,36 +2882,32 @@ export default function App() {
       }
       refreshThreadList();
     } catch (err) { console.warn("[CHAT] deleteThread failed:", err?.message); }
-  }, [activeThreadId, refreshThreadList]);
+  }, [activeThreadId, authedFetch, refreshThreadList]);
 
   // Search across all threads (substring on message content).
   const searchThreads = useCallback(async (q) => {
     setThreadSearchQ(q);
     if (!q || q.length < 2) { setThreadSearchResults([]); return; }
-    const token = window.__CC_SESSION_TOKEN__;
-    if (!token) return;
     try {
-      const r = await fetch(`/api/students/threads-search?q=${encodeURIComponent(q)}`,
-        { headers: { Authorization: `Bearer ${token}` } });
+      const r = await authedFetch(`/api/students/threads-search?q=${encodeURIComponent(q)}`);
       if (r.ok) {
         const data = await r.json();
         setThreadSearchResults(data.results || []);
       }
     } catch (err) { console.warn("[CHAT] search failed:", err?.message); }
-  }, []);
+  }, [authedFetch]);
 
   // ─── College values + fit ───
   // Look up a college's published core values and compute how the
   // student's profile maps onto them.
   const lookupCollege = useCallback(async (collegeName, hintUrl) => {
-    const token = window.__CC_SESSION_TOKEN__;
-    if (!token || !collegeName) return;
+    if (!collegeName) return;
     setCollegeValuesLoading(true);
     setCollegePositioning(null);
     try {
-      const r = await fetch("/api/colleges/values", {
+      const r = await authedFetch("/api/colleges/values", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ collegeName, hintUrl }),
       });
       const body = await r.json();
@@ -2785,9 +2925,9 @@ export default function App() {
     setCollegePositioningLoading(true);
     try {
       const major = (data?.majorInterest || data?.profile?.majorInterest || null);
-      const pr = await fetch("/api/positioning/targets", {
+      const pr = await authedFetch("/api/positioning/targets", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ targets: [{ schoolName: collegeName }], ...(major ? { major } : {}) }),
       });
       const pbody = await pr.json().catch(() => ({}));
@@ -2801,7 +2941,7 @@ export default function App() {
     } finally {
       setCollegePositioningLoading(false);
     }
-  }, [data]);
+  }, [authedFetch, data]);
 
   // ─── Inline chat tools ───
   // The four student tools (narrative, candidate ranker, spike finder,
@@ -3275,16 +3415,31 @@ export default function App() {
     setReauthListener((status) => {
       setReauthStatus(status);
       if (status === "ok") setTimeout(() => setReauthStatus("idle"), 2500);
+      if (status === "failed" && isSaasDeployment) {
+        window.__CC_SESSION_TOKEN__ = null;
+        window.__CC_CSRF_TOKEN__ = "";
+        setUser(null);
+        setPassphrase("");
+        setLPass("");
+        setPendingMembership(null);
+        setData({ profile:null, activities:[], studyNotes:[], documents:[] });
+        setMessages([]);
+        setLError("Your session expired. Sign in again.");
+        setScreen(S.LOGIN);
+      }
     });
     return () => setReauthListener(null);
-  }, []);
+  }, [isSaasDeployment]);
 
   useEffect(() => {
-    setReauthCredentialProvider(() => user?.email && passphrase
-      ? { email: user.email, password: passphrase }
+    setReauthCredentialProvider(() => !isSaasDeployment && user?.email && passphrase
+      ? {
+          email: user.email,
+          password: passphrase,
+        }
       : null);
     return () => setReauthCredentialProvider(null);
-  }, [user?.email, passphrase]);
+  }, [user?.email, passphrase, isSaasDeployment]);
 
   // ─── ROUTE ON MOUNT ───
   // There is no local account registry and no persisted session: the backend
@@ -3295,18 +3450,77 @@ export default function App() {
   // backend's uniform invalid-credentials response is designed to avoid.
   useEffect(() => {
     clearSession();
-    setScreen(S.LOGIN);
+    window.__CC_SESSION_TOKEN__ = null;
+    window.__CC_CSRF_TOKEN__ = "";
   }, []);
+
+  useEffect(() => {
+    if (runtimeConfigReady) {
+      setScreen((current) => current === S.LOADING ? S.LOGIN : current);
+    }
+  }, [runtimeConfigReady]);
+
+  // Restore SaaS cookie sessions without exposing a reusable credential to
+  // JavaScript. The tenant-scoped server is authoritative in this profile.
+  useEffect(() => {
+    if (!isSaasDeployment) return undefined;
+    let active = true;
+    (async () => {
+      try {
+        const response = await fetch("/api/students/session", {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) return;
+        const session = await response.json();
+        if (!active || !session?.authenticated) return;
+        adoptServerSession({ ...session, sessionMode: "cookie" });
+        const student = session.student || {};
+        const identity = {
+          name: student.name || "Student",
+          email: student.email || "",
+          grade: GRADE_LABELS[Number(student.grade)] || student.grade || "",
+        };
+        setUser(identity);
+        setPassphrase("");
+        setPendingMembership(session);
+        if (session.membershipStatus !== "active") {
+          setScreen(S.WAITING_GUARDIAN);
+          return;
+        }
+        const profileResponse = await fetch("/api/students/profile", { credentials: "same-origin" });
+        const profileBody = profileResponse.ok ? await profileResponse.json() : null;
+        if (!active) return;
+        if (profileBody) setData(shapeServerProfile(profileBody));
+        const profile = profileBody?.profile || {};
+        const populated = session.profileComplete === true
+          || (profile.courses?.length || 0) > 0
+          || (profile.activities?.length || 0) > 0;
+        if (populated) {
+          setMessages([{ role:"assistant", content:`Welcome back, ${identity.name}. What would you like to work on?` }]);
+          setScreen(S.CHAT);
+        } else {
+          setSurveyStep(0);
+          setScreen(S.SURVEY);
+        }
+      } catch {
+        // An absent or expired cookie is the normal signed-out state.
+      }
+    })();
+    return () => { active = false; };
+  }, [isSaasDeployment]);
 
   // ─── AUTO-SAVE data + SYNC TO RAG BACKEND ───
   useEffect(() => {
-    if ((screen !== S.CHAT && screen !== S.SURVEY) || !user || !passphrase) return;
+    if ((screen !== S.CHAT && screen !== S.SURVEY) || !user || (!isSaasDeployment && !passphrase)) return;
     const t = setTimeout(async () => {
       // 1. Save to encrypted localStorage (offline-first). Identity is written
       //    alongside the data — it is the only copy login can read back.
-      const storageKey = await storageKeyFor(user.email);
-      const e = await encrypt(buildVaultBlob(data, { name: user.name, grade: user.grade }), passphrase, user.email);
-      try { await storageApi.set(storageKey, e); } catch (err) { console.warn("Auto-save failed:", err?.message); }
+      if (!isSaasDeployment) {
+        const storageKey = await storageKeyFor(user.email);
+        const e = await encrypt(buildVaultBlob(data, { name: user.name, grade: user.grade }), passphrase, user.email);
+        try { await storageApi.set(storageKey, e); } catch (err) { console.warn("Auto-save failed:", err?.message); }
+      }
 
       // 2. Sync to RAG backend — persists grades/GPA/ECs server-side so
       //    they survive restarts AND are reachable from any device.
@@ -3333,7 +3547,7 @@ export default function App() {
       }
     }, 1000);
     return () => clearTimeout(t);
-  }, [data, screen, user, passphrase, authedFetch]);
+  }, [data, screen, user, passphrase, authedFetch, isSaasDeployment]);
 
   // ─── Admissions-calendar refresh ───
   // Pull today + cycle calendar + per-target-school deadlines whenever the
@@ -3388,9 +3602,7 @@ export default function App() {
       if (!token) return;
       try {
         const base = proxyUrl.replace(/\/chat\/?$/,"");
-        const r = await fetch(`${base}/students/profile`, {
-          headers: { "Authorization": `Bearer ${token}` }
-        });
+        const r = await authedFetch(`${base}/students/profile`);
         if (!r.ok || cancelled) return;
         const body = await r.json();
         if (cancelled) return;
@@ -3410,15 +3622,27 @@ export default function App() {
     pullFromServer();
     const iv = setInterval(pullFromServer, 30000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [screen, user]);
+  }, [screen, user, authedFetch, refreshThreadList]);
 
   // ─── SESSION TIMEOUT — auto-logout after 15min inactivity ───
   useEffect(() => {
     if (screen !== S.CHAT && screen !== S.SURVEY) { sessionTimer.clear(); return; }
     const expire = () => {
+      // Start server-side revocation while the in-memory CSRF credential is
+      // still available, then lock the local UI immediately. A failed network
+      // request must never leave student data visible on a shared device.
+      void authedFetch("/api/students/logout", { method: "POST", keepalive: true })
+        .catch(() => {});
       clearSession();
+      sessionTimer.clear();
+      rateLimiter.reset();
+      window.__CC_SESSION_TOKEN__ = null;
+      window.__CC_CSRF_TOKEN__ = "";
+      setPendingMembership(null);
       setUser(null);
       setPassphrase("");
+      setLPass("");
+      setOfflineMode(false);
       setData({ profile:null, activities:[], studyNotes:[], documents:[] });
       setMessages([]);
       setScreen(S.LOGIN);
@@ -3432,7 +3656,7 @@ export default function App() {
       sessionTimer.clear();
       activityEvents.forEach(ev => window.removeEventListener(ev, onActivity));
     };
-  }, [screen]);
+  }, [screen, authedFetch]);
 
   // ─── CREATE ACCOUNT ───
   const handleCreate = useCallback(async () => {
@@ -3441,12 +3665,24 @@ export default function App() {
     if (!cLast.trim()) { setCError("Last name is required"); return; }
     if (!cEmail.trim()) { setCError("Email is required"); return; }
     if (!cEmail.includes("@") || !cEmail.includes(".")) { setCError("Please enter a valid email address."); return; }
+    if (registrationAccessCodeRequired && !registrationAccessCode.trim()) { setCError("Access code is required"); return; }
+    if (invitationRequired && !invitationToken.trim()) { setCError("A valid organization invitation is required"); return; }
     if (!cGrade) { setCError("Select your grade"); return; }
     if (cPass.length < 12) { setCError("Passphrase must be at least 12 characters."); return; }
     if (cPass !== cPass2) { setCError("Passphrases don't match"); return; }
-    if (!cAgeAttest) { setCError("You must confirm you are a high school student (ages 14-18) or have parental consent"); return; }
+    if (!cAgeAttest) {
+      setCError(isSaasDeployment
+        ? "You must acknowledge that you are the invited student and that any required guardian approval is separate."
+        : "You must confirm you are a high school student (ages 14-18) or have parental consent");
+      return;
+    }
     if (!cConsentAI) { setCError("You must acknowledge that this is an AI system before continuing"); return; }
-    if (!cConsentData) { setCError("You must consent to data processing before continuing"); return; }
+    if (!cConsentData) {
+      setCError(isSaasDeployment
+        ? "You must acknowledge how academic data is processed before continuing."
+        : "You must consent to data processing before continuing");
+      return;
+    }
     const email = cEmail.toLowerCase().trim();
 
     // ── Establish the server account FIRST — it is authoritative. We must NOT
@@ -3455,7 +3691,15 @@ export default function App() {
     //    used to strand users with no session ("Not authenticated"). Duplicate
     //    emails are detected by the backend (409 → sess.existing), not by a
     //    local registry.
-    const sess = await establishServerSession({ email, password: cPass, name: cName.trim(), grade: cGrade, mode: "create" });
+    const sess = await establishServerSession({
+      email,
+      password: cPass,
+      name: cName.trim(),
+      grade: cGrade,
+      mode: "create",
+      registrationAccessCode,
+      invitationToken,
+    });
     // Existing email must not silently drop the user into someone else's
     // data (their profile and chat threads). Route to LOGIN instead.
     if (sess.existing) {
@@ -3473,42 +3717,66 @@ export default function App() {
         : (sess.reason || "Couldn't create your account. Please try again."));
       return;
     }
+    if (isSaasDeployment) {
+      setCPass("");
+      setCPass2("");
+    }
 
     // Server confirmed → seed the on-device vault. Identity lives inside the
     // passphrase-encrypted blob (never a plaintext registry), so login can both
     // verify the passphrase and recover the student's name/grade offline.
-    const identity = { name: cName.trim(), grade: cGrade };
-    const storageKey = await storageKeyFor(email);
-    const verifier = await encrypt(buildVaultBlob({}, identity, { verifier: true }), cPass, email);
-    await storageApi.set(storageKey, verifier);
+    const identity = {
+      name: sess.student?.name || cName.trim(),
+      grade: GRADE_LABELS[Number(sess.student?.grade)] || sess.student?.grade || cGrade,
+    };
+    if (!isSaasDeployment) {
+      const storageKey = await storageKeyFor(email);
+      const verifier = await encrypt(buildVaultBlob({}, identity, { verifier: true }), cPass, email);
+      try {
+        await storageApi.set(storageKey, verifier);
+      } catch {
+        setCError("Your browser blocked encrypted local storage. Allow site storage or use the SaaS deployment profile.");
+        return;
+      }
+    }
 
     const u = { name: identity.name, email, grade: identity.grade };
     setUser(u);
-    setPassphrase(cPass);
+    setPassphrase(isSaasDeployment ? "" : cPass);
     setStudentRecoveryCode(sess.recoveryCode || "");
 
     // Grant onboarding consents now that we hold a verified server session.
-    if (window.__CC_SESSION_TOKEN__) {
-      const consentHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${window.__CC_SESSION_TOKEN__}` };
+    if (!isSaasDeployment && window.__CC_SESSION_TOKEN__) {
+      const consentHeaders = { "Content-Type": "application/json" };
       await Promise.allSettled([
-        fetch("/api/consent/grant", { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
-        fetch("/api/consent/grant", { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
+        studentFetch("/api/consent/grant", { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "data_processing", grantedBy: "student" }) }),
+        studentFetch("/api/consent/grant", { method: "POST", headers: consentHeaders, body: JSON.stringify({ consentType: "ai_interaction", grantedBy: "student" }) }),
       ]);
+    }
+
+    if (isSaasDeployment && sess.membershipStatus !== "active") {
+      setPendingMembership(sess);
+      setScreen(S.WAITING_GUARDIAN);
+      return;
     }
 
     setSurveyStep(0);
     setScreen(S.SURVEY);
-  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData]);
+  }, [cFirst, cLast, cEmail, cGrade, cPass, cPass2, cAgeAttest, cConsentAI, cConsentData, registrationAccessCode, registrationAccessCodeRequired, invitationRequired, invitationToken, isSaasDeployment]);
 
   // ─── LOGIN ───
   const [loginAttempts, setLoginAttempts] = useState({});
   const handleLogin = useCallback(async () => {
     setLError("");
     const email = lEmail.toLowerCase().trim();
+    const organizationSlug = lOrganizationSlug.trim().toLowerCase();
     if (!email) { setLError("Email is required"); return; }
-    if (!lPass) { setLError("Passphrase is required"); return; }
+    if (!lPass) { setLError(isSaasDeployment ? "Password is required" : "Passphrase is required"); return; }
+    if (isSaasDeployment && organizationSelectionRequired && !organizationSlug) {
+      setLError("Enter the organization identifier from your invitation or welcome message, then sign in again.");
+      return;
+    }
 
-    // Brute-force protection: lock after 5 failed attempts for 5 minutes
     const now = Date.now();
     const attempts = loginAttempts[email] || { count: 0, lastFail: 0 };
     if (attempts.count >= 5 && now - attempts.lastFail < 5 * 60 * 1000) {
@@ -3516,123 +3784,62 @@ export default function App() {
       setLError(`Too many failed attempts. Try again in ${mins} minute${mins > 1 ? "s" : ""}.`);
       return;
     }
-    // Reset counter if lockout period has passed (immutable — don't mutate state directly)
     if (attempts.count >= 5 && now - attempts.lastFail >= 5 * 60 * 1000) {
       setLoginAttempts(prev => ({ ...prev, [email]: { count: 0, lastFail: 0 } }));
     }
-    // The on-device vault both verifies the passphrase and carries the
-    // student's identity — there is no plaintext registry to consult.
+
     const storageKey = await storageKeyFor(email);
     let identity = null;
-    try {
-      const saved = await storageApi.get(storageKey);
-      if (!saved?.value) {
-        // No vault on this device — cannot verify the passphrase offline.
-        setLError("Account data not found. It may have been cleared. Please create a new account.");
-        return;
-      }
-      const d = await decrypt(saved.value, lPass, email);
-      if (!d) {
-        setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
-        setLError("Wrong passphrase. Your data is encrypted — only the correct passphrase can unlock it.");
-        return;
-      }
-      identity = readVaultIdentity(d);
-      // A verifier-only vault has no student data to restore yet.
-      if (!d._verifier) { setData(readVaultData(d)); }
-    } catch (err) {
-      console.warn("Login decryption error:", err?.message);
-      setLError("Couldn't unlock your data. Please try again.");
-      return;
-    }
-
-    // Clear failed login counter on success
-    setLoginAttempts(prev => { const next = { ...prev }; delete next[email]; return next; });
-
-    // ── Establish the backend session BEFORE entering the app — otherwise the
-    //    survey-sync / chat steps fail with "Not authenticated".
-    const sess = await establishServerSession({ email, password: lPass, mode: "login" });
-    // A reachable backend that rejects the credentials is authoritative: stop.
-    // (The local vault opening only proves the passphrase decrypts on-device.)
-    if (!sess.ok && !sess.offline) {
-      setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
-      setLError(sess.reason || "Invalid email or password.");
-      return;
-    }
-    // Offline-first: the vault already decrypted above, so an unreachable
-    // backend must NOT lock the student out of their own on-device data (that
-    // made it look like the account was wiped). Enter in a degraded "offline"
-    // mode instead of blocking — server features resume when the backend
-    // returns; authedFetch re-auths lazily on the next call.
-    setOfflineMode(!!sess.offline);
-
-    // A vault written by a passphrase reset carries no identity. Rebuild it
-    // from the session we just established, then persist it so later logins
-    // read it locally again.
-    if (!identity && sess.ok) {
-      identity = await fetchServerIdentity(window.__CC_SESSION_TOKEN__);
-      if (identity) {
-        await storageApi.set(storageKey, await encrypt(buildVaultBlob({}, identity, { verifier: true }), lPass, email));
-      }
-    }
-    if (!identity) {
-      setLError("Account data is incomplete. Reconnect to the server and sign in again to restore it.");
-      return;
-    }
-
-    const u = { name: identity.name, email, grade: identity.grade };
-    setUser(u);
-    setPassphrase(lPass);
-
-    // ─── Backend profile recovery ───
-    // The backend DB is the durable source of truth for grades/GPA/ECs.
-    // If the local vault is empty/sparse (vault reset, new browser, or a
-    // backend-restart hiccup) BUT the backend has a populated profile,
-    // adopt it now — so the student sees their real transcript instead
-    // of an empty survey, and isn't forced to re-do onboarding.
-    let backendHasProfile = false;
-    if (window.__CC_SESSION_TOKEN__ && proxyUrl) {
+    let localSurveyCompleted = false;
+    if (!isSaasDeployment) {
       try {
-        const base = proxyUrl.replace(/\/chat\/?$/,"");
-        const pr = await fetch(`${base}/students/profile`, { headers: { Authorization: `Bearer ${window.__CC_SESSION_TOKEN__}` } });
-        if (pr.ok) {
-          const pb = await pr.json();
-          const beCourses = pb.profile?.courses || [];
-          const beEcs = pb.profile?.activities || [];
-          if (beCourses.length > 0 || beEcs.length > 0) {
-            backendHasProfile = true;
-            setData(prev => {
-              const base2 = prev || {};
-              const localCourses = base2.profile?.courses || [];
-              const localEcs = base2.activities || [];
-              return {
-                ...base2,
-                profile: {
-                  ...(base2.profile || {}),
-                  gpa: base2.profile?.gpa?.unweighted != null ? base2.profile.gpa : (pb.profile?.gpa || base2.profile?.gpa),
-                  courses: beCourses.length > localCourses.length ? beCourses : localCourses,
-                  apScores: (base2.profile?.apScores?.length ? base2.profile.apScores : pb.profile?.apScores) || [],
-                  testScores: (base2.profile?.testScores?.length ? base2.profile.testScores : pb.profile?.testScores) || [],
-                  majorInterest: base2.profile?.majorInterest || pb.profile?.majorInterest || "",
-                },
-                activities: beEcs.length > localEcs.length ? beEcs : localEcs,
-                goals: (base2.goals?.length ? base2.goals : pb.profile?.goals) || [],
-                majorInterest: base2.majorInterest || pb.profile?.majorInterest || "",
-              };
-            });
-            console.info(`[login-recover] Adopted backend profile: ${beCourses.length} courses, ${beEcs.length} ECs.`);
+        const saved = await storageApi.get(storageKey);
+        if (saved?.value) {
+          const decrypted = await decrypt(saved.value, lPass, email);
+          if (!decrypted) {
+            setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
+            setLError("Wrong passphrase. Your encrypted browser data could not be unlocked.");
+            return;
           }
+          identity = readVaultIdentity(decrypted);
+          const vaultData = readVaultData(decrypted);
+          localSurveyCompleted = Boolean(vaultData?.profile);
+          if (!decrypted._verifier) setData(vaultData);
         }
-      } catch (err) { console.warn("[login-recover] failed:", err?.message); }
+      } catch (error) {
+        console.warn("Login decryption error:", error?.message);
+        setLError("Your browser blocked access to encrypted storage. Check site permissions and try again.");
+        return;
+      }
     }
 
-    // Offline: skip the server-gated API-key check (it can't run without the
-    // backend and would otherwise strand the student on the API-key screen).
-    // Land them directly on their local data — CHAT if onboarding is done,
-    // else the (local) survey.
-    if (serverUnreachable) {
-      if (acct.surveyCompleted) {
-        setMessages([{ role:"assistant", content:`Hey ${acct.name}! You're offline right now — your data is here and safe. Chat resumes once your connection's back.` }]);
+    const sess = await establishServerSession({
+      email,
+      password: lPass,
+      mode: "login",
+      organizationSlug,
+    });
+    if (!sess.ok && !sess.offline) {
+      if (sess.code === "organization_required") {
+        setOrganizationSelectionRequired(true);
+        setLError("This account belongs to more than one organization. Enter the organization identifier from your invitation or welcome message, then sign in again.");
+      } else {
+        setLoginAttempts(prev => ({ ...prev, [email]: { count: (prev[email]?.count || 0) + 1, lastFail: Date.now() } }));
+        setLError(sess.reason || "Invalid email or password.");
+      }
+      return;
+    }
+
+    if (sess.offline) {
+      if (isSaasDeployment || !identity) {
+        setLError("Could not reach the service. SaaS sign-in requires an online connection.");
+        return;
+      }
+      setOfflineMode(true);
+      setUser({ name: identity.name, email, grade: identity.grade });
+      setPassphrase(lPass);
+      if (localSurveyCompleted) {
+        setMessages([{ role:"assistant", content:`Hey ${identity.name}! You are offline; chat resumes when the service reconnects.` }]);
         setScreen(S.CHAT);
       } else {
         setSurveyStep(0);
@@ -3641,22 +3848,110 @@ export default function App() {
       return;
     }
 
-    // If the backend already has a populated profile, the survey is
-    // effectively done — go straight to chat (recovered data shows in
-    // the sidebar, and "Edit profile" re-pulls it). Otherwise honor the
-    // local surveyCompleted flag.
-    if (!backendHasProfile && !acct.surveyCompleted) {
+    if (isSaasDeployment) setLPass("");
+
+    setOfflineMode(false);
+    setOrganizationSelectionRequired(false);
+    setLoginAttempts(prev => { const next = { ...prev }; delete next[email]; return next; });
+
+    if (isSaasDeployment) {
+      identity = sess.student ? {
+        name: sess.student.name || "Student",
+        grade: GRADE_LABELS[Number(sess.student.grade)] || sess.student.grade || "",
+      } : null;
+      if (!identity) {
+        try {
+          const response = await fetch("/api/students/session", { credentials:"same-origin" });
+          const session = response.ok ? await response.json() : null;
+          if (session?.student) {
+            adoptServerSession({ ...session, sessionMode:"cookie" });
+            identity = {
+              name: session.student.name || "Student",
+              grade: GRADE_LABELS[Number(session.student.grade)] || session.student.grade || "",
+            };
+          }
+        } catch { /* handled by the identity guard below */ }
+      }
+    } else if (!identity) {
+      identity = await fetchServerIdentity(window.__CC_SESSION_TOKEN__);
+      if (identity) {
+        try {
+          await storageApi.set(storageKey, await encrypt(buildVaultBlob({}, identity, { verifier: true }), lPass, email));
+        } catch (error) {
+          console.warn("Could not seed the encrypted browser vault:", error?.message);
+        }
+      }
+    }
+
+    if (!identity) {
+      setLError("Account identity could not be restored. Please contact your organization administrator.");
+      return;
+    }
+
+    const currentUser = { name: identity.name, email, grade: identity.grade };
+    setUser(currentUser);
+    setPassphrase(isSaasDeployment ? "" : lPass);
+
+    if (isSaasDeployment && sess.membershipStatus !== "active") {
+      setPendingMembership(sess);
+      setScreen(S.WAITING_GUARDIAN);
+      return;
+    }
+
+    let backendHasProfile = sess.profileComplete === true;
+    const studentApiUrl = window.__CC_PROXY_URL__ || "/api/chat";
+    if (window.__CC_SESSION_TOKEN__ && studentApiUrl) {
+      try {
+        const base = studentApiUrl.replace(/\/chat\/?$/, "");
+        const token = window.__CC_SESSION_TOKEN__;
+        const headers = token && token !== COOKIE_SESSION_SENTINEL ? { Authorization: `Bearer ${token}` } : {};
+        const profileResponse = await fetch(`${base}/students/profile`, { credentials:"same-origin", headers });
+        if (profileResponse.ok) {
+          const profileBody = await profileResponse.json();
+          const beCourses = profileBody.profile?.courses || [];
+          const beEcs = profileBody.profile?.activities || [];
+          backendHasProfile = backendHasProfile || beCourses.length > 0 || beEcs.length > 0;
+          if (isSaasDeployment) {
+            setData(shapeServerProfile(profileBody));
+          } else if (backendHasProfile) {
+            setData(previous => {
+              const localCourses = previous?.profile?.courses || [];
+              const localEcs = previous?.activities || [];
+              return {
+                ...(previous || {}),
+                profile: {
+                  ...(previous?.profile || {}),
+                  gpa: previous?.profile?.gpa?.unweighted != null ? previous.profile.gpa : (profileBody.profile?.gpa || previous?.profile?.gpa),
+                  courses: beCourses.length > localCourses.length ? beCourses : localCourses,
+                  apScores: (previous?.profile?.apScores?.length ? previous.profile.apScores : profileBody.profile?.apScores) || [],
+                  testScores: (previous?.profile?.testScores?.length ? previous.profile.testScores : profileBody.profile?.testScores) || [],
+                  majorInterest: previous?.profile?.majorInterest || profileBody.profile?.majorInterest || "",
+                },
+                activities: beEcs.length > localEcs.length ? beEcs : localEcs,
+                goals: (previous?.goals?.length ? previous.goals : profileBody.profile?.goals) || [],
+                majorInterest: previous?.majorInterest || profileBody.profile?.majorInterest || "",
+              };
+            });
+          }
+        }
+      } catch (error) {
+        console.warn("[login-recover] failed:", error?.message);
+      }
+    }
+
+    if (!backendHasProfile && !localSurveyCompleted) {
       setSurveyStep(0);
       setScreen(S.SURVEY);
       return;
     }
 
-    setMessages([{ role:"assistant", content:`Hey ${acct.name}! What would you like to work on?` }]);
+    setMessages([{ role:"assistant", content:`Hey ${identity.name}! What would you like to work on?` }]);
     setScreen(S.CHAT);
-  }, [lEmail, lPass, loginAttempts]);
+  }, [lEmail, lPass, lOrganizationSlug, organizationSelectionRequired, loginAttempts, isSaasDeployment]);
 
   const handleStudentRecovery = useCallback(async (event) => {
     event.preventDefault();
+    if (isSaasDeployment) return;
     setStudentRecoveryMessage(null);
     const email = lEmail.toLowerCase().trim();
     if (!email || !studentRecoveryInput.trim()) { setStudentRecoveryMessage({ type:"error", text:"Enter your email and recovery code." }); return; }
@@ -3670,6 +3965,7 @@ export default function App() {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Recovery failed.");
+      setStudentRecoveryCode(body.recoveryCode || "");
       // The old local vault cannot be decrypted without its passphrase. Start a
       // new encrypted verifier; identity and server-synced profile data are
       // restored on the next successful login (see fetchServerIdentity).
@@ -3684,7 +3980,7 @@ export default function App() {
     } finally {
       setStudentRecoveryBusy(false);
     }
-  }, [lEmail, studentRecoveryInput, studentRecoveryPassword]);
+  }, [lEmail, studentRecoveryInput, studentRecoveryPassword, isSaasDeployment]);
 
   // ─── LOGOUT ───
   const handleLogout = useCallback(async () => {
@@ -3693,6 +3989,8 @@ export default function App() {
     sessionTimer.clear();
     rateLimiter.reset();
     window.__CC_SESSION_TOKEN__ = null;
+    window.__CC_CSRF_TOKEN__ = "";
+    setPendingMembership(null);
     setUser(null);
     setPassphrase("");
     setData({ profile:null, activities:[], studyNotes:[], documents:[] });
@@ -3730,6 +4028,8 @@ export default function App() {
       sessionTimer.clear();
       rateLimiter.reset();
       window.__CC_SESSION_TOKEN__ = null;
+      window.__CC_CSRF_TOKEN__ = "";
+      setPendingMembership(null);
       setUser(null);
       setPassphrase("");
       setData({ profile:null, activities:[], studyNotes:[], documents:[] });
@@ -3813,7 +4113,7 @@ export default function App() {
       setMessages([updateMsg]);
     }
 
-    if (user?.email) {
+    if (user?.email && !isSaasDeployment) {
       // Cache a flag so the chat system knows to collect the student's story
       try { localStorage.setItem("cc_narrative_pending_" + user.email, "1"); } catch { /* ignore */ }
       // Survey is committed — drop the interrupted-draft autosave so it can't
@@ -3822,7 +4122,7 @@ export default function App() {
     }
 
     setScreen(S.CHAT);
-  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, user, messages, authedFetch]);
+  }, [sGpaUw, sGpaW, sNoGpaYet, sCourses, sAPScores, sTests, sNoTestsYet, sECs, sGoals, sMajorInterest, user, messages, authedFetch, isSaasDeployment]);
 
   // ─── SEND MESSAGE ───
   const send = useCallback(async () => {
@@ -4046,7 +4346,7 @@ export default function App() {
           <div style={{ display:"flex",justifyContent:"center",gap:6,marginBottom:16 }}>
             {dots.map((c,i)=>(<div key={i} style={{width:10,height:10,borderRadius:"50%",background:c,animation:`pulse2 1.4s ease-in-out ${i*0.12}s infinite`}} />))}
           </div>
-          <div style={{ fontSize:14,color:"#6a6a7a" }}>Loading your vault...</div>
+          <div style={{ fontSize:14,color:"#6a6a7a" }}>Preparing secure sign-in...</div>
         </div>
         <style>{GLOBAL_CSS}</style>
       </main>
@@ -4056,6 +4356,32 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   // CREATE ACCOUNT SCREEN
   // ═══════════════════════════════════════════════════════════
+  if (screen === S.WAITING_GUARDIAN) {
+    const organizationName = pendingMembership?.organization?.name || "your organization";
+    return (
+      <main style={{ minHeight:"100vh",minBlockSize:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT,padding:"max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom))" }}>
+        <section className="cc-create-card" aria-labelledby="guardian-wait-title" style={cardStyle}>
+          <div style={{fontSize:12,color:"#63b3ed",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>Account protected</div>
+          <h1 id="guardian-wait-title" style={{fontSize:24,color:"#e8e6e3",marginBottom:12}}>Waiting for guardian approval</h1>
+          <p style={{fontSize:14,lineHeight:1.65,color:"#a0aec0",marginBottom:18}}>
+            Your invitation to {organizationName} was accepted, but student tools remain locked until a verified linked guardian grants the required policy consent. A student cannot approve this step for themselves.
+          </p>
+          <div role="status" style={{padding:14,borderRadius:12,background:"rgba(55,138,221,0.10)",border:"1px solid rgba(55,138,221,0.25)",color:"#bee3f8",fontSize:13,marginBottom:18}}>
+            Membership status: {pendingMembership?.membershipStatus || "pending_guardian"}
+          </div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            <button type="button" onClick={()=>window.location.reload()} style={{flex:"1 1 170px",padding:"12px 16px",borderRadius:10,border:0,background:"#378add",color:"white",fontWeight:700,cursor:"pointer"}}>Check approval status</button>
+            <button type="button" onClick={handleLogout} style={{flex:"1 1 110px",padding:"12px 16px",borderRadius:10,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#e2e8f0",fontWeight:600,cursor:"pointer"}}>Sign out</button>
+          </div>
+          <p style={{fontSize:12,color:"#718096",marginTop:18,lineHeight:1.5}}>
+            Guardians and organization administrators use <a href={runtimeConfig.organizationPortalPath} style={{color:"#63b3ed"}}>the organization portal</a>. Administrators manage access but cannot read private student chats or files.
+          </p>
+        </section>
+        <style>{GLOBAL_CSS}</style>
+      </main>
+    );
+  }
+
   if (screen === S.CREATE) {
     return (
       <main style={{ minHeight:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:BG,fontFamily:FONT,padding:"20px 0" }}>
@@ -4065,7 +4391,9 @@ export default function App() {
               {dots.map((c,i)=>(<div key={i} style={{width:10,height:10,borderRadius:"50%",background:c,animation:`pulse2 2s ease-in-out ${i*0.15}s infinite`}} />))}
             </div>
             <h1 style={{ fontSize:24,fontWeight:700,color:"#e8e6e3",margin:0,letterSpacing:"-0.03em" }}>Create your account</h1>
-            <p style={{ fontSize:13,color:"#6a6a7a",marginTop:8 }}>Email required · data encrypted on your device</p>
+            <p style={{ fontSize:13,color:"#6a6a7a",marginTop:8 }}>
+              Email required · {isSaasDeployment ? "secure organization-managed account" : isWebDeployment ? "private encrypted storage" : "data encrypted on your device"}
+            </p>
           </div>
 
           <form onSubmit={(event)=>{event.preventDefault();handleCreate();}} style={{ display:"flex",flexDirection:"column",gap:14 }}>
@@ -4095,6 +4423,39 @@ export default function App() {
                 </div>
               )}
             </div>
+            {registrationAccessCodeRequired && (
+              <div>
+                <label htmlFor="registration-access-code" style={labelStyle}>Access code</label>
+                <input
+                  id="registration-access-code"
+                  name="registration-access-code"
+                  type="password"
+                  autoComplete="one-time-code"
+                  value={registrationAccessCode}
+                  onChange={(event) => setRegistrationAccessCode(event.target.value)}
+                  placeholder="Enter your invitation access code"
+                  required
+                  style={inputStyle}
+                />
+              </div>
+            )}
+            {invitationRequired && (
+              <div>
+                <label htmlFor="organization-invitation" style={labelStyle}>Organization invitation token</label>
+                <input
+                  id="organization-invitation"
+                  name="organization-invitation"
+                  type="password"
+                  autoComplete="one-time-code"
+                  value={invitationToken}
+                  onChange={(event) => setInvitationToken(event.target.value)}
+                  placeholder="Open your invitation link or paste its token"
+                  required
+                  style={inputStyle}
+                />
+                <div style={{fontSize:11,color:"#8a8a9a",marginTop:5}}>Invitations are email-bound, organization-bound, expiring, and single-use.</div>
+              </div>
+            )}
             <fieldset style={{border:0,padding:0,margin:0}}>
               <legend style={labelStyle}>Grade level</legend>
               <div style={{ display:"flex",gap:8 }}>
@@ -4108,7 +4469,7 @@ export default function App() {
               </div>
             </fieldset>
             <div>
-              <label htmlFor="create-passphrase" style={labelStyle}>Passphrase (encrypts your vault and signs you in)</label>
+              <label htmlFor="create-passphrase" style={labelStyle}>{isSaasDeployment ? "Password" : "Passphrase (encrypts your vault and signs you in)"}</label>
               <div style={{display:"flex",gap:8}}>
                 <input id="create-passphrase" type={showCreatePass ? "text" : "password"} autoComplete="new-password" value={cPass} onChange={e=>setCPass(e.target.value)} placeholder="At least 12 characters" minLength={12} style={{...inputStyle,flex:1}} />
                 <button onClick={()=>setShowCreatePass(v=>!v)} type="button" style={{padding:"0 14px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",cursor:"pointer"}}>{showCreatePass ? "Hide" : "Show"}</button>
@@ -4125,7 +4486,7 @@ export default function App() {
               </div>
             </div>
             <div>
-              <label htmlFor="create-confirm" style={labelStyle}>Confirm passphrase</label>
+              <label htmlFor="create-confirm" style={labelStyle}>{isSaasDeployment ? "Confirm password" : "Confirm passphrase"}</label>
               <div style={{display:"flex",gap:8}}>
                 <input id="create-confirm" type={showCreatePass2 ? "text" : "password"} autoComplete="new-password" value={cPass2} onChange={e=>setCPass2(e.target.value)} placeholder="Type it again" minLength={12} style={{...inputStyle,flex:1}} />
                 <button onClick={()=>setShowCreatePass2(v=>!v)} type="button" style={{padding:"0 14px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",cursor:"pointer"}}>{showCreatePass2 ? "Hide" : "Show"}</button>
@@ -4133,10 +4494,10 @@ export default function App() {
             </div>
 
             <div style={{ display:"flex",flexDirection:"column",gap:8,marginTop:4,padding:"12px 14px",borderRadius:10,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.04)" }}>
-              <div style={{ fontSize:10,fontWeight:600,color:"#6a6a7a",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:2 }}>Required consents</div>
+              <div style={{ fontSize:10,fontWeight:600,color:"#6a6a7a",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:2 }}>{isSaasDeployment ? "Required acknowledgements" : "Required consents"}</div>
               <div style={{ display:"flex",alignItems:"flex-start",gap:8 }}>
                 <input type="checkbox" id="ageAttest" checked={cAgeAttest} onChange={e=>setCAgeAttest(e.target.checked)} style={{ marginTop:3,accentColor:"#378ADD",flexShrink:0 }} />
-                <label htmlFor="ageAttest" style={{ fontSize:11,color:"#8a8a9a",lineHeight:1.5,cursor:"pointer" }}>I confirm I am a high school student (ages 14-18), or I have parental/guardian consent to use this tool. I understand this is an AI assistant, not a licensed counselor.</label>
+                <label htmlFor="ageAttest" style={{ fontSize:11,color:"#8a8a9a",lineHeight:1.5,cursor:"pointer" }}>{isSaasDeployment ? "I confirm I am the student named in this invitation. I understand that I cannot grant required guardian consent for myself and that access stays locked until a verified linked guardian approves the current policies." : "I confirm I am a high school student (ages 14-18), or I have parental/guardian consent to use this tool. I understand this is an AI assistant, not a licensed counselor."}</label>
               </div>
               <div style={{ display:"flex",alignItems:"flex-start",gap:8 }}>
                 <input type="checkbox" id="consentAI" checked={cConsentAI} onChange={e=>setCConsentAI(e.target.checked)} style={{ marginTop:3,accentColor:"#378ADD",flexShrink:0 }} />
@@ -4144,7 +4505,7 @@ export default function App() {
               </div>
               <div style={{ display:"flex",alignItems:"flex-start",gap:8 }}>
                 <input type="checkbox" id="consentData" checked={cConsentData} onChange={e=>setCConsentData(e.target.checked)} style={{ marginTop:3,accentColor:"#378ADD",flexShrink:0 }} />
-                <label htmlFor="consentData" style={{ fontSize:11,color:"#8a8a9a",lineHeight:1.5,cursor:"pointer" }}>I consent to my academic data being processed to provide personalized guidance. My data is encrypted, never sold, and I can export or delete it at any time.</label>
+                <label htmlFor="consentData" style={{ fontSize:11,color:"#8a8a9a",lineHeight:1.5,cursor:"pointer" }}>{isSaasDeployment ? "I understand how my academic data will be processed for personalized guidance after required organization and verified-guardian authorization is active. My acknowledgement does not replace guardian consent." : "I consent to my academic data being processed to provide personalized guidance. My data is encrypted, never sold, and I can export or delete it at any time."}</label>
               </div>
             </div>
 
@@ -4159,10 +4520,16 @@ export default function App() {
             </button>
           </div>
 
-          <div style={{textAlign:"center",marginTop:10}}><a href="/admin.html" style={{color:"#9ed1ff",fontSize:13}}>Device administrator</a></div>
+          {desktopBridgeAvailable && (
+            <div style={{textAlign:"center",marginTop:10}}><a href="/admin.html" style={{color:"#9ed1ff",fontSize:13}}>Device administrator</a></div>
+          )}
 
           <p style={{ fontSize:10,color:"#333",textAlign:"center",marginTop:16,lineHeight:1.6 }}>
-            Your data is AES-256-GCM encrypted with your passphrase and never leaves your device unencrypted. We cannot recover your passphrase.
+            {isSaasDeployment
+              ? "Your organization account uses a secure HttpOnly session. Student data is encrypted server-side, and passwords can be reset through the organization portal."
+              : isWebDeployment
+                ? "Your private vault is AES-256-GCM encrypted with your passphrase. We cannot recover your passphrase."
+                : "Your data is AES-256-GCM encrypted with your passphrase and never leaves your device unencrypted. We cannot recover your passphrase."}
           </p>
         </div>
         <style>{GLOBAL_CSS}</style>
@@ -4627,7 +4994,7 @@ export default function App() {
               {dots.map((c,i)=>(<div key={i} style={{width:10,height:10,borderRadius:"50%",background:c,animation:`pulse2 2s ease-in-out ${i*0.15}s infinite`}} />))}
             </div>
             <h1 style={{ fontSize:24,fontWeight:700,color:"#e8e6e3",margin:0,letterSpacing:"-0.03em" }}>Welcome back</h1>
-            <p style={{ fontSize:13,color:"#6a6a7a",marginTop:8 }}>Sign in to your encrypted vault</p>
+            <p style={{ fontSize:13,color:"#6a6a7a",marginTop:8 }}>{isSaasDeployment ? "Sign in to your organization account" : "Sign in to your encrypted vault"}</p>
           </div>
 
           <form onSubmit={(event)=>{event.preventDefault();handleLogin();}} style={{ display:"flex",flexDirection:"column",gap:14 }}>
@@ -4636,38 +5003,69 @@ export default function App() {
               <input id="login-email" type="email" autoComplete="email" value={lEmail} onChange={e=>setLEmail(e.target.value)} placeholder="alex.kim@school.edu" style={inputStyle} />
             </div>
             <div>
-              <label htmlFor="login-passphrase" style={labelStyle}>Passphrase</label>
+              <label htmlFor="login-passphrase" style={labelStyle}>{isSaasDeployment ? "Password" : "Passphrase"}</label>
               <div style={{display:"flex",gap:8}}>
-                <input id="login-passphrase" type={showLoginPass ? "text" : "password"} autoComplete="current-password" value={lPass} onChange={e=>setLPass(e.target.value)} placeholder="Your vault passphrase" style={{...inputStyle,flex:1}} />
+                <input id="login-passphrase" type={showLoginPass ? "text" : "password"} autoComplete="current-password" value={lPass} onChange={e=>setLPass(e.target.value)} placeholder={isSaasDeployment ? "Your account password" : "Your vault passphrase"} style={{...inputStyle,flex:1}} />
                 <button onClick={()=>setShowLoginPass(v=>!v)} type="button" style={{padding:"0 14px",borderRadius:12,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.02)",color:"#8a8a9a",cursor:"pointer"}}>{showLoginPass ? "Hide" : "Show"}</button>
               </div>
             </div>
+            {isSaasDeployment && (
+              <div>
+                <label htmlFor="login-organization" style={labelStyle}>Organization identifier {organizationSelectionRequired ? "(required)" : "(optional)"}</label>
+                <input
+                  id="login-organization"
+                  type="text"
+                  autoComplete="organization"
+                  value={lOrganizationSlug}
+                  onChange={(event) => setLOrganizationSlug(event.target.value)}
+                  placeholder="For example: northstar"
+                  required={organizationSelectionRequired}
+                  aria-invalid={organizationSelectionRequired && !lOrganizationSlug.trim() ? "true" : undefined}
+                  aria-describedby="login-organization-help"
+                  style={inputStyle}
+                />
+                <div id="login-organization-help" style={{fontSize:11,color:organizationSelectionRequired?"#ffb4ba":"#8a8a9a",marginTop:5,lineHeight:1.5}}>
+                  {organizationSelectionRequired
+                    ? "Required because this email has student access in multiple organizations."
+                    : "Only needed when the same email belongs to more than one organization."}
+                </div>
+              </div>
+            )}
 
             {lError && <div role="alert" style={{ fontSize:13,color:"#ffb4ba",background:"rgba(245,101,101,0.12)",padding:"10px 14px",borderRadius:8,animation:"fadeIn 0.2s ease" }}>{lError}</div>}
 
             <button type="submit" style={{...btnPrimary,marginTop:4}}>Sign in</button>
           </form>
 
-          <div style={{marginTop:14}}>
-            <button type="button" onClick={()=>{setStudentRecoveryOpen((value)=>!value);setStudentRecoveryMessage(null);}} style={{width:"100%",padding:"9px 12px",borderRadius:6,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#b7c1ce",cursor:"pointer"}}>
-              {studentRecoveryOpen ? "Cancel recovery" : "Recover account"}
-            </button>
-            {studentRecoveryOpen && (
-              <form onSubmit={handleStudentRecovery} style={{display:"grid",gap:12,marginTop:12,padding:14,border:"1px solid rgba(255,255,255,0.14)",borderRadius:8}}>
-                <p style={{fontSize:12,color:"#b7c1ce",lineHeight:1.5,margin:0}}>Recovery replaces the unreadable local vault. Data previously synced to this device's service will be restored after sign-in.</p>
-                <div>
-                  <label htmlFor="student-recovery-code" style={labelStyle}>Recovery code</label>
-                  <input id="student-recovery-code" value={studentRecoveryInput} onChange={(event)=>setStudentRecoveryInput(event.target.value)} autoComplete="off" style={inputStyle} required />
-                </div>
-                <div>
-                  <label htmlFor="student-recovery-password" style={labelStyle}>New passphrase</label>
-                  <input id="student-recovery-password" type="password" value={studentRecoveryPassword} onChange={(event)=>setStudentRecoveryPassword(event.target.value)} autoComplete="new-password" minLength={12} style={inputStyle} required />
-                </div>
-                <button type="submit" disabled={studentRecoveryBusy} style={btnPrimary}>{studentRecoveryBusy ? "Resetting..." : "Reset passphrase"}</button>
-              </form>
-            )}
-            {studentRecoveryMessage && <p role={studentRecoveryMessage.type==="error"?"alert":"status"} style={{fontSize:13,color:studentRecoveryMessage.type==="error"?"#ffb4ba":"#a9edce"}}>{studentRecoveryMessage.text}</p>}
-          </div>
+          {isSaasDeployment ? (
+            <div style={{marginTop:14,textAlign:"center"}}>
+              <a href="/organization.html?recovery=1" style={{display:"inline-block",width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:6,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#b7c1ce",textDecoration:"none"}}>
+                Recover account
+              </a>
+              <p style={{fontSize:11,color:"#6a6a7a",lineHeight:1.5,margin:"8px 0 0"}}>Password recovery is handled by the secure organization portal.</p>
+            </div>
+          ) : (
+            <div style={{marginTop:14}}>
+              <button type="button" onClick={()=>{setStudentRecoveryOpen((value)=>!value);setStudentRecoveryMessage(null);}} style={{width:"100%",padding:"9px 12px",borderRadius:6,border:"1px solid rgba(255,255,255,0.16)",background:"transparent",color:"#b7c1ce",cursor:"pointer"}}>
+                {studentRecoveryOpen ? "Cancel recovery" : "Recover account"}
+              </button>
+              {studentRecoveryOpen && (
+                <form onSubmit={handleStudentRecovery} style={{display:"grid",gap:12,marginTop:12,padding:14,border:"1px solid rgba(255,255,255,0.14)",borderRadius:8}}>
+                  <p style={{fontSize:12,color:"#b7c1ce",lineHeight:1.5,margin:0}}>Recovery replaces the unreadable local vault. Data previously synced to this device's service will be restored after sign-in.</p>
+                  <div>
+                    <label htmlFor="student-recovery-code" style={labelStyle}>Recovery code</label>
+                    <input id="student-recovery-code" value={studentRecoveryInput} onChange={(event)=>setStudentRecoveryInput(event.target.value)} autoComplete="off" style={inputStyle} required />
+                  </div>
+                  <div>
+                    <label htmlFor="student-recovery-password" style={labelStyle}>New passphrase</label>
+                    <input id="student-recovery-password" type="password" value={studentRecoveryPassword} onChange={(event)=>setStudentRecoveryPassword(event.target.value)} autoComplete="new-password" minLength={12} style={inputStyle} required />
+                  </div>
+                  <button type="submit" disabled={studentRecoveryBusy} style={btnPrimary}>{studentRecoveryBusy ? "Resetting..." : "Reset passphrase"}</button>
+                </form>
+              )}
+              {studentRecoveryMessage && <p role={studentRecoveryMessage.type==="error"?"alert":"status"} style={{fontSize:13,color:studentRecoveryMessage.type==="error"?"#ffb4ba":"#a9edce"}}>{studentRecoveryMessage.text}</p>}
+            </div>
+          )}
 
           {/* No account quick-pick: this device keeps no registry of who has an
               account, so there is nothing to enumerate on a shared machine. */}
@@ -4677,7 +5075,9 @@ export default function App() {
               New student? Create account
             </button>
           </div>
-          <div style={{textAlign:"center",marginTop:10}}><a href="/admin.html" style={{color:"#9ed1ff",fontSize:13}}>Device administrator</a></div>
+          {desktopBridgeAvailable && (
+            <div style={{textAlign:"center",marginTop:10}}><a href="/admin.html" style={{color:"#9ed1ff",fontSize:13}}>Device administrator</a></div>
+          )}
         </div>
         <style>{GLOBAL_CSS}</style>
       </main>
@@ -4836,11 +5236,9 @@ export default function App() {
           <button
             onClick={async () => {
               if (!confirm("Clear all cached college values for this account? Future lookups will re-extract from the web.")) return;
-              const token = window.__CC_SESSION_TOKEN__;
               try {
-                const r = await fetch("/api/colleges/values", {
+                const r = await authedFetch("/api/colleges/values", {
                   method: "DELETE",
-                  headers: { Authorization: `Bearer ${token}` },
                 });
                 const body = await r.json().catch(() => ({}));
                 if (r.ok) {

@@ -176,6 +176,9 @@ import {
 import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel, buildSystemPrompt } from "./orchestration-engine.js";
 import { t, resolveLocale, localizeFriendlyLabels } from "./i18n.js";
 import { initAuthStore, isLoopbackAddress, normalizeEmail } from "./security-auth.js";
+import { initSaasTenancy } from "./saas-tenancy.js";
+import { initSaasMailer } from "./saas-email.js";
+import { createSaasHttp } from "./saas-http.js";
 import { exportLegacyNotebook, deleteLegacyNotebook } from "./legacy-notebook-export.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -184,7 +187,124 @@ const __dirname = path.dirname(__filename);
 // ═══════════════════════════════════════════════════════════
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════
-const PORT = parseInt(process.env.PORT || "3001", 10);
+const NODE_ENV = process.env.NODE_ENV || "development";
+const SAAS_DEPLOYMENT = process.env.SAAS_DEPLOYMENT === "1";
+const WEB_DEPLOYMENT = SAAS_DEPLOYMENT || process.env.WEB_DEPLOYMENT === "1";
+
+function parseBoundedInteger(rawValue, { min, max }) {
+  const raw = String(rawValue ?? "").trim();
+  if (!/^(0|[1-9]\d*)$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : null;
+}
+
+function normalizePublicOrigin(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return "";
+    return url.origin;
+  } catch {
+    return "";
+  }
+}
+
+function hasRepeatedPattern(value, maxPatternLength = 16) {
+  const secret = String(value || "");
+  const largestPattern = Math.min(maxPatternLength, Math.floor(secret.length / 2));
+  for (let length = 1; length <= largestPattern; length += 1) {
+    if (secret.length % length !== 0) continue;
+    const pattern = secret.slice(0, length);
+    if (pattern.repeat(secret.length / length) === secret) return true;
+  }
+  return false;
+}
+
+function isStrongSecret(value, minBytes = 32) {
+  const secret = String(value || "");
+  const byteLength = Buffer.byteLength(secret, "utf8");
+  if (byteLength < minBytes || byteLength > 512) return false;
+  if (new Set(secret).size < 8) return false;
+  if (hasRepeatedPattern(secret)) return false;
+  return !/^(change[-_ ]?me|replace[-_ ]?with|local-simulation-sidecar)/i.test(secret);
+}
+
+function isStrongEncryptionKey(value) {
+  const key = String(value || "");
+  return /^[0-9a-f]{64}$/i.test(key)
+    && new Set(key.toLowerCase()).size >= 8
+    && !hasRepeatedPattern(key.toLowerCase());
+}
+
+const PORT_RAW = process.env.PORT ?? "3001";
+const PARSED_PORT = parseBoundedInteger(PORT_RAW, { min: 1, max: 65535 });
+const PORT = PARSED_PORT ?? 3001;
+const TRUST_PROXY_RAW = process.env.TRUST_PROXY ?? "0";
+const PARSED_TRUST_PROXY = parseBoundedInteger(TRUST_PROXY_RAW, { min: 0, max: 32 });
+const TRUST_PROXY = PARSED_TRUST_PROXY ?? 0;
+const HOST = String(process.env.HOST || (WEB_DEPLOYMENT ? "0.0.0.0" : "127.0.0.1")).trim();
+const PUBLIC_ORIGIN_RAW = String(process.env.PUBLIC_ORIGIN || "").trim();
+const PUBLIC_ORIGIN = normalizePublicOrigin(PUBLIC_ORIGIN_RAW);
+const PUBLIC_DOMAIN = String(process.env.PUBLIC_DOMAIN || "").trim();
+const REGISTRATION_ACCESS_CODE = String(process.env.REGISTRATION_ACCESS_CODE || "");
+const SAAS_EMAIL_PEPPER = String(process.env.SAAS_EMAIL_PEPPER || "");
+const SAAS_PROVISIONING_TOKEN = String(process.env.SAAS_PROVISIONING_TOKEN || "");
+const INVITE_BASE_URL = normalizePublicOrigin(process.env.INVITE_BASE_URL || PUBLIC_ORIGIN_RAW);
+const RESEND_API_KEY = String(process.env.RESEND_API_KEY || "").trim();
+const EMAIL_FROM = String(process.env.EMAIL_FROM || "").trim();
+const SAAS_GUARDIAN_CONSENT_REQUIRED = process.env.SAAS_GUARDIAN_CONSENT_REQUIRED !== "0";
+const SAAS_POLICY_VERSION = String(process.env.SAAS_POLICY_VERSION || "2026.1").trim();
+const SAAS_INVITE_TTL_HOURS = parseBoundedInteger(process.env.SAAS_INVITE_TTL_HOURS || "72", { min: 1, max: 720 }) ?? 72;
+const SAAS_PASSWORD_RESET_TTL_MINUTES_RAW = process.env.SAAS_PASSWORD_RESET_TTL_MINUTES || "30";
+const PARSED_SAAS_PASSWORD_RESET_TTL_MINUTES = parseBoundedInteger(
+  SAAS_PASSWORD_RESET_TTL_MINUTES_RAW,
+  { min: 5, max: 120 },
+);
+const SAAS_PASSWORD_RESET_TTL_MINUTES = PARSED_SAAS_PASSWORD_RESET_TTL_MINUTES ?? 30;
+const SAAS_SESSION_IDLE_MINUTES_RAW = String(process.env.SAAS_SESSION_IDLE_MINUTES ?? "").trim();
+const LEGACY_SAAS_SESSION_IDLE_HOURS_RAW = String(process.env.SAAS_SESSION_IDLE_HOURS ?? "").trim();
+const PARSED_SAAS_SESSION_IDLE_MINUTES = SAAS_SESSION_IDLE_MINUTES_RAW
+  ? parseBoundedInteger(SAAS_SESSION_IDLE_MINUTES_RAW, { min: 5, max: 120 })
+  : null;
+const PARSED_LEGACY_SAAS_SESSION_IDLE_HOURS = !SAAS_SESSION_IDLE_MINUTES_RAW
+  && LEGACY_SAAS_SESSION_IDLE_HOURS_RAW
+  ? parseBoundedInteger(LEGACY_SAAS_SESSION_IDLE_HOURS_RAW, { min: 1, max: 2 })
+  : null;
+const SAAS_SESSION_IDLE_MINUTES = SAAS_SESSION_IDLE_MINUTES_RAW
+  ? (PARSED_SAAS_SESSION_IDLE_MINUTES ?? 15)
+  : LEGACY_SAAS_SESSION_IDLE_HOURS_RAW
+    ? (PARSED_LEGACY_SAAS_SESSION_IDLE_HOURS ?? 0) * 60 || 15
+    : 15;
+const SAAS_SESSION_ABSOLUTE_HOURS = parseBoundedInteger(process.env.SAAS_SESSION_ABSOLUTE_HOURS || "168", { min: 1, max: 720 }) ?? 168;
+const SAAS_REQUIRED_CONSENTS = Object.freeze([
+  "data_processing",
+  "ai_interaction",
+  "cross_border_transfer",
+]);
+const SAAS_STUDENT_UPLOAD_QUOTA_MB_RAW = process.env.SAAS_STUDENT_UPLOAD_QUOTA_MB || "100";
+const SAAS_TENANT_UPLOAD_QUOTA_MB_RAW = process.env.SAAS_TENANT_UPLOAD_QUOTA_MB || "2048";
+const SAAS_MIN_FREE_STORAGE_MB_RAW = process.env.SAAS_MIN_FREE_STORAGE_MB || "512";
+const PARSED_SAAS_STUDENT_UPLOAD_QUOTA_MB = parseBoundedInteger(
+  SAAS_STUDENT_UPLOAD_QUOTA_MB_RAW,
+  { min: 25, max: 1024 },
+);
+const PARSED_SAAS_TENANT_UPLOAD_QUOTA_MB = parseBoundedInteger(
+  SAAS_TENANT_UPLOAD_QUOTA_MB_RAW,
+  { min: 100, max: 102_400 },
+);
+const PARSED_SAAS_MIN_FREE_STORAGE_MB = parseBoundedInteger(
+  SAAS_MIN_FREE_STORAGE_MB_RAW,
+  { min: 64, max: 102_400 },
+);
+const SAAS_STUDENT_UPLOAD_QUOTA_BYTES =
+  (PARSED_SAAS_STUDENT_UPLOAD_QUOTA_MB ?? 100) * 1024 * 1024;
+const SAAS_TENANT_UPLOAD_QUOTA_BYTES =
+  (PARSED_SAAS_TENANT_UPLOAD_QUOTA_MB ?? 2048) * 1024 * 1024;
+const SAAS_MIN_FREE_STORAGE_BYTES =
+  (PARSED_SAAS_MIN_FREE_STORAGE_MB ?? 512) * 1024 * 1024;
+const SIM_TIMEOUT_MS = parseBoundedInteger(process.env.SIM_TIMEOUT_MS || "15000", { min: 100, max: 120_000 }) ?? 15_000;
+const SHUTDOWN_TIMEOUT_MS = parseBoundedInteger(process.env.SHUTDOWN_TIMEOUT_MS || "10000", { min: 1_000, max: 120_000 }) ?? 10_000;
 // Installation-wide OpenRouter key. Students never supply provider keys or
 // endpoints; every paid request uses this fixed provider boundary and is
 // charged against the authenticated student's grade-based monthly budget.
@@ -194,8 +314,16 @@ function resolveOperatorLLM() {
   return null;
 }
 const OPERATOR_LLM = resolveOperatorLLM();
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,http://localhost:5180").split(",").map(s => s.trim());
-const NODE_ENV = process.env.NODE_ENV || "development";
+const CONFIGURED_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || (WEB_DEPLOYMENT
+  ? ""
+  : "http://localhost:3000,http://localhost:5173,http://localhost:5180"))
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const ALLOWED_ORIGINS = Array.from(new Set([
+  ...CONFIGURED_ALLOWED_ORIGINS,
+  ...(PUBLIC_ORIGIN ? [PUBLIC_ORIGIN] : []),
+]));
 // Treat an unfilled `.env.example` placeholder (REPLACE_WITH…) as unset, so a
 // freshly-copied .env doesn't make the server think a bogus key is live data.
 const SCORECARD_API_KEY = /^REPLACE_WITH/i.test(process.env.SCORECARD_API_KEY || "")
@@ -253,25 +381,121 @@ function resolveEncryptionKey() {
   }
 }
 const ENCRYPTION_KEY = resolveEncryptionKey();
-chatHistory.configureChatEncryption(ENCRYPTION_KEY);
 
 // ═══════════════════════════════════════════════════════════
 // STARTUP VALIDATION
 // ═══════════════════════════════════════════════════════════
+const startupErrors = [];
+if (NODE_ENV === "production" && !process.env.ENCRYPTION_KEY) {
+  startupErrors.push("ENCRYPTION_KEY is required in production.");
+}
+if (NODE_ENV === "production" && !process.env.SIM_INTERNAL_TOKEN) {
+  startupErrors.push("SIM_INTERNAL_TOKEN is required in production for simulation sidecar proxying.");
+}
+if (NODE_ENV === "production" && WEB_DEPLOYMENT) {
+  if (PARSED_PORT === null) startupErrors.push("PORT must be an integer from 1 through 65535.");
+  if (PARSED_TRUST_PROXY !== 1) startupErrors.push("TRUST_PROXY must be exactly 1 for the supported single-proxy web profile.");
+  if (!HOST || /[\s/]/.test(HOST)) startupErrors.push("HOST must be a valid bind hostname or IP address.");
+  if (!isStrongEncryptionKey(process.env.ENCRYPTION_KEY)) {
+    startupErrors.push("ENCRYPTION_KEY must be 64 hexadecimal characters with high entropy.");
+  }
+  if (!isStrongSecret(process.env.SIM_INTERNAL_TOKEN)) {
+    startupErrors.push("SIM_INTERNAL_TOKEN must be a non-placeholder secret of at least 32 bytes.");
+  }
+  if (!isStrongSecret(process.env.STUDENT_STORAGE_SALT)) {
+    startupErrors.push("STUDENT_STORAGE_SALT must be a non-placeholder secret of at least 32 bytes.");
+  }
+  if (!SAAS_DEPLOYMENT && !isStrongSecret(REGISTRATION_ACCESS_CODE)) {
+    startupErrors.push("REGISTRATION_ACCESS_CODE must be a non-placeholder secret of at least 32 bytes.");
+  }
+  if (String(process.env.OPENROUTER_API_KEY || "").toUpperCase().startsWith("REPLACE_WITH")) {
+    startupErrors.push("OPENROUTER_API_KEY must not use a REPLACE_WITH placeholder.");
+  }
+  if (String(process.env.SCORECARD_API_KEY || "").toUpperCase().startsWith("REPLACE_WITH")) {
+    startupErrors.push("SCORECARD_API_KEY must not use a REPLACE_WITH placeholder.");
+  }
+  if (!PUBLIC_ORIGIN || !PUBLIC_ORIGIN_RAW) {
+    startupErrors.push("PUBLIC_ORIGIN must be a root HTTPS origin with no credentials, path, query, or fragment.");
+  } else {
+    const publicUrl = new URL(PUBLIC_ORIGIN);
+    const hostname = publicUrl.hostname.toLowerCase();
+    if (publicUrl.protocol !== "https:") {
+      startupErrors.push("PUBLIC_ORIGIN must use HTTPS.");
+    }
+    if (hostname === "example.com" || hostname.endsWith(".example.com") || hostname.endsWith(".invalid")) {
+      startupErrors.push("PUBLIC_ORIGIN must not use an example.com or .invalid placeholder hostname.");
+    }
+    if (PUBLIC_DOMAIN && PUBLIC_DOMAIN.toLowerCase() !== publicUrl.host.toLowerCase()) {
+      startupErrors.push("PUBLIC_DOMAIN must exactly match PUBLIC_ORIGIN's host.");
+    }
+  }
+  for (const origin of CONFIGURED_ALLOWED_ORIGINS) {
+    try {
+      const url = new URL(origin);
+      if (origin === "*" || url.protocol !== "https:" || url.origin !== origin || url.username || url.password) {
+        startupErrors.push(`ALLOWED_ORIGINS entry must be an exact HTTPS origin: ${origin}`);
+      } else if (origin !== PUBLIC_ORIGIN) {
+        startupErrors.push(`ALLOWED_ORIGINS entry must match PUBLIC_ORIGIN for the same-origin web profile: ${origin}`);
+      }
+    } catch {
+      startupErrors.push(`ALLOWED_ORIGINS entry is invalid: ${origin}`);
+    }
+  }
+}
+if (NODE_ENV === "production" && SAAS_DEPLOYMENT) {
+  if (!isStrongSecret(SAAS_EMAIL_PEPPER)) startupErrors.push("SAAS_EMAIL_PEPPER must be a unique high-entropy secret of at least 32 bytes.");
+  if (!isStrongSecret(SAAS_PROVISIONING_TOKEN)) startupErrors.push("SAAS_PROVISIONING_TOKEN must be a high-entropy secret of at least 32 bytes.");
+  if (!INVITE_BASE_URL || INVITE_BASE_URL !== PUBLIC_ORIGIN) startupErrors.push("INVITE_BASE_URL must exactly match PUBLIC_ORIGIN in SaaS production.");
+  if (!RESEND_API_KEY || /^REPLACE_WITH/i.test(RESEND_API_KEY)) startupErrors.push("RESEND_API_KEY is required for SaaS invitation delivery.");
+  if (!EMAIL_FROM || /[\r\n]/.test(EMAIL_FROM) || !EMAIL_FROM.includes("@")) startupErrors.push("EMAIL_FROM must be a valid single-line sender address.");
+  if (!SAAS_GUARDIAN_CONSENT_REQUIRED) startupErrors.push("SAAS_GUARDIAN_CONSENT_REQUIRED must remain enabled for this student SaaS profile.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(SAAS_POLICY_VERSION)) startupErrors.push("SAAS_POLICY_VERSION must be a stable identifier of at most 100 characters.");
+  if (PARSED_SAAS_PASSWORD_RESET_TTL_MINUTES === null) startupErrors.push("SAAS_PASSWORD_RESET_TTL_MINUTES must be an integer from 5 through 120.");
+  if (SAAS_SESSION_IDLE_MINUTES_RAW && PARSED_SAAS_SESSION_IDLE_MINUTES === null) {
+    startupErrors.push("SAAS_SESSION_IDLE_MINUTES must be an integer from 5 through 120.");
+  }
+  if (!SAAS_SESSION_IDLE_MINUTES_RAW && LEGACY_SAAS_SESSION_IDLE_HOURS_RAW && PARSED_LEGACY_SAAS_SESSION_IDLE_HOURS === null) {
+    startupErrors.push("SAAS_SESSION_IDLE_HOURS is deprecated and must be 1 or 2; migrate to SAAS_SESSION_IDLE_MINUTES (5 through 120).");
+  }
+  if (PARSED_SAAS_STUDENT_UPLOAD_QUOTA_MB === null) {
+    startupErrors.push("SAAS_STUDENT_UPLOAD_QUOTA_MB must be an integer from 25 through 1024.");
+  }
+  if (PARSED_SAAS_TENANT_UPLOAD_QUOTA_MB === null) {
+    startupErrors.push("SAAS_TENANT_UPLOAD_QUOTA_MB must be an integer from 100 through 102400.");
+  }
+  if (PARSED_SAAS_MIN_FREE_STORAGE_MB === null) {
+    startupErrors.push("SAAS_MIN_FREE_STORAGE_MB must be an integer from 64 through 102400.");
+  }
+  if (
+    PARSED_SAAS_STUDENT_UPLOAD_QUOTA_MB !== null
+    && PARSED_SAAS_TENANT_UPLOAD_QUOTA_MB !== null
+    && PARSED_SAAS_TENANT_UPLOAD_QUOTA_MB < PARSED_SAAS_STUDENT_UPLOAD_QUOTA_MB
+  ) {
+    startupErrors.push("SAAS_TENANT_UPLOAD_QUOTA_MB must be at least SAAS_STUDENT_UPLOAD_QUOTA_MB.");
+  }
+  if (RETENTION_MODE !== "institutional") startupErrors.push("RETENTION_MODE must be institutional for SaaS production.");
+}
+if (LEGACY_SAAS_SESSION_IDLE_HOURS_RAW) {
+  console.warn(SAAS_SESSION_IDLE_MINUTES_RAW
+    ? "[BOOT] SAAS_SESSION_IDLE_HOURS is deprecated and ignored because SAAS_SESSION_IDLE_MINUTES is set."
+    : "[BOOT] SAAS_SESSION_IDLE_HOURS is deprecated; migrate to SAAS_SESSION_IDLE_MINUTES.");
+}
+if (startupErrors.length > 0) {
+  for (const message of startupErrors) console.error(`FATAL: ${message}`);
+  process.exit(1);
+}
+if (PARSED_PORT === null) console.warn(`[BOOT] Invalid PORT=${PORT_RAW}; falling back to ${PORT}.`);
+if (PARSED_TRUST_PROXY === null) console.warn(`[BOOT] Invalid TRUST_PROXY=${TRUST_PROXY_RAW}; falling back to 0.`);
+chatHistory.configureChatEncryption(ENCRYPTION_KEY);
+
 if (!OPERATOR_LLM) {
   console.warn("[BOOT] No OpenRouter key is configured — paid AI features are disabled until the local administrator adds one.");
 } else {
   console.log(`[BOOT] Operator LLM key configured (provider: ${OPERATOR_LLM.provider}).`);
 }
-if (!process.env.ENCRYPTION_KEY && NODE_ENV === "production") {
-  console.error("FATAL: ENCRYPTION_KEY required in production.");
-  process.exit(1);
-}
-if (!process.env.SIM_INTERNAL_TOKEN && NODE_ENV === "production") {
-  console.error("FATAL: SIM_INTERNAL_TOKEN required in production for simulation sidecar proxying.");
-  process.exit(1);
-}
 console.log(`[BOOT] Environment: ${NODE_ENV}`);
+console.log(`[BOOT] Deployment: ${SAAS_DEPLOYMENT ? "saas" : WEB_DEPLOYMENT ? "web" : "desktop"}`);
+console.log(`[BOOT] Bind: ${HOST}:${PORT} (trusted proxy hops: ${TRUST_PROXY})`);
 console.log(`[BOOT] Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
 console.log(`[BOOT] Retention mode: ${RETENTION_MODE}`);
 console.log(`[BOOT] College Scorecard API: ${SCORECARD_API_KEY ? "CONFIGURED" : "NOT CONFIGURED (offline mode)"}`);
@@ -286,6 +510,15 @@ const db = new Database(DB_PATH, { verbose: NODE_ENV === "development" ? console
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 const authStore = initAuthStore(db);
+const saasTenancy = SAAS_DEPLOYMENT
+  ? initSaasTenancy({ db, emailPepper: SAAS_EMAIL_PEPPER, encryptionKey: ENCRYPTION_KEY })
+  : null;
+const saasMailer = initSaasMailer({
+  apiKey: RESEND_API_KEY,
+  from: EMAIL_FROM,
+  inviteBaseUrl: INVITE_BASE_URL,
+});
+let saasHttp = null;
 initUsageBudget(db);
 
 db.exec(`
@@ -314,6 +547,19 @@ db.exec(`
     error TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_notif_status ON notification_queue(status);
+
+  CREATE TABLE IF NOT EXISTS student_erasure_jobs (
+    id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('requested', 'pending', 'running', 'failed', 'completed', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_erasure_jobs_retry
+    ON student_erasure_jobs(status, updated_at);
 
 `);
 
@@ -358,6 +604,58 @@ seedBaselines(db, { GPA_BASELINES, SAT_BASELINES, ACT_BASELINES, EC_BENCHMARKS, 
 seedOfficialCipMappings(db);
 
 const ragStmts = prepareRAGStatements(db);
+if (SAAS_DEPLOYMENT) {
+  saasHttp = createSaasHttp({
+    tenancy: saasTenancy,
+    mailer: saasMailer,
+    authStore,
+    db,
+    piiStmts,
+    piiVault,
+    ragStmts,
+    legacyEmailHash: hashEmail,
+    publicOrigin: PUBLIC_ORIGIN,
+    provisioningToken: SAAS_PROVISIONING_TOKEN,
+    nodeEnv: NODE_ENV,
+    guardianConsentRequired: SAAS_GUARDIAN_CONSENT_REQUIRED,
+    policyVersion: SAAS_POLICY_VERSION,
+    requiredConsents: SAAS_REQUIRED_CONSENTS,
+    invitationTtlMs: SAAS_INVITE_TTL_HOURS * 60 * 60 * 1000,
+    passwordResetTtlMs: SAAS_PASSWORD_RESET_TTL_MINUTES * 60 * 1000,
+    sessionIdleTtlMs: SAAS_SESSION_IDLE_MINUTES * 60 * 1000,
+    sessionAbsoluteTtlMs: SAAS_SESSION_ABSOLUTE_HOURS * 60 * 60 * 1000,
+  });
+
+  const enforcedSessionPolicy = saasTenancy.capActiveSessionIdleTtl({
+    idleTtlMs: SAAS_SESSION_IDLE_MINUTES * 60 * 1000,
+  });
+  if (enforcedSessionPolicy.sessionsClamped || enforcedSessionPolicy.sessionsRevoked) {
+    console.log(JSON.stringify({
+      event: "saas_session_idle_policy_enforced",
+      idleMinutes: SAAS_SESSION_IDLE_MINUTES,
+      sessionsClamped: enforcedSessionPolicy.sessionsClamped,
+      sessionsRevoked: enforcedSessionPolicy.sessionsRevoked,
+    }));
+  }
+
+  const purgeSaasSecurityRecords = () => {
+    try {
+      const purged = saasTenancy.purgeExpiredSecurityRecords();
+      if (purged.sessionsDeleted || purged.invitationsDeleted || purged.passwordResetsDeleted) {
+        console.log(JSON.stringify({
+          event: "saas_security_records_purged",
+          sessionsDeleted: purged.sessionsDeleted,
+          invitationsDeleted: purged.invitationsDeleted,
+          passwordResetsDeleted: purged.passwordResetsDeleted,
+        }));
+      }
+    } catch {
+      console.warn("[SAAS] security_record_purge_failed");
+    }
+  };
+  purgeSaasSecurityRecords();
+  setInterval(purgeSaasSecurityRecords, 24 * 60 * 60 * 1000).unref();
+}
 const admissionsIntelStmts = prepareAdmissionsIntelStatements(db);
 
 // Seed the cds_records table from the on-disk parsed/validated CDS cache so
@@ -442,8 +740,12 @@ if (process.env.AUTO_REFRESH_CDS === "1") {
 // the summer, so from June 1 through year-end we re-scrape the repository index
 // and re-ingest every school each day, preferring the newest cycle — keeping
 // College Fit grounded in the freshest CDS. Deterministic parse (no LLM/key).
-// Enabled by default; set CDS_DAILY_REFRESH=0 to disable.
-if (process.env.CDS_DAILY_REFRESH !== "0") {
+// Desktop keeps the historical default. Web deployments opt in explicitly so
+// read-only images and request-serving instances never become scrape workers.
+const CDS_DAILY_REFRESH_ENABLED = WEB_DEPLOYMENT
+  ? process.env.CDS_DAILY_REFRESH === "1"
+  : process.env.CDS_DAILY_REFRESH !== "0";
+if (CDS_DAILY_REFRESH_ENABLED) {
   registerJob("cds_daily_refresh", async () => {
     if (!shouldRunCdsRefresh(Date.now())) return { skipped: "before June 1 (off-season)" };
     const concurrency = Number(process.env.CDS_REFRESH_CONCURRENCY || 3) || 3;
@@ -452,6 +754,8 @@ if (process.env.CDS_DAILY_REFRESH !== "0") {
     return { changed: true, ...r };
   }, 24 * 60 * 60 * 1000, { enabled: true, runOnStartup: false });
   console.log("[BOOT] CDS daily refresh scheduled (active June 1+; CDS_DAILY_REFRESH=0 to disable).");
+} else if (WEB_DEPLOYMENT) {
+  console.log("[BOOT] CDS daily refresh disabled for web deployment (set CDS_DAILY_REFRESH=1 on a writable single-instance worker to opt in).");
 }
 
 startAllJobs();
@@ -491,6 +795,12 @@ const sessionStmts = {
 
 function hashToken(token) {
   return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+function constantTimeSecretMatches(expected, received) {
+  const actualHash = crypto.createHash("sha256").update(String(received || "")).digest();
+  const expectedHash = crypto.createHash("sha256").update(String(expected || "")).digest();
+  return crypto.timingSafeEqual(actualHash, expectedHash);
 }
 
 function createSessionToken(emailHash, studentId) {
@@ -581,6 +891,7 @@ function safeJSON(str, fallback) {
 // MIDDLEWARE
 // ═══════════════════════════════════════════════════════════
 function requireStudentAuth(req, res, next) {
+  if (SAAS_DEPLOYMENT) return saasHttp.requireStudentAuth(req, res, next);
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Student session token required. Include Authorization: Bearer <token>" });
@@ -597,6 +908,11 @@ function requireSelf(req, res, next) {
   if (requestedId && requestedId !== req.studentId) {
     return res.status(403).json({ error: "Access denied", code: "student_scope_mismatch" });
   }
+  next();
+}
+
+function requireSaasStudentAuth(req, res, next) {
+  if (SAAS_DEPLOYMENT) return requireStudentAuth(req, res, next);
   next();
 }
 
@@ -643,14 +959,20 @@ function hasDesktopBootstrapProof(req) {
 }
 
 function requireLoopback(req, res, next) {
-  if (!isLoopbackAddress(req.socket?.remoteAddress)) {
+  if (WEB_DEPLOYMENT) {
+    return res.status(404).json({ error: "Not found." });
+  }
+  if (!isLoopbackAddress(req.ip)) {
     return res.status(403).json({ error: "Administrator access is local-only." });
   }
   next();
 }
 
 function requireCounselorAuth(req, res, next) {
-  if (!isLoopbackAddress(req.socket?.remoteAddress)) {
+  if (WEB_DEPLOYMENT) {
+    return res.status(404).json({ error: "Not found." });
+  }
+  if (!isLoopbackAddress(req.ip)) {
     return res.status(403).json({ error: "Administrator access is local-only." });
   }
   if (!hasAllowedAdminOrigin(req)) {
@@ -681,15 +1003,28 @@ function snapshotToStudentProfile(snapshot, narrative = null) {
 }
 
 async function callSimulationSidecar(pathname, options = {}) {
-  const response = await fetch(`${SIM_URL}${pathname}`, {
-    method: options.method || "GET",
-    headers: {
-      "Content-Type": "application/json",
-      "x-simulation-internal-token": SIM_INTERNAL_TOKEN,
-      ...(options.headers || {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  let response;
+  try {
+    response = await fetch(`${SIM_URL}${pathname}`, {
+      method: options.method || "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "x-simulation-internal-token": SIM_INTERNAL_TOKEN,
+        ...(options.headers || {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: AbortSignal.timeout(SIM_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    const timedOut = cause?.name === "TimeoutError" || cause?.name === "AbortError";
+    const error = new Error(timedOut
+      ? "Simulation sidecar timed out."
+      : "Simulation sidecar is unavailable.");
+    error.status = timedOut ? 504 : 503;
+    error.code = timedOut ? "simulation_sidecar_timeout" : "simulation_sidecar_unavailable";
+    error.cause = cause;
+    throw error;
+  }
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const err = new Error(data?.error || `Simulation sidecar returned ${response.status}`);
@@ -1119,6 +1454,7 @@ function buildAdmissionsCalendar(now = new Date()) {
 }
 
 const app = express();
+app.set("trust proxy", TRUST_PROXY);
 
 // Assigned when pillar routes mount (see mountPillarRoutes call below). Route
 // handlers defined earlier in source order reference it lazily at request time
@@ -1128,9 +1464,9 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      fontSrc: ["'self'"],
       connectSrc: ["'self'"],
       imgSrc: ["'self'", "data:", "blob:"],
     },
@@ -1145,22 +1481,64 @@ app.use(helmet({
 // (same-origin GETs send no Origin header, so they slipped through and looked
 // fine — masking the bug).
 const LOCALHOST_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
-app.use(cors({
+
+// Limit API traffic before origin validation or body parsing. This bounds
+// rejected-origin traffic as well as requests with large bodies.
+const globalApiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: WEB_DEPLOYMENT ? 120 : 1_000,
+  keyGenerator: (req) => hashIP(req.ip),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many API requests." },
+});
+app.use("/api", globalApiLimiter);
+
+app.use("/api", cors({
   origin: (origin, cb) => {
-    if (!origin && NODE_ENV !== "production") return cb(null, true);
+    if (!origin) return cb(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
     if (NODE_ENV !== "production" && typeof origin === "string" && LOCALHOST_ORIGIN_RE.test(origin)) {
       return cb(null, true);
     }
-    cb(new Error("CORS: Origin not allowed"));
+    const error = new Error("CORS: Origin not allowed");
+    error.status = 403;
+    cb(error);
   },
   credentials: true,
 }));
 
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: WEB_DEPLOYMENT ? "10mb" : "20mb" }));
 
 app.use((req, _res, next) => {
   req.requestId = crypto.randomUUID();
+  _res.setHeader("X-Request-ID", req.requestId);
+  // Every SaaS API response may be derived from a cookie-authenticated child
+  // session. Apply the cache boundary globally rather than relying on route
+  // prefixes, because profile, EC, directionality, simulation, and context
+  // endpoints live in several namespaces.
+  if (SAAS_DEPLOYMENT && req.path.startsWith("/api/")) {
+    _res.setHeader("Cache-Control", "no-store");
+    _res.setHeader("Pragma", "no-cache");
+  }
+  if (SAAS_DEPLOYMENT) {
+    const startedAt = process.hrtime.bigint();
+    _res.once("finish", () => {
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      console.log(JSON.stringify({
+        event: "http_request",
+        timestamp: new Date().toISOString(),
+        requestId: req.requestId,
+        method: req.method,
+        path: req.path,
+        status: _res.statusCode,
+        durationMs: Math.round(durationMs * 10) / 10,
+        organizationId: req.organizationId || req.saas?.session?.organizationId || null,
+        actorAccountId: req.saasAccountId || req.saas?.session?.accountId || null,
+        ipHash: hashIP(req.ip),
+      }));
+    });
+  }
   next();
 });
 
@@ -1169,6 +1547,8 @@ const apiLimiter = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: (req) =>
 const studentLimiter = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: (req) => hashIP(req.ip) });
 const scorecardLimiter = rateLimit({ windowMs: 60_000, max: 40, keyGenerator: (req) => hashIP(req.ip), message: { error: "Too many college search requests." } });
 
+if (SAAS_DEPLOYMENT) saasHttp.mount(app, { studentLimiter, apiLimiter });
+
 
 // ═══════════════════════════════════════════════════════════
 // LLM — provider-neutral proxy + provider metadata
@@ -1176,6 +1556,17 @@ const scorecardLimiter = rateLimit({ windowMs: 60_000, max: 40, keyGenerator: (r
 
 const MAX_TOKENS_LIMIT = 4096;
 const LLM_TIMEOUT_MS = 60_000;
+
+app.get("/api/runtime-config", apiLimiter, (_req, res) => {
+  res.json({
+    deployment: SAAS_DEPLOYMENT ? "saas" : WEB_DEPLOYMENT ? "web" : "desktop",
+    registrationAccessCodeRequired: WEB_DEPLOYMENT && !SAAS_DEPLOYMENT,
+    ...(SAAS_DEPLOYMENT ? {
+      invitationRequired: true,
+      organizationPortalPath: "/organization.html",
+    } : {}),
+  });
+});
 
 // GET /api/llm/providers — frontend-facing provider catalog
 // Returns the list of supported LLM providers with their key prefix hints,
@@ -1733,7 +2124,12 @@ app.post("/api/agents/orchestrate", apiLimiter, requireStudentAuth, async (req, 
     // gateResult, modelTier, isDeterministic, action } — read the real fields
     // (the prior code read nonexistent top-level routing.* and never fired).
     const cls = routing.classification;
-    if (routing.isDeterministic) {
+    // FAFSA eligibility rules carry their own versioned official-source
+    // metadata. They can safely run before the external evidence gate; other
+    // regulated topics must still pass that gate with retrieved evidence.
+    const hasEmbeddedOfficialRules = cls.topicType === TOPIC_TYPES.REGULATED
+      && (cls.subIntent === "fafsa" || cls.subIntent === "eligibility");
+    if (routing.isDeterministic || hasEmbeddedOfficialRules) {
       let deterministicResult = null;
 
       if (cls.subIntent === "fafsa" || cls.subIntent === "eligibility") {
@@ -2012,6 +2408,12 @@ app.all(["/api/setup/status", "/api/setup/initialize", "/api/students/apikey"], 
 });
 
 app.post("/api/students/register", studentLimiter, (req, res) => {
+  if (WEB_DEPLOYMENT && (!REGISTRATION_ACCESS_CODE || !constantTimeSecretMatches(REGISTRATION_ACCESS_CODE, req.body?.registrationAccessCode))) {
+    return res.status(403).json({
+      error: "A valid registration access code is required.",
+      code: "registration_access_denied",
+    });
+  }
   const email = normalizeEmail(req.body?.email);
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: "A valid email is required.", code: "invalid_email" });
@@ -2462,6 +2864,51 @@ function deleteStudentRows(database, studentId) {
   tx();
 }
 
+function removeSaasStudentReferences(studentId) {
+  const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+  if (!names.has("saas_students")) return;
+  db.transaction(() => {
+    if (names.has("saas_consent_grants")) {
+      db.prepare("DELETE FROM saas_consent_grants WHERE student_id = ?").run(studentId);
+    }
+    if (names.has("saas_student_access_grants")) {
+      db.prepare("DELETE FROM saas_student_access_grants WHERE student_id = ?").run(studentId);
+    }
+    if (names.has("saas_guardian_links")) {
+      db.prepare("DELETE FROM saas_guardian_links WHERE student_id = ?").run(studentId);
+    }
+    if (names.has("saas_invitations")) {
+      db.prepare(`
+        UPDATE saas_invitations
+        SET target_student_id = NULL,
+            accepted_by_account_id = CASE WHEN role = 'student' THEN NULL ELSE accepted_by_account_id END,
+            email_hash = CASE WHEN role = 'student' THEN lower(hex(randomblob(32))) ELSE email_hash END,
+            email_ciphertext = CASE WHEN role = 'student' THEN NULL ELSE email_ciphertext END,
+            token_hash = lower(hex(randomblob(32))),
+            revoked_at = COALESCE(revoked_at, ?)
+        WHERE target_student_id = ?
+      `).run(Date.now(), studentId);
+    }
+    if (names.has("saas_audit_events")) {
+      db.prepare(`
+        UPDATE saas_audit_events
+        SET subject_student_id = NULL,
+            resource_id = CASE
+              WHEN resource_type = 'student' AND resource_id = ? THEN NULL
+              ELSE resource_id
+            END,
+            metadata_json = '{}'
+        WHERE subject_student_id = ?
+           OR (resource_type = 'student' AND resource_id = ?)
+      `).run(studentId, studentId, studentId);
+    }
+    db.prepare(`
+      DELETE FROM saas_students
+      WHERE id = ? AND status = 'archived' AND account_id IS NULL
+    `).run(studentId);
+  })();
+}
+
 async function removeStudentFiles(studentId) {
   await removeStudentStorage(studentId, DATA_DIR);
   const root = path.resolve(EC_ATTACHMENTS_DIR);
@@ -2471,25 +2918,215 @@ async function removeStudentFiles(studentId) {
   }
 }
 
+const ERASURE_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+const ERASURE_JOB_RETENTION_DAYS = 30;
+const erasureJobsInFlight = new Set();
+let erasureRecoveryTimer = null;
+
+function erasureTombstone(prefix, jobId) {
+  return `${prefix}:${crypto.createHash("sha256").update(String(jobId)).digest("hex").slice(0, 32)}`;
+}
+
+function safeErasureErrorCode(error, fallback = "erasure_step_failed") {
+  const candidate = String(error?.code || "").toLowerCase();
+  return /^[a-z0-9_]{1,64}$/.test(candidate) ? candidate : fallback;
+}
+
+function createStudentErasureJob(studentId) {
+  const id = crypto.randomUUID();
+  const at = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO student_erasure_jobs (id, subject_id, status, attempts, created_at, updated_at)
+    VALUES (?, ?, 'requested', 0, ?, ?)
+  `).run(id, studentId, at, at);
+  return id;
+}
+
+function markStudentErasureJobPending(jobId) {
+  db.prepare(`
+    UPDATE student_erasure_jobs
+    SET status = 'pending', last_error_code = NULL, updated_at = ?
+    WHERE id = ? AND status IN ('requested', 'failed', 'running')
+  `).run(new Date().toISOString(), jobId);
+}
+
+function cancelStudentErasureJob(jobId) {
+  const at = new Date().toISOString();
+  db.prepare(`
+    UPDATE student_erasure_jobs
+    SET subject_id = ?, status = 'cancelled', last_error_code = NULL,
+        updated_at = ?, completed_at = ?
+    WHERE id = ? AND status NOT IN ('completed', 'cancelled')
+  `).run(erasureTombstone("cancelled", jobId), at, at, jobId);
+}
+
+async function performStudentErasure(studentId) {
+  const failures = [];
+  const attempt = async (step, action) => {
+    try {
+      await action();
+    } catch (error) {
+      failures.push({ step, code: safeErasureErrorCode(error) });
+    }
+  };
+
+  await attempt("simulations", () => callSimulationSidecar("/internal/simulations/delete-all", {
+    method: "POST",
+    body: { studentId },
+  }));
+  await attempt("pii", () => deleteStudentRows(piiVault.db, studentId));
+  await attempt("saas", () => removeSaasStudentReferences(studentId));
+  await attempt("operational", () => deleteStudentRows(db, studentId));
+  await attempt("vectors", () => vectorStore.db.prepare(
+    "DELETE FROM embeddings WHERE source_id = ? AND source_type LIKE 'student%'",
+  ).run(studentId));
+  await attempt("credentials", () => authStore.deleteStudentCredential(studentId));
+  await attempt("files", () => removeStudentFiles(studentId));
+
+  if (failures.length) {
+    const error = new Error("Student erasure is incomplete and will be retried.");
+    error.code = `erasure_incomplete_${failures.map(({ step }) => step).join("_")}`;
+    error.failures = failures;
+    throw error;
+  }
+  return { completed: true };
+}
+
+async function runStudentErasureJob(jobId) {
+  if (erasureJobsInFlight.has(jobId)) return { status: "running" };
+  const job = db.prepare("SELECT * FROM student_erasure_jobs WHERE id = ?").get(jobId);
+  if (!job || ["completed", "cancelled"].includes(job.status)) {
+    return { status: job?.status || "missing" };
+  }
+
+  erasureJobsInFlight.add(jobId);
+  const startedAt = new Date().toISOString();
+  db.prepare(`
+    UPDATE student_erasure_jobs
+    SET status = 'running', attempts = attempts + 1, updated_at = ?
+    WHERE id = ?
+  `).run(startedAt, jobId);
+  try {
+    await performStudentErasure(job.subject_id);
+    const completedAt = new Date().toISOString();
+    db.prepare(`
+      UPDATE student_erasure_jobs
+      SET subject_id = ?, status = 'completed', last_error_code = NULL,
+          updated_at = ?, completed_at = ?
+      WHERE id = ?
+    `).run(erasureTombstone("erased", jobId), completedAt, completedAt, jobId);
+    console.log(JSON.stringify({ event: "student_erasure_completed", jobId }));
+    return { status: "completed" };
+  } catch (error) {
+    const code = safeErasureErrorCode(error, "erasure_incomplete");
+    db.prepare(`
+      UPDATE student_erasure_jobs
+      SET status = 'failed', last_error_code = ?, updated_at = ?
+      WHERE id = ?
+    `).run(code, new Date().toISOString(), jobId);
+    console.warn(JSON.stringify({ event: "student_erasure_retry_required", jobId, code }));
+    return { status: "failed", code };
+  } finally {
+    erasureJobsInFlight.delete(jobId);
+  }
+}
+
+async function recoverStudentErasureJobs() {
+  db.prepare(`
+    DELETE FROM student_erasure_jobs
+    WHERE status IN ('completed', 'cancelled')
+      AND completed_at IS NOT NULL
+      AND julianday(completed_at) < julianday('now', ?)
+  `).run(`-${ERASURE_JOB_RETENTION_DAYS} days`);
+
+  const requested = db.prepare(`
+    SELECT id, subject_id FROM student_erasure_jobs
+    WHERE status = 'requested' ORDER BY created_at LIMIT 25
+  `).all();
+  for (const job of requested) {
+    if (!SAAS_DEPLOYMENT) {
+      markStudentErasureJobPending(job.id);
+      continue;
+    }
+    const student = db.prepare("SELECT status, account_id FROM saas_students WHERE id = ?").get(job.subject_id);
+    if (student && (student.status === "active" || student.account_id)) {
+      cancelStudentErasureJob(job.id);
+      console.warn(JSON.stringify({ event: "student_erasure_cancelled_active_account", jobId: job.id }));
+    } else {
+      markStudentErasureJobPending(job.id);
+    }
+  }
+
+  const retryable = db.prepare(`
+    SELECT id FROM student_erasure_jobs
+    WHERE status IN ('pending', 'failed', 'running')
+    ORDER BY updated_at LIMIT 25
+  `).all();
+  for (const job of retryable) await runStudentErasureJob(job.id);
+  return { processed: retryable.length };
+}
+
+function startStudentErasureRecoveryWorker() {
+  if (erasureRecoveryTimer) return;
+  void recoverStudentErasureJobs().catch(() => {
+    console.warn(JSON.stringify({ event: "student_erasure_recovery_failed" }));
+  });
+  erasureRecoveryTimer = setInterval(() => {
+    void recoverStudentErasureJobs().catch(() => {
+      console.warn(JSON.stringify({ event: "student_erasure_recovery_failed" }));
+    });
+  }, ERASURE_RETRY_INTERVAL_MS);
+  erasureRecoveryTimer.unref();
+}
+
 app.delete("/api/students", studentLimiter, requireStudentAuth, async (req, res) => {
+  let jobId = null;
+  let closureCommitted = false;
   try {
     const sid = req.studentId;
-    deleteStudentRows(piiVault.db, sid);
-    deleteStudentRows(db, sid);
-    vectorStore.db.prepare("DELETE FROM embeddings WHERE source_id = ? AND source_type LIKE 'student%'").run(sid);
-    authStore.deleteStudentCredential(sid);
-    await removeStudentFiles(sid);
-    stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "student_data_deleted", "", "account_erasure_completed", hashIP(req.ip));
-    return res.json({ deleted: true });
+    jobId = createStudentErasureJob(sid);
+    if (SAAS_DEPLOYMENT) {
+      try {
+        saasHttp.closeStudentAccount(req);
+        closureCommitted = true;
+      } catch (error) {
+        cancelStudentErasureJob(jobId);
+        throw error;
+      }
+    }
+    markStudentErasureJobPending(jobId);
+    const result = await runStudentErasureJob(jobId);
+    if (result.status !== "completed") {
+      return res.status(202).json({ deleted: false, deletionPending: true, jobId });
+    }
+    try {
+      stmts.insertAudit.run(crypto.randomUUID(), new Date().toISOString(), "student_data_deleted", "", `account_erasure_completed:${jobId}`, hashIP(req.ip));
+    } catch {
+      console.warn(JSON.stringify({ event: "student_erasure_audit_failed", jobId }));
+    }
+    return res.json({ deleted: true, jobId });
   } catch (err) {
-    console.error("[DELETE] Error:", err.message);
-    return res.status(500).json({ error: "Deletion failed" });
+    const code = safeErasureErrorCode(err, "student_erasure_request_failed");
+    console.error(JSON.stringify({ event: "student_erasure_request_failed", jobId, code }));
+    if (closureCommitted && jobId) {
+      return res.status(202).json({ deleted: false, deletionPending: true, jobId });
+    }
+    return res.status(err?.status || 500).json({ error: "Deletion failed", code });
   }
 });
 
-app.get("/api/students/export", studentLimiter, requireStudentAuth, (req, res) => {
+app.get("/api/students/export", studentLimiter, requireStudentAuth, async (req, res) => {
   try {
     const sid = req.studentId;
+    const simulationExport = await callSimulationSidecar("/internal/simulations/export", {
+      method: "POST",
+      body: { studentId: sid },
+    });
+    if (!Array.isArray(simulationExport?.simulations)) {
+      const error = new Error("Simulation export returned an invalid payload.");
+      error.code = "simulation_export_invalid";
+      throw error;
+    }
     const operational = collectStudentRows(db, sid, { exclude: ["student_credentials", "session_tokens"] });
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_messages'").get()) {
       operational.chat_messages = db.prepare(`SELECT m.* FROM chat_messages m
@@ -2508,7 +3145,7 @@ app.get("/api/students/export", studentLimiter, requireStudentAuth, (req, res) =
     const exportData = {
       exportMeta: {
         exportedAt: new Date().toISOString(),
-        format: "College Counselor Student Data Export v3",
+        format: "College Counselor Student Data Export v4",
         studentId: sid,
         excludedSecurityData: ["password hashes", "recovery hashes", "session tokens", "API keys"],
       },
@@ -2517,13 +3154,14 @@ app.get("/api/students/export", studentLimiter, requireStudentAuth, (req, res) =
       documentMetadata: documents,
       operational,
       vectors,
+      simulations: simulationExport.simulations,
     };
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Content-Disposition", `attachment; filename="student-data-export-${new Date().toISOString().slice(0, 10)}.json"`);
     return res.json(exportData);
   } catch (err) {
-    console.error("[EXPORT] Student data export error:", err.message);
-    return res.status(500).json({ error: "Data export failed" });
+    console.error("[EXPORT] Student data export failed", safeErasureErrorCode(err, "student_export_failed"));
+    return res.status(err?.status || 500).json({ error: "Data export failed" });
   }
 });
 
@@ -3100,6 +3738,96 @@ app.post("/api/ec/plan", studentLimiter, requireStudentAuth, (req, res) => {
 const EC_ATTACHMENTS_DIR = path.join(DATA_DIR, "ec-attachments");
 fs.mkdirSync(EC_ATTACHMENTS_DIR, { recursive: true });
 
+const pendingStudentUploadBytes = new Map();
+const pendingTenantUploadBytes = new Map();
+
+function attachmentBytesForStudent(studentId) {
+  return Number(db.prepare(`
+    SELECT COALESCE(SUM(MAX(size_bytes, 0)), 0) AS bytes
+    FROM ec_attachments
+    WHERE student_id = ?
+  `).get(studentId)?.bytes || 0);
+}
+
+function attachmentBytesForTenant(organizationId) {
+  return Number(db.prepare(`
+    SELECT COALESCE(SUM(MAX(a.size_bytes, 0)), 0) AS bytes
+    FROM ec_attachments a
+    JOIN saas_students s ON s.id = a.student_id
+    WHERE s.organization_id = ?
+  `).get(organizationId)?.bytes || 0);
+}
+
+function addPendingUpload(map, key, amount) {
+  map.set(key, (map.get(key) || 0) + amount);
+}
+
+function removePendingUpload(map, key, amount) {
+  const next = Math.max(0, (map.get(key) || 0) - amount);
+  if (next) map.set(key, next);
+  else map.delete(key);
+}
+
+function reserveSaasUploadCapacity(req, res, next) {
+  if (!SAAS_DEPLOYMENT) return next();
+  const studentId = String(req.studentId || "");
+  const organizationId = String(req.organizationId || "");
+  if (!studentId || !organizationId) {
+    return res.status(401).json({ error: "Student session required.", code: "student_session_required" });
+  }
+
+  // Reserve the maximum accepted file size before Multer starts streaming to
+  // disk. In-memory reservations close the concurrent-upload race on the
+  // single supported application replica.
+  const reservationBytes = MAX_FILE_BYTES;
+  const studentBytes = attachmentBytesForStudent(studentId)
+    + (pendingStudentUploadBytes.get(studentId) || 0);
+  const tenantBytes = attachmentBytesForTenant(organizationId)
+    + (pendingTenantUploadBytes.get(organizationId) || 0);
+  if (studentBytes + reservationBytes > SAAS_STUDENT_UPLOAD_QUOTA_BYTES) {
+    return res.status(413).json({
+      error: "Your attachment storage quota has been reached.",
+      code: "student_storage_quota_exceeded",
+    });
+  }
+  if (tenantBytes + reservationBytes > SAAS_TENANT_UPLOAD_QUOTA_BYTES) {
+    return res.status(413).json({
+      error: "The organization attachment storage quota has been reached.",
+      code: "tenant_storage_quota_exceeded",
+    });
+  }
+
+  try {
+    const stats = fs.statfsSync(DATA_DIR);
+    const availableBytes = Number(stats.bavail) * Number(stats.bsize);
+    if (!Number.isFinite(availableBytes)
+      || availableBytes < SAAS_MIN_FREE_STORAGE_BYTES + reservationBytes) {
+      return res.status(507).json({
+        error: "Attachment storage is temporarily unavailable.",
+        code: "storage_reserve_reached",
+      });
+    }
+  } catch {
+    return res.status(503).json({
+      error: "Attachment storage capacity could not be verified.",
+      code: "storage_capacity_unavailable",
+    });
+  }
+
+  addPendingUpload(pendingStudentUploadBytes, studentId, reservationBytes);
+  addPendingUpload(pendingTenantUploadBytes, organizationId, reservationBytes);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    removePendingUpload(pendingStudentUploadBytes, studentId, reservationBytes);
+    removePendingUpload(pendingTenantUploadBytes, organizationId, reservationBytes);
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  next();
+}
+
 // Multer disk storage — pinning to disk (not memory) avoids holding a
 // second 10 MB buffer in RAM while OCR runs.
 const ecUploadStorage = multer.diskStorage({
@@ -3202,7 +3930,7 @@ app.post("/api/files/extract-text", studentLimiter, requireStudentAuth, async (r
   }
 });
 
-app.post("/api/ec/upload", studentLimiter, requireStudentAuth, (req, res) => {
+app.post("/api/ec/upload", studentLimiter, requireStudentAuth, reserveSaasUploadCapacity, (req, res) => {
   ecUpload.single("file")(req, res, async (mErr) => {
     if (mErr) {
       if (mErr.code === "UNSUPPORTED_MIME") {
@@ -5398,6 +6126,7 @@ app.post("/api/mcp/admissions/query", studentLimiter, requireStudentAuth, (req, 
 // ═══════════════════════════════════════════════════════════
 
 app.get("/api/baselines/status", (_req, res) => {
+  if (WEB_DEPLOYMENT) return res.status(404).json({ error: "Not found." });
   try {
     const gpaCount = db.prepare("SELECT COUNT(*) as c FROM baseline_gpa").get().c;
     const satCount = db.prepare("SELECT COUNT(*) as c FROM baseline_sat").get().c;
@@ -5738,7 +6467,7 @@ function withScorecardMeta(data, meta = {}) {
   };
 }
 
-app.post("/api/colleges/search", scorecardLimiter, async (req, res) => {
+app.post("/api/colleges/search", scorecardLimiter, requireSaasStudentAuth, async (req, res) => {
   try {
     const { name, state, states, minSAT, maxTuition, maxAcceptanceRate, sizePreference, limit, page } = req.body;
     const queryPayload = normalizeScorecardSearchPayload({
@@ -5784,7 +6513,7 @@ app.post("/api/colleges/search", scorecardLimiter, async (req, res) => {
   }
 });
 
-app.get("/api/colleges/:id", scorecardLimiter, async (req, res) => {
+app.get("/api/colleges/:id", scorecardLimiter, requireSaasStudentAuth, async (req, res) => {
   try {
     const unitId = normalizeUnitId(req.params.id);
     if (!unitId || unitId.length > 10) return res.status(400).json({ error: "Valid unit ID required" });
@@ -5837,7 +6566,7 @@ app.get("/api/colleges/:id", scorecardLimiter, async (req, res) => {
   }
 });
 
-app.get("/api/colleges/:id/financial-aid", scorecardLimiter, async (req, res) => {
+app.get("/api/colleges/:id/financial-aid", scorecardLimiter, requireSaasStudentAuth, async (req, res) => {
   try {
     const unitId = normalizeUnitId(req.params.id);
     if (!unitId || unitId.length > 10) return res.status(400).json({ error: "Valid unit ID required" });
@@ -6015,7 +6744,7 @@ app.get("/api/cds/targets", studentLimiter, requireStudentAuth, async (req, res)
 
 // POST /api/cds/parse - OCR/extract an uploaded CDS file, then parse the
 // admissions fields needed by positioning. This does not persist the document.
-app.post("/api/cds/parse", studentLimiter, requireStudentAuth, (req, res) => {
+app.post("/api/cds/parse", studentLimiter, requireStudentAuth, reserveSaasUploadCapacity, (req, res) => {
   ecUpload.single("file")(req, res, async (mErr) => {
     if (mErr) {
       if (mErr.code === "UNSUPPORTED_MIME") {
@@ -6063,7 +6792,7 @@ app.post("/api/cds/parse", studentLimiter, requireStudentAuth, (req, res) => {
   });
 });
 
-app.post("/api/colleges/compare", scorecardLimiter, async (req, res) => {
+app.post("/api/colleges/compare", scorecardLimiter, requireSaasStudentAuth, async (req, res) => {
   try {
     const { unitIds } = req.body;
     if (!Array.isArray(unitIds) || unitIds.length < 2) return res.status(400).json({ error: "Provide at least 2 unit IDs" });
@@ -6170,15 +6899,31 @@ app.get("/api/admissions-intel/ipeds-growth", studentLimiter, requireStudentAuth
 });
 
 app.get("/api/health", (_req, res) => {
-  const crisisCount = stmts.getCrisisCount24h.get();
-  res.json({
-    status: "ok",
-    uptime: process.uptime(),
-    scorecard: !!SCORECARD_API_KEY,
-    crisisLast24h: crisisCount.count,
-    retentionMode: RETENTION_MODE,
-    databases: { operational: "counselor.db", piiVault: "pii-vault.db", vectors: "vectors.db" },
-    timestamp: new Date().toISOString(),
+  res.json({ status: "ok" });
+});
+
+function sqliteReady(database) {
+  return database.prepare("SELECT 1 AS ok").get()?.ok === 1;
+}
+
+app.get("/api/ready", async (_req, res) => {
+  const checks = {
+    operational: false,
+    pii: false,
+    vectors: false,
+    simulation: false,
+  };
+  try { checks.operational = sqliteReady(db); } catch {}
+  try { checks.pii = sqliteReady(piiVault.db); } catch {}
+  try { checks.vectors = sqliteReady(vectorStore.db); } catch {}
+  try {
+    const sidecar = await callSimulationSidecar("/health");
+    checks.simulation = sidecar?.status === "ok";
+  } catch {}
+  const ready = Object.values(checks).every(Boolean);
+  res.status(ready ? 200 : 503).json({
+    status: ready ? "ready" : "not_ready",
+    checks,
   });
 });
 
@@ -6293,6 +7038,13 @@ try {
 // ═══════════════════════════════════════════════════════════
 // SERVE FRONTEND (production static files)
 // ═══════════════════════════════════════════════════════════
+if (WEB_DEPLOYMENT) {
+  app.use(["/admin", "/admin.html"], (req, res, next) => {
+    if (req.method === "GET" || req.method === "HEAD") return res.sendStatus(404);
+    next();
+  });
+}
+
 const publicDir = path.join(__dirname, "public");
 if (fs.existsSync(publicDir)) {
   app.use(express.static(publicDir));
@@ -6310,7 +7062,9 @@ if (fs.existsSync(publicDir)) {
 // GLOBAL ERROR HANDLER
 // ═══════════════════════════════════════════════════════════
 app.use((err, _req, res, _next) => {
-  console.error("[ERROR]", err.message);
+  if (err?.message !== "CORS: Origin not allowed") {
+    console.error("[ERROR]", err.message);
+  }
   res.status(err.status || 500).json({
     error: NODE_ENV === "production" ? "Internal server error" : err.message,
   });
@@ -6320,11 +7074,13 @@ app.use((err, _req, res, _next) => {
 // ═══════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════
-app.listen(PORT, () => {
+startStudentErasureRecoveryWorker();
+
+const httpServer = app.listen(PORT, HOST, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════════╗
 ║  College Counselor Backend v2 (Rules-First Architecture)       ║
-║  Port: ${String(PORT).padEnd(54)}║
+║  Bind: ${`${HOST}:${PORT}`.padEnd(54)}║
 ║  Env:  ${NODE_ENV.padEnd(54)}║
 ║  Scorecard: ${(SCORECARD_API_KEY ? "LIVE" : "OFFLINE (baseline only)").padEnd(49)}║
 ║  Retention: ${RETENTION_MODE.padEnd(49)}║
@@ -6353,15 +7109,54 @@ app.listen(PORT, () => {
 // ═══════════════════════════════════════════════════════════
 // GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════════════════════
-async function shutdown(signal) {
-  console.log(`\n[SHUTDOWN] ${signal} received. Stopping jobs and closing databases...`);
-  stopAllJobs();
-  db.close();
-  piiVault.close();
-  vectorStore.close();
-  console.log("[SHUTDOWN] All databases closed. Exiting.");
-  process.exit(0);
+let shutdownPromise = null;
+
+function drainHttpServer() {
+  return new Promise((resolve, reject) => {
+    httpServer.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+function shutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    console.log(`\n[SHUTDOWN] ${signal} received. Draining HTTP and closing databases...`);
+    const forceExit = setTimeout(() => {
+      console.error(`[SHUTDOWN] Graceful shutdown exceeded ${SHUTDOWN_TIMEOUT_MS}ms; forcing exit.`);
+      httpServer.closeAllConnections?.();
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    forceExit.unref();
+
+    const errors = [];
+    if (erasureRecoveryTimer) {
+      clearInterval(erasureRecoveryTimer);
+      erasureRecoveryTimer = null;
+    }
+    try { stopAllJobs(); } catch (error) { errors.push(error); }
+    try { await drainHttpServer(); } catch (error) { errors.push(error); }
+    for (const [name, database] of [
+      ["operational", db],
+      ["pii", piiVault.db],
+      ["vectors", vectorStore.db],
+    ]) {
+      try { database.close(); }
+      catch (error) {
+        error.message = `${name} database close failed: ${error.message}`;
+        errors.push(error);
+      }
+    }
+
+    clearTimeout(forceExit);
+    for (const error of errors) console.error("[SHUTDOWN]", error.message);
+    console.log(`[SHUTDOWN] Complete${errors.length ? " with errors" : ""}.`);
+    process.exit(errors.length ? 1 : 0);
+  })();
+  return shutdownPromise;
+}
+
+process.on("SIGINT", () => { void shutdown("SIGINT"); });
+process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
