@@ -46,6 +46,7 @@ export function normalizeChatMessages(messages, { clientSystem } = {}) {
   }
 
   let totalChars = 0;
+  let previousRole = null;
   const normalized = messages.map((message) => {
     if (!message || typeof message !== "object") {
       throw new RequestBoundaryError("CHAT_MESSAGE_INVALID", "Each chat message must be an object.");
@@ -56,6 +57,16 @@ export function normalizeChatMessages(messages, { clientSystem } = {}) {
         "Chat message roles are limited to user and assistant.",
       );
     }
+    if (
+      (previousRole === null && message.role !== "user")
+      || previousRole === message.role
+    ) {
+      throw new RequestBoundaryError(
+        "CHAT_ROLE_SEQUENCE_INVALID",
+        "Chat messages must alternate user and assistant roles, starting with user.",
+      );
+    }
+    previousRole = message.role;
     const content = messageText(message.content);
     if (content.includes("\0")) {
       throw new RequestBoundaryError("CHAT_CONTENT_INVALID", "Chat text contains an invalid character.");
@@ -83,6 +94,26 @@ export function normalizeChatMessages(messages, { clientSystem } = {}) {
     );
   }
   return normalized;
+}
+
+export function screenChatMessages(messages, screen) {
+  if (!Array.isArray(messages) || typeof screen !== "function") {
+    throw new TypeError("screenChatMessages requires normalized messages and a screening function.");
+  }
+  const screens = messages.map((message, index) => {
+    const result = screen(message.content) || {};
+    if (result.blocked) {
+      const error = new RequestBoundaryError(
+        "CHAT_INPUT_BLOCKED",
+        result.reason || result.message || "Chat input was blocked by safety policy.",
+      );
+      error.category = result.category || null;
+      error.messageIndex = index;
+      throw error;
+    }
+    return result;
+  });
+  return { screens, finalScreen: screens.at(-1) || { redacted: false } };
 }
 
 export function resolveLoopbackHost(rawHost) {
