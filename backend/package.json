@@ -31,7 +31,7 @@
     "mammoth": "^1.8.0",
     "multer": "^2.2.0",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^5.7.284",
+    "pdfjs-dist": "^6.2.108",
     "tesseract.js": "^5.1.0"
   },
   "devDependencies": {

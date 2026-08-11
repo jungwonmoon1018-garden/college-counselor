@@ -65,6 +65,28 @@ export function validateRequiredConsents(stmts, studentId, operation, _isMinor =
   };
 }
 
+
+export function assertRequiredConsents(stmts, studentId, operation, isMinor = true) {
+  let validation;
+  try {
+    validation = validateRequiredConsents(stmts, studentId, operation, isMinor);
+  } catch (cause) {
+    const error = new Error("Unable to verify required consent.");
+    error.status = 503;
+    error.code = "consent_verification_failed";
+    error.cause = cause;
+    throw error;
+  }
+  if (!validation.allowed) {
+    const error = new Error("Required consent has not been granted.");
+    error.status = 403;
+    error.code = "consent_required";
+    error.missingConsents = validation.missing;
+    throw error;
+  }
+  return validation;
+}
+
 function getRequiredConsentsForOperation(operation) {
   const base = [CONSENT_TYPES.DATA_PROCESSING];
   switch (operation) {

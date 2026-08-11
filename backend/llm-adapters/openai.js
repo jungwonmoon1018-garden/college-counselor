@@ -105,9 +105,9 @@ function translateMessagesToOpenAI({ system, messages }) {
   }
   for (const message of Array.isArray(messages) ? messages : []) {
     if (!message?.role) continue;
-    const role = message.role === 'assistant'
-      ? 'assistant'
-      : message.role === 'system' ? 'system' : 'user';
+    // The separately supplied system prompt is the only trusted instruction
+    // channel. Message-array system roles are untrusted and downgraded.
+    const role = message.role === 'assistant' ? 'assistant' : 'user';
     output.push({ role, content: flattenContentToText(message.content) });
   }
   return output;
