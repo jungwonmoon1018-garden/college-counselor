@@ -83,8 +83,10 @@ function ipv6InCidr(value, base, prefix) {
 }
 
 const BLOCKED_IPV6_CIDRS = Object.freeze([
-  ["2001:db8::", 32],
-  ["2002::", 16],
+  ["2001::", 23], // protocol assignments (including Teredo/benchmarking)
+  ["2001:db8::", 32], // documentation
+  ["2002::", 16], // 6to4 can tunnel an embedded private IPv4 address
+  ["3fff::", 20], // documentation
 ].map(([base, prefix]) => [parseIPv6(base), prefix]));
 
 export function isBlockedAddress(address, family = net.isIP(address)) {
