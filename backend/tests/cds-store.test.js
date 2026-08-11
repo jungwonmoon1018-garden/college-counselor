@@ -121,6 +121,6 @@ test("assertSafeFetchTarget rejects malformed URLs, non-http(s) schemes, and loo
   await assert.rejects(() => assertSafeFetchTarget("file:///etc/passwd"), /non-http/);
   await assert.rejects(() => assertSafeFetchTarget("ftp://internal.example/x"), /non-http/);
   await assert.rejects(() => assertSafeFetchTarget("http://127.0.0.1/admin"), /non-public address/);
-  await assert.rejects(() => assertSafeFetchTarget("http://localhost:3001/api/health"), /non-public address/);
+  await assert.rejects(() => assertSafeFetchTarget("http://localhost:3001/api/health"), /standard HTTP/);
   await assert.rejects(() => assertSafeFetchTarget("not a url"), /malformed/);
 });
