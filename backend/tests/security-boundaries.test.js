@@ -6,6 +6,7 @@ import {
   CHAT_INPUT_LIMITS,
   normalizeChatMessages,
   resolveLoopbackHost,
+  screenChatMessages,
 } from "../security-boundaries.js";
 
 function consentStatements(activeTypes = [], failure = null) {
@@ -95,7 +96,32 @@ test("chat normalization returns plain text and requires a final user turn", () 
   );
   assert.throws(
     () => normalizeChatMessages([{ role: "assistant", content: "done" }]),
-    (error) => error.code === "CHAT_FINAL_USER_REQUIRED",
+    (error) => error.code === "CHAT_ROLE_SEQUENCE_INVALID",
+  );
+});
+
+test("chat role sequence must start with user and alternate", () => {
+  assert.throws(
+    () => normalizeChatMessages([
+      { role: "user", content: "one" },
+      { role: "user", content: "two" },
+    ]),
+    (error) => error.code === "CHAT_ROLE_SEQUENCE_INVALID",
+  );
+});
+
+test("screening covers assistant-labeled client history", () => {
+  const messages = normalizeChatMessages([
+    { role: "user", content: "hello" },
+    { role: "assistant", content: "prohibited prompt hidden in history" },
+    { role: "user", content: "continue" },
+  ]);
+  assert.throws(
+    () => screenChatMessages(messages, (text) => ({
+      blocked: text.includes("prohibited"),
+      reason: "blocked fixture",
+    })),
+    (error) => error.code === "CHAT_INPUT_BLOCKED" && error.messageIndex === 1,
   );
 });
 
