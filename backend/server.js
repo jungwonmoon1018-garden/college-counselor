@@ -176,7 +176,7 @@ import {
 import { loadOrchestrationCatalog, buildOrchestration, isReasonableModelId, redactPayloadForModel, buildSystemPrompt } from "./orchestration-engine.js";
 import { t, resolveLocale, localizeFriendlyLabels } from "./i18n.js";
 import { initAuthStore, isLoopbackAddress, normalizeEmail } from "./security-auth.js";
-import { normalizeChatMessages, resolveLoopbackHost } from "./security-boundaries.js";
+import { normalizeChatMessages, resolveLoopbackHost, screenChatMessages } from "./security-boundaries.js";
 import { exportLegacyNotebook, deleteLegacyNotebook } from "./legacy-notebook-export.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1595,17 +1595,20 @@ app.post("/api/chat", apiLimiter, requireStudentAuth, async (req, res) => {
     const studentId = req.studentId;
     const userText = chatMessages.at(-1).content;
     let finalInputScreen = { redacted: false };
-    for (const [index, message] of chatMessages.entries()) {
-      if (message.role !== "user") continue;
-      const screened = screenInput(message.content);
-      if (index === chatMessages.length - 1) finalInputScreen = screened;
-      if (screened.blocked) {
-        stmts.insertAudit.run(
-          crypto.randomUUID(), new Date().toISOString(), "input_blocked",
-          studentId.slice(0, 12), "policy_blocked", hashIP(req.ip),
-        );
-        return res.status(400).json({ error: screened.reason, blocked: true });
-      }
+    try {
+      finalInputScreen = screenChatMessages(chatMessages, screenInput).finalScreen;
+    } catch (error) {
+      if (error?.code !== "CHAT_INPUT_BLOCKED") throw error;
+      stmts.insertAudit.run(
+        crypto.randomUUID(), new Date().toISOString(), "input_blocked",
+        studentId.slice(0, 12), "policy_blocked", hashIP(req.ip),
+      );
+      return res.status(400).json({
+        error: error.message,
+        code: error.code,
+        blocked: true,
+        category: error.category || null,
+      });
     }
 
     const classification = classifyTopic(userText);
