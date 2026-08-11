@@ -579,7 +579,7 @@ async function fetchText(url, fetchImpl, extractionOptions = {}) {
       "accept": "text/html,application/pdf,image/png,image/jpeg,image/webp,application/xhtml+xml;q=0.9,*/*;q=0.8",
     },
     timeoutMs: 20_000,
-    maxBytes: 10 * 1024 * 1024,
+    maxBytes: 20 * 1024 * 1024,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
