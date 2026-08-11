@@ -3625,9 +3625,8 @@ app.post("/api/ec/candidates/rank", studentLimiter, requireStudentAuth, async (r
             row.friendly = {
               ...row.friendly,
               tier: renderFriendlyTier(row.predictedTier),
-              summary: m.prestigeNote ? `${m.rationale} ${m.prestigeNote}`.trim() : (m.rationale || row.friendly?.summary),
+              summary: m.rationale || row.friendly?.summary,
             };
-            if (m.sources?.length) row.sources = m.sources;
             row.engine = "llm";
           }
           ranked.sort((a, b) => (b.predictedNarrativeFit ?? 0) - (a.predictedNarrativeFit ?? 0));
@@ -3690,9 +3689,7 @@ Return ONLY a JSON array, exactly one object per candidate, no prose, no markdow
     "name": "<exact candidate name from the list>",
     "fit": <number 0..1 — how much it strengthens THIS application>,
     "tier": "tier_1_distinctive|tier_2_strong|tier_3_developing|tier_4_foundational",
-    "rationale": "<1-2 sentences, specific to this student and their story>",
-    "prestigeNote": "<optional one line on real selectivity/prestige if researched>",
-    "sources": ["<url you used>", "..."]
+    "rationale": "<1-2 sentences, specific to this student and their story>"
   }
 ]`;
   const resp = await callLLM({
@@ -3713,8 +3710,7 @@ Return ONLY a JSON array, exactly one object per candidate, no prose, no markdow
       fit: Math.max(0, Math.min(1, Number(it?.fit))),
       tier: RANK_TIERS.includes(it?.tier) ? it.tier : null,
       rationale: String(it?.rationale || "").slice(0, 400),
-      prestigeNote: it?.prestigeNote ? String(it.prestigeNote).slice(0, 300) : null,
-      sources: Array.isArray(it?.sources) ? it.sources.slice(0, 5).map((u) => String(u).slice(0, 400)) : [],
+      sources: [],
     }))
     .filter((x) => x.name && Number.isFinite(x.fit));
 }
@@ -3746,7 +3742,7 @@ Judge holistically: which activities most define a coherent, distinctive story a
 
 Return ONLY a JSON array, one object per activity, no prose:
 [
-  { "name": "<exact activity name>", "lead": <true|false>, "leadScore": <0..1>, "rationale": "<1 sentence why it leads or supports>", "sources": ["<url>"] }
+  { "name": "<exact activity name>", "lead": <true|false>, "leadScore": <0..1>, "rationale": "<1 sentence why it leads or supports>" }
 ]`;
   const resp = await callLLM({
     // Packaged LARGE/reasoning tier for semantic spike selection. Generous
@@ -3765,7 +3761,7 @@ Return ONLY a JSON array, one object per activity, no prose:
       lead: Boolean(it?.lead),
       leadScore: Math.max(0, Math.min(1, Number(it?.leadScore))),
       rationale: String(it?.rationale || "").slice(0, 300),
-      sources: Array.isArray(it?.sources) ? it.sources.slice(0, 4).map((u) => String(u).slice(0, 400)) : [],
+      sources: [],
     }))
     .filter((x) => x.name);
 }
@@ -4444,7 +4440,7 @@ app.get("/api/ec/spike", studentLimiter, requireStudentAuth, async (req, res) =>
             const byName = new Map(llm.map((x) => [x.name.toLowerCase(), x]));
             for (const v of vectors) {
               const m = byName.get(String(v.ecName).toLowerCase());
-              if (m) { v.leadRationale = m.rationale; if (m.sources?.length) v.sources = m.sources; v.leadScore = m.leadScore; }
+              if (m) { v.leadRationale = m.rationale; v.leadScore = m.leadScore; }
             }
             // Leaders = LLM-flagged leads (cap 3), highest leadScore first;
             // top up from composite order if the LLM flagged fewer than 2.
