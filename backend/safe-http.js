@@ -159,7 +159,7 @@ export async function assertPublicHttpUrl(rawUrl, {
     throw new SafeHttpError("url_malformed", "Refusing to fetch a malformed URL.");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new SafeHttpError("scheme_forbidden", "Only http(s) URLs may be fetched.");
+    throw new SafeHttpError("scheme_forbidden", "Refusing to fetch a non-http(s) URL.");
   }
   if (url.username || url.password) {
     throw new SafeHttpError("credentials_forbidden", "URL credentials are not allowed.");
