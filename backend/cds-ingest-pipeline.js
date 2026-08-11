@@ -149,7 +149,7 @@ async function tryDownloadCycle({ slug, name, yearKey, link, force }) {
   const res = await fetchPublicResource(downloadURL, {
     headers: BROWSER_HEADERS,
     timeoutMs: 20_000,
-    maxBytes: 10 * 1024 * 1024,
+    maxBytes: 20 * 1024 * 1024,
   });
   if (!res.ok) throw new Error(`Download failed (${res.status}) for ${name} ${yearKey}`);
   const buf = Buffer.from(await res.arrayBuffer());
