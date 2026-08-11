@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { extractImage, extractPDF, extractPdfOCR, extractText, isSupportedMime } from "./file-extractors.js";
+import { fetchPublicResource } from "./safe-http.js";
 
 export const CDS_REPOSITORY_URL = "https://www.collegetransitions.com/dataverse/common-data-set-repository/";
 export const CDS_REPOSITORY_HOST = "www.collegetransitions.com";
@@ -571,12 +572,14 @@ export function computeCdsQueryCacheKey(targets) {
 }
 
 async function fetchText(url, fetchImpl, extractionOptions = {}) {
-  const resp = await fetchImpl(url, {
+  const request = fetchImpl || fetchPublicResource;
+  const resp = await request(url, {
     headers: {
       "user-agent": "college-counselor-backend/1.0 CDS fetcher",
       "accept": "text/html,application/pdf,image/png,image/jpeg,image/webp,application/xhtml+xml;q=0.9,*/*;q=0.8",
     },
-    redirect: "follow",
+    timeoutMs: 20_000,
+    maxBytes: 10 * 1024 * 1024,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
@@ -611,20 +614,22 @@ async function fetchText(url, fetchImpl, extractionOptions = {}) {
   };
 }
 
-export async function fetchRepositoryIndex({ fetchImpl = fetch } = {}) {
-  const resp = await fetchImpl(CDS_REPOSITORY_URL, {
+export async function fetchRepositoryIndex({ fetchImpl = null } = {}) {
+  const request = fetchImpl || fetchPublicResource;
+  const resp = await request(CDS_REPOSITORY_URL, {
     headers: {
       "user-agent": "college-counselor-backend/1.0 CDS index fetcher",
       "accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
     },
-    redirect: "follow",
+    timeoutMs: 15_000,
+    maxBytes: 2 * 1024 * 1024,
   });
   if (!resp.ok) throw new Error(`CDS repository fetch failed: HTTP ${resp.status}`);
   return await resp.text();
 }
 
 export async function resolveAndParseCdsTargets(targets, {
-  fetchImpl = fetch,
+  fetchImpl = null,
   repositoryHtml = null,
   ocrPdfExtractor = null,
   pdfTextExtractor = extractPDF,
