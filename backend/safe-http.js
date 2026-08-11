@@ -206,13 +206,19 @@ function headerValue(headers, name) {
   return Array.isArray(value) ? value.join(", ") : value == null ? null : String(value);
 }
 
-function requestPinned(target, { headers, timeoutMs, maxBytes }) {
+export function requestPinned(target, { headers, timeoutMs, maxBytes }) {
   return new Promise((resolve, reject) => {
     const client = target.url.protocol === "https:" ? https : http;
     let settled = false;
+    let deadlineTimer = null;
+    const clearDeadline = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    };
     const finishReject = (error) => {
       if (settled) return;
       settled = true;
+      clearDeadline();
       reject(error);
     };
     const request = client.request(target.url, {
@@ -257,6 +263,7 @@ function requestPinned(target, { headers, timeoutMs, maxBytes }) {
       response.on("end", () => {
         if (settled) return;
         settled = true;
+        clearDeadline();
         resolve({
           status: Number(response.statusCode) || 0,
           headers: response.headers,
@@ -265,9 +272,13 @@ function requestPinned(target, { headers, timeoutMs, maxBytes }) {
       });
       response.on("error", finishReject);
     });
-    request.setTimeout(timeoutMs, () => {
-      request.destroy(timeoutError());
-    });
+
+    // request.setTimeout is only an inactivity timer. Keep it as a secondary
+    // guard, but enforce the real wall-clock deadline independently so a
+    // trickle response cannot keep the socket alive forever.
+    deadlineTimer = setTimeout(() => request.destroy(timeoutError()), timeoutMs);
+    deadlineTimer.unref?.();
+    request.setTimeout(timeoutMs, () => request.destroy(timeoutError()));
     request.on("error", (cause) => {
       if (cause?.code === "fetch_timeout") return finishReject(cause);
       finishReject(new SafeHttpError("request_failed", "Public HTTP request failed.", cause));
